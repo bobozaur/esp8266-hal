@@ -38,7 +38,7 @@ macro_rules! impl_timer {
                 T: Into<Hertz>,
             {
                 let timer = unsafe { (&*TIMER::ptr()) };
-                timer.$ctrl.write(|w| {
+                timer.$ctrl().write(|w| {
                     w.rollover()
                         .set_bit()
                         .interrupt_type()
@@ -48,8 +48,8 @@ macro_rules! impl_timer {
                         .timer_enable()
                         .clear_bit()
                 });
-                timer.$alarm.write(|w| unsafe { w.bits(0) });
-                timer.$int.modify(|_, w| w.$clr_mask().set_bit());
+                timer.$alarm().write(|w| unsafe { w.bits(0) });
+                timer.$int().modify(|_, w| w.$clr_mask().set_bit());
 
                 let frequency: Hertz = frequency.into();
                 $TIMER {
@@ -69,17 +69,19 @@ macro_rules! impl_timer {
                 let timeout: Nanoseconds = timeout.into();
 
                 let ticks = timeout.0 / self.ticks_per_ms;
-                timer.$ctrl.modify(|_, w| w.timer_enable().set_bit());
-                timer.$load.write(|w| unsafe { w.bits($load_value(ticks)) });
-                timer.$int.modify(|_, w| w.$clr_mask().set_bit());
+                timer.$ctrl().modify(|_, w| w.timer_enable().set_bit());
+                timer
+                    .$load()
+                    .write(|w| unsafe { w.bits($load_value(ticks)) });
+                timer.$int().modify(|_, w| w.$clr_mask().set_bit());
             }
 
             fn wait(&mut self) -> nb::Result<(), Void> {
                 let timer = unsafe { (&*TIMER::ptr()) };
-                if timer.$ctrl.read().$int().bit_is_clear() {
+                if timer.$ctrl().read().$int().bit_is_clear() {
                     Err(nb::Error::WouldBlock)
                 } else {
-                    timer.$int.modify(|_, w| w.$clr_mask().set_bit());
+                    timer.$int().modify(|_, w| w.$clr_mask().set_bit());
                     Ok(())
                 }
             }
@@ -92,7 +94,7 @@ macro_rules! impl_timer {
 
             fn cancel(&mut self) -> Result<(), Self::Error> {
                 let timer = unsafe { (&*TIMER::ptr()) };
-                timer.$ctrl.modify(|_, w| w.timer_enable().clear_bit());
+                timer.$ctrl().modify(|_, w| w.timer_enable().clear_bit());
                 Ok(())
             }
         }
@@ -129,9 +131,9 @@ impl Timer1 {
         let timer = unsafe { &*TIMER::ptr() };
         let dport = unsafe { &*DPORT::ptr() };
 
-        timer.frc1_ctrl.modify(|_, w| w.interrupt_type().edge());
+        timer.frc1_ctrl().modify(|_, w| w.interrupt_type().edge());
         dport
-            .edge_int_enable
+            .edge_int_enable()
             .modify(|_, w| w.timer1_edge_int_enable().set_bit());
     }
 
@@ -139,9 +141,9 @@ impl Timer1 {
         let timer = unsafe { &*TIMER::ptr() };
         let dport = unsafe { &*DPORT::ptr() };
 
-        timer.frc1_ctrl.modify(|_, w| w.interrupt_type().level());
+        timer.frc1_ctrl().modify(|_, w| w.interrupt_type().level());
         dport
-            .edge_int_enable
+            .edge_int_enable()
             .modify(|_, w| w.timer1_edge_int_enable().clear_bit());
     }
 }

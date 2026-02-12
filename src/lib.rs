@@ -1,8 +1,11 @@
 #![no_std]
+#![cfg_attr(feature = "rt", feature(asm_experimental_arch))]
+#![cfg_attr(feature = "rt", feature(naked_functions))]
+#![cfg_attr(feature = "wifi", feature(raw_ref_op))]
 
 pub use embedded_hal as ehal;
 pub use esp8266 as target;
-pub use esp8266_hal_proc_macros::{interrupt, ram};
+pub use esp8266_hal_proc_macros::{interrupt, main, ram};
 
 #[cfg(feature = "rt")]
 pub use xtensa_lx_rt::{entry, exception};
@@ -22,6 +25,12 @@ pub mod time;
 pub mod timer;
 pub mod uart;
 pub mod watchdog;
+
+pub mod logger;
+
+#[cfg(feature = "wifi")]
+#[deny(unsafe_op_in_unsafe_fn)]
+pub mod wifi;
 
 /// Function handling ESP8266 specific initialization
 /// then calls original Reset function
@@ -52,7 +61,10 @@ pub unsafe extern "C" fn ESP8266Reset() -> ! {
         .set_crystal_frequency(CrystalFrequency::Crystal26MHz);
 
     // Initialize RTC RAM
-    xtensa_lx_rt::zero_bss(&mut _rtc_bss_start, &mut _rtc_bss_end);
+    xtensa_lx_rt::zero_bss(
+        core::ptr::addr_of_mut!(_rtc_bss_start),
+        core::ptr::addr_of_mut!(_rtc_bss_end),
+    );
 
     // continue with default reset handler
     xtensa_lx_rt::Reset();

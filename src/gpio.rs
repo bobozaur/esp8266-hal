@@ -138,13 +138,13 @@ macro_rules! impl_input_output {
 
                 fn set_high(&mut self) -> Result<(), Self::Error> {
                     // NOTE(unsafe) atomic write to a stateless register
-                    unsafe { (*GPIO::ptr()).$outs.write(|w| w.bits(1 << $i)) };
+                    unsafe { (*GPIO::ptr()).$outs().write(|w| w.bits(1 << $i)) };
                     Ok(())
                 }
 
                 fn set_low(&mut self) -> Result<(), Self::Error> {
                     // NOTE(unsafe) atomic write to a stateless register
-                    unsafe { (*GPIO::ptr()).$outc.write(|w| w.bits(1 << $i)) };
+                    unsafe { (*GPIO::ptr()).$outc().write(|w| w.bits(1 << $i)) };
                     Ok(())
                 }
             }
@@ -153,7 +153,7 @@ macro_rules! impl_input_output {
                 type Error = Infallible;
 
                 fn is_high(&self) -> Result<bool, Self::Error> {
-                    let input = unsafe { (*GPIO::ptr()).$in.read().gpio_in_data().bits() };
+                    let input = unsafe { (*GPIO::ptr()).$in().read().gpio_in_data().bits() };
                     Ok((input >> $i) & 1 == 1)
                 }
 
@@ -165,15 +165,15 @@ macro_rules! impl_input_output {
             impl<MODE> $pxi<Input<MODE>> {
                 pub fn set_interrupt_mode(&mut self, mode: InterruptMode) {
                     let gpio = unsafe { &*GPIO::ptr() };
-                    gpio.$pin.modify(|_, w| unsafe { w.$int().bits(mode as u8) });
+                    gpio.$pin().modify(|_, w| unsafe { w.$int().bits(mode as u8) });
                 }
 
                 pub fn clear_interrupt(&mut self) {
-                    unsafe { (*GPIO::ptr()).$int_clear.write(|w| w.bits(1 << $i)) };
+                    unsafe { (*GPIO::ptr()).$int_clear().write(|w| w.bits(1 << $i)) };
                 }
 
                 pub fn interrupt_status(&mut self) -> bool {
-                    let status = unsafe { (*GPIO::ptr()).$int_status.read().bits() };
+                    let status = unsafe { (*GPIO::ptr()).$int_status().read().bits() };
                     status & (1 << $i) > 0
                 }
             }
@@ -182,7 +182,7 @@ macro_rules! impl_input_output {
                 type Error = Infallible;
 
                 fn is_high(&self) -> Result<bool, Self::Error> {
-                    let input = unsafe { (*GPIO::ptr()).$in.read().gpio_in_data().bits() };
+                    let input = unsafe { (*GPIO::ptr()).$in().read().gpio_in_data().bits() };
                     Ok((input >> $i) & 1 == 1)
                 }
 
@@ -193,7 +193,7 @@ macro_rules! impl_input_output {
 
             impl<MODE> StatefulOutputPin for $pxi<Output<MODE>> {
                fn is_set_high(&self) -> Result<bool, Self::Error> {
-                   let input = unsafe { (*GPIO::ptr()).$in.read().gpio_in_data().bits() };
+                   let input = unsafe { (*GPIO::ptr()).$in().read().gpio_in_data().bits() };
                     Ok((input >> $i) & 1 == 1)
                }
                fn is_set_low(&self) -> Result<bool, Self::Error> {
@@ -207,19 +207,19 @@ macro_rules! impl_input_output {
                 unsafe fn configure_gpio(&mut self, mode: u8, enable: bool, pullup: bool, open_drain: bool) {
                     let gpio = &*GPIO::ptr();
                     let iomux = &*IO_MUX::ptr();
-                    iomux.$iomux.modify(|_, w| {
+                    iomux.$iomux().modify(|_, w| {
                         w.function_select_low_bits().bits(mode & 0b11)
                         .function_select_high_bit().bit(mode >> 2 == 1)
                         .pullup().bit(pullup)
                     });
 
                     if enable {
-                        gpio.$en.write(|w| w.bits(0x1 << $i));
+                        gpio.$en().write(|w| w.bits(0x1 << $i));
                     } else {
-                        gpio.$dis.write(|w| w.bits(0x1 << $i));
+                        gpio.$dis().write(|w| w.bits(0x1 << $i));
                     }
 
-                    gpio.$pin.modify(|_, w| w.$driver().bit(open_drain));
+                    gpio.$pin().modify(|_, w| w.$driver().bit(open_drain));
                 }
 
                 /// Change the pin into a specific mode without doing any of the pin configuration
@@ -289,7 +289,7 @@ impl<MODE> InputPin for Gpio16<Input<MODE>> {
     type Error = Infallible;
 
     fn is_high(&self) -> Result<bool, Self::Error> {
-        let input = unsafe { (*RTC::ptr()).rtc_gpio_in_data.read().bits() };
+        let input = unsafe { (*RTC::ptr()).rtc_gpio_in_data().read().bits() };
         Ok(input & 0x1 != 0)
     }
 
@@ -304,7 +304,7 @@ impl<PushPull> OutputPin for Gpio16<Output<PushPull>> {
     fn set_high(&mut self) -> Result<(), Self::Error> {
         unsafe {
             (*RTC::ptr())
-                .rtc_gpio_out
+                .rtc_gpio_out()
                 .modify(|r, w| w.bits(r.bits() | 0x1))
         };
         Ok(())
@@ -313,7 +313,7 @@ impl<PushPull> OutputPin for Gpio16<Output<PushPull>> {
     fn set_low(&mut self) -> Result<(), Self::Error> {
         unsafe {
             (*RTC::ptr())
-                .rtc_gpio_out
+                .rtc_gpio_out()
                 .modify(|r, w| w.bits(r.bits() & !0x1))
         };
         Ok(())
@@ -322,7 +322,7 @@ impl<PushPull> OutputPin for Gpio16<Output<PushPull>> {
 
 impl<PushPull> StatefulOutputPin for Gpio16<Output<PushPull>> {
     fn is_set_high(&self) -> Result<bool, Self::Error> {
-        let input = unsafe { (*RTC::ptr()).rtc_gpio_out.read().bits() };
+        let input = unsafe { (*RTC::ptr()).rtc_gpio_out().read().bits() };
         Ok(input & 0x1 != 0)
     }
 
@@ -338,7 +338,7 @@ impl<MODE> Gpio16<MODE> {
         let rtc = &(*RTC::ptr());
 
         // mux configuration for XPD_DCDC and rtc_gpio0 connection
-        rtc.pad_xpd_dcdc_conf.modify(|r, w| {
+        rtc.pad_xpd_dcdc_conf().modify(|r, w| {
             if pulldown {
                 w.bits(r.bits() & 0xffffffbc)
             } else {
@@ -347,10 +347,10 @@ impl<MODE> Gpio16<MODE> {
         });
 
         // mux configuration for out enable
-        rtc.rtc_gpio_conf.modify(|r, w| w.bits(r.bits() & !0x1));
+        rtc.rtc_gpio_conf().modify(|r, w| w.bits(r.bits() & !0x1));
 
         // output enable/disable
-        rtc.rtc_gpio_enable.modify(|r, w| {
+        rtc.rtc_gpio_enable().modify(|r, w| {
             if output {
                 w.bits(r.bits() | 0x1)
             } else {

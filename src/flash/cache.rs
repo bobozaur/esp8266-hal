@@ -9,14 +9,14 @@ pub(crate) fn cache_enable(spi0: &mut SPI0, mb: u8) {
     let dport = unsafe { &*DPORT::ptr() };
     let offset = mb % 2;
     let block = mb / 2;
-    spi0.spi_ctrl.modify(|_, w| w.enable_ahb().set_bit());
+    spi0.spi_ctrl().modify(|_, w| w.enable_ahb().set_bit());
 
     let offset_bits = match offset {
         0 => 0,
         1 => 2,
         _ => 1,
     };
-    dport.spi_cache.modify(|_, w| unsafe {
+    dport.spi_cache().modify(|_, w| unsafe {
         w.offset()
             .bits(offset_bits)
             .block()
@@ -24,33 +24,37 @@ pub(crate) fn cache_enable(spi0: &mut SPI0, mb: u8) {
             .target()
             .clear_bit()
     });
-    dport.spi_cache_target.modify(|_, w| w.target1().set_bit());
+    dport
+        .spi_cache_target()
+        .modify(|_, w| w.target1().set_bit());
 
-    while dport.spi_cache.read().cache_enable().bit_is_clear() {
+    while dport.spi_cache().read().cache_enable().bit_is_clear() {
         // no idea why the sdk sets this in a loop
-        dport.spi_cache.modify(|_, w| w.cache_enable().set_bit());
+        dport.spi_cache().modify(|_, w| w.cache_enable().set_bit());
     }
 }
 
 #[allow(dead_code)]
 pub(crate) fn cache_disable(spi0: &mut SPI0) {
     let dport = unsafe { &*DPORT::ptr() };
-    while dport.spi_cache.read().cache_enable().bit_is_set() {
+    while dport.spi_cache().read().cache_enable().bit_is_set() {
         // no idea why the sdk clears this in a loop
-        dport.spi_cache.modify(|_, w| w.cache_enable().clear_bit());
+        dport
+            .spi_cache()
+            .modify(|_, w| w.cache_enable().clear_bit());
     }
-    spi0.spi_ctrl.modify(|_, w| w.enable_ahb().clear_bit());
+    spi0.spi_ctrl().modify(|_, w| w.enable_ahb().clear_bit());
     dport
-        .spi_cache
+        .spi_cache()
         .modify(|_, w| w.cache_flush_start().clear_bit());
     dport
-        .spi_cache
+        .spi_cache()
         .modify(|_, w| w.cache_flush_start().set_bit());
-    while dport.spi_cache.read().cache_empty().bit_is_clear() {
+    while dport.spi_cache().read().cache_empty().bit_is_clear() {
         // noop
     }
     dport
-        .spi_cache
+        .spi_cache()
         .modify(|_, w| w.cache_flush_start().clear_bit());
 }
 
@@ -64,13 +68,15 @@ impl<'a> CachePauseGuard<'a> {
     /// Note that all code called between this creating and dropping this needs to be in iram
     pub fn new(spi: &'a mut SPI0) -> Self {
         let dport = unsafe { &*DPORT::ptr() };
-        dport.spi_cache.modify(|_, w| w.cache_enable().clear_bit());
+        dport
+            .spi_cache()
+            .modify(|_, w| w.cache_enable().clear_bit());
 
-        while spi.spi_ext2.read().bits() != 0 {
+        while spi.spi_ext2().read().bits() != 0 {
             // noop
         }
 
-        spi.spi_ctrl.modify(|_, w| w.enable_ahb().clear_bit());
+        spi.spi_ctrl().modify(|_, w| w.enable_ahb().clear_bit());
 
         CachePauseGuard { spi }
     }
@@ -80,8 +86,8 @@ impl Drop for CachePauseGuard<'_> {
     #[ram]
     fn drop(&mut self) {
         let dport = unsafe { &*DPORT::ptr() };
-        self.spi.spi_ctrl.modify(|_, w| w.enable_ahb().set_bit());
-        dport.spi_cache.modify(|_, w| w.cache_enable().set_bit());
+        self.spi.spi_ctrl().modify(|_, w| w.enable_ahb().set_bit());
+        dport.spi_cache().modify(|_, w| w.cache_enable().set_bit());
     }
 }
 

@@ -9,7 +9,7 @@ use xtensa_lx::mutex::{CriticalSectionMutex, Mutex};
 
 static LED: CriticalSectionMutex<Option<Gpio2<Output<PushPull>>>> = CriticalSectionMutex::new(None);
 
-#[entry]
+#[esp8266_hal::main]
 fn main() -> ! {
     let dp = Peripherals::take().unwrap();
     let pins = dp.GPIO.split();

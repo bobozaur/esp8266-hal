@@ -33,7 +33,7 @@ pub struct RtcControl {
 impl RtcControl {
     /// write to internal I2C PLL bus
     fn write_pll_i2c(&mut self, address: u8, data: u8) {
-        self.rtc_control.pll.write(|w| unsafe {
+        self.rtc_control.pll().write(|w| unsafe {
             w.block()
                 .bits(I2C_BLOCK)
                 .addr()
@@ -44,7 +44,7 @@ impl RtcControl {
                 .set_bit()
         });
 
-        while self.rtc_control.pll.read().busy().bit_is_set() {}
+        while self.rtc_control.pll().read().busy().bit_is_set() {}
     }
 
     /// Configure the internal PLL for common crystal frequencies

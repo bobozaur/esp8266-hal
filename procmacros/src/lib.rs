@@ -1,10 +1,6 @@
-//! Internal implementation details of esp8266-hal`.
+//! Internal implementation details of `esp8266-hal`.
 //!
 //! Do not use this crate directly.
-//!
-//! # TODO:
-//! [ ] Checking of all called functions and data are in ram
-//! [ ] Automatic checking of 0 init and then use .bss segment
 
 #![deny(warnings)]
 #![allow(unused_braces)]
@@ -19,8 +15,8 @@ use quote::quote;
 use std::collections::HashSet;
 use std::iter;
 use syn::{
-    parse, parse_macro_input, spanned::Spanned, AttrStyle, Attribute, AttributeArgs, FnArg, Ident,
-    Item, ItemFn, ItemStatic, Meta::Path, ReturnType, Stmt, Type, Visibility,
+    parse, parse::Parser, spanned::Spanned, AttrStyle, Attribute, FnArg, Ident, Item, ItemFn,
+    ItemStatic, Meta, ReturnType, StaticMutability, Stmt, Type, Visibility,
 };
 
 // TODO:
@@ -46,10 +42,15 @@ struct RamArgs {
 ///
 /// The uninitialized option will skip initialization of the memory
 /// (e.g. to persist it across resets or deep sleep mode for the RTC RAM)
-
 #[proc_macro_attribute]
 pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
-    let attr_args = parse_macro_input!(args as AttributeArgs);
+    let args: proc_macro2::TokenStream = args.into();
+    let attr_args = match darling::ast::NestedMeta::parse_meta_list(args) {
+        Ok(v) => v,
+        Err(e) => {
+            return TokenStream::from(darling::Error::from(e).write_errors());
+        }
+    };
 
     let RamArgs {
         rtc,
@@ -76,19 +77,13 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
         } else {
             ".rtc.data"
         }
+    } else if uninitialized {
+        ".noinit"
     } else {
-        if uninitialized {
-            ".noinit"
-        } else {
-            ".data"
-        }
+        ".data"
     };
 
-    let section_name_text = if rtc {
-        ".rtc.text"
-    } else {
-        ".rwtext"
-    };
+    let section_name_text = if rtc { ".rtc.text" } else { ".rwtext" };
 
     let item: syn::Item = syn::parse(input).expect("failed to parse input");
 
@@ -140,7 +135,17 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
 pub fn interrupt(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut f: ItemFn = syn::parse(input).expect("`#[interrupt]` must be applied to a function");
 
-    let attr_args = parse_macro_input!(args as AttributeArgs);
+    let args2: proc_macro2::TokenStream = args.into();
+    let attr_args: Vec<Meta> = if args2.is_empty() {
+        Vec::new()
+    } else {
+        match syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated
+            .parse2(args2.clone())
+        {
+            Ok(p) => p.into_iter().collect(),
+            Err(e) => return e.to_compile_error().into(),
+        }
+    };
 
     if attr_args.len() > 1 {
         Span::call_site()
@@ -153,7 +158,7 @@ pub fn interrupt(args: TokenStream, input: TokenStream) -> TokenStream {
 
     if attr_args.len() == 1 {
         match &attr_args[0] {
-            syn::NestedMeta::Meta(Path(x)) => {
+            Meta::Path(x) => {
                 ident_s = x.get_ident().unwrap();
             }
             _ => {
@@ -279,10 +284,10 @@ fn extract_static_muts(
     let mut seen = HashSet::new();
     let mut statics = vec![];
     let mut stmts = vec![];
-    while let Some(stmt) = istmts.next() {
+    for stmt in istmts.by_ref() {
         match stmt {
             Stmt::Item(Item::Static(var)) => {
-                if var.mutability.is_some() {
+                if var.mutability != StaticMutability::None {
                     if seen.contains(&var.ident) {
                         return Err(parse::Error::new(
                             var.ident.span(),
@@ -342,7 +347,7 @@ fn check_attr_whitelist(attrs: &[Attribute], caller: WhiteListCaller) -> Result<
 
     'o: for attr in attrs {
         for val in whitelist {
-            if eq(&attr, &val) {
+            if eq(attr, val) {
                 continue 'o;
             }
         }
@@ -353,7 +358,7 @@ fn check_attr_whitelist(attrs: &[Attribute], caller: WhiteListCaller) -> Result<
             }
         };
 
-        return Err(parse::Error::new(attr.span(), &err_str)
+        return Err(parse::Error::new(attr.span(), err_str)
             .to_compile_error()
             .into());
     }
@@ -363,5 +368,190 @@ fn check_attr_whitelist(attrs: &[Attribute], caller: WhiteListCaller) -> Result<
 
 /// Returns `true` if `attr.path` matches `name`
 fn eq(attr: &Attribute, name: &str) -> bool {
-    attr.style == AttrStyle::Outer && attr.path.is_ident(name)
+    attr.style == AttrStyle::Outer && attr.path().is_ident(name)
+}
+
+/// Unified entry point attribute for ESP8266 applications.
+///
+/// # Sync (bare-metal) usage
+///
+/// Replaces `#[entry]` from `xtensa-lx-rt`. The function must return `-> !`:
+///
+/// ```rust,no_run
+/// #[esp8266_hal::main]
+/// fn main() -> ! {
+///     loop { /* ... */ }
+/// }
+/// ```
+///
+/// # Async (WiFi / embassy) usage
+///
+/// Creates an embassy executor and spawns the user's async function as a task.
+/// The optional `Spawner` parameter lets you spawn additional tasks:
+///
+/// ```rust,no_run
+/// #[esp8266_hal::main]
+/// async fn main(spawner: embassy_executor::Spawner) {
+///     // your async application code
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn main(args: TokenStream, input: TokenStream) -> TokenStream {
+    if !args.is_empty() {
+        return parse::Error::new(
+            proc_macro2::Span::call_site(),
+            "`#[main]` attribute takes no arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let f: ItemFn = match syn::parse(input) {
+        Ok(f) => f,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
+    if f.sig.ident != "main" {
+        return parse::Error::new(
+            f.sig.ident.span(),
+            "`#[main]` must be applied to a function named `main`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if f.sig.asyncness.is_some() {
+        main_async(f)
+    } else {
+        main_sync(f)
+    }
+}
+
+/// Sync entry point — equivalent to `#[entry]` from xtensa-lx-rt.
+///
+/// Generates `#[export_name = "main"] pub unsafe extern "C" fn …() -> !`.
+fn main_sync(f: ItemFn) -> TokenStream {
+    // Must be `fn() -> !`
+    let valid_signature = f.sig.constness.is_none()
+        && f.sig.abi.is_none()
+        && f.sig.inputs.is_empty()
+        && f.sig.generics.params.is_empty()
+        && f.sig.generics.where_clause.is_none()
+        && f.sig.variadic.is_none()
+        && match f.sig.output {
+            ReturnType::Type(_, ref ty) => matches!(**ty, Type::Never(_)),
+            _ => false,
+        };
+
+    if !valid_signature {
+        return parse::Error::new(
+            f.span(),
+            "sync `#[main]` function must have signature `[unsafe] fn() -> !`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let attrs = &f.attrs;
+    let body = &f.block;
+    let unsafety = &f.sig.unsafety;
+
+    let output = quote! {
+        #(#attrs)*
+        #[export_name = "main"]
+        pub #unsafety fn __esp8266_hal_main() -> ! {
+            #body
+        }
+    };
+
+    output.into()
+}
+
+/// Async entry point — embassy executor + task setup.
+fn main_async(f: ItemFn) -> TokenStream {
+    // Validate return type: must be () or -> !
+    match &f.sig.output {
+        ReturnType::Default => {} // () — fine
+        ReturnType::Type(_, ty) => match **ty {
+            Type::Never(..) => {} // -> ! — fine
+            _ => {
+                return parse::Error::new(
+                    f.sig.output.span(),
+                    "async `#[main]` function must return `()` or `-> !`",
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+    }
+
+    // Validate parameter count: 0 or 1
+    let has_spawner = match f.sig.inputs.len() {
+        0 => false,
+        1 => true,
+        _ => {
+            return parse::Error::new(
+                f.sig.inputs.span(),
+                "async `#[main]` function must take zero or one parameter (Spawner)",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let body = &f.block;
+    let attrs = &f.attrs;
+
+    // Build the task function and entry point. The task always takes a Spawner
+    // parameter (required by #[embassy_executor::task] when we pass it), and
+    // the entry point always passes the spawner from executor.run().
+    let (task_params, spawn_args) = if has_spawner {
+        let param = &f.sig.inputs[0];
+        (quote! { #param }, quote! { spawner })
+    } else {
+        (
+            quote! { _spawner: ::embassy_executor::Spawner },
+            quote! { spawner },
+        )
+    };
+
+    let output = quote! {
+        #[no_mangle]
+        pub extern "C" fn main() -> ! {
+            ::esp8266_hal::logger::trace_byte(b'a');
+            // Initialize the Rust heap (backed by esp-alloc).
+            ::esp8266_hal::wifi::compat::memory::init();
+            ::esp8266_hal::logger::trace_byte(b'b');
+
+            // Initialize newlib's _global_impure_ptr so C library functions
+            // (calloc, printf, etc.) used by WiFi blob don't crash.
+            ::esp8266_hal::wifi::compat::entry::init_newlib_reent();
+            ::esp8266_hal::logger::trace_byte(b'c');
+
+            unsafe { ::esp8266_hal::wifi::compat::entry::run_sdk_main_task(__esp8266_hal_executor_task) }
+        }
+
+        unsafe extern "C" fn __esp8266_hal_executor_task(_param: *mut ::core::ffi::c_void) {
+            ::esp8266_hal::logger::write_byte(b'j');
+            ::esp8266_hal::println!("uiT entry");
+            ::esp8266_hal::logger::write_byte(b'k');
+            ::esp8266_hal::wifi::compat::memory::reclaim_boot_stack_reservation();
+            static __EXECUTOR: ::static_cell::StaticCell<::esp8266_hal::wifi::executor::Executor> =
+                ::static_cell::StaticCell::new();
+            let executor = __EXECUTOR.init(::esp8266_hal::wifi::executor::Executor::new());
+            ::esp8266_hal::logger::trace_byte(b'd');
+            executor.run(|spawner| {
+                ::esp8266_hal::logger::trace_byte(b'e');
+                spawner.must_spawn(__esp8266_hal_main_task(#spawn_args));
+            })
+        }
+
+        #(#attrs)*
+        #[::embassy_executor::task]
+        async fn __esp8266_hal_main_task(#task_params) {
+            #body
+        }
+    };
+
+    output.into()
 }

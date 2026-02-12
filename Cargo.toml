@@ -1,43 +1,120 @@
-[package]
-name        = "esp8266-hal"
-version     = "0.5.1"
-authors     = ["Jesse Braham <jesse@beta7.io>", "Robin Appelman <robin@icewind.nl>"]
-edition     = "2021"
-description = "HAL for ESP8266 microcontrollers"
-repository  = "https://github.com/esp-rs/esp8266-hal"
-license     = "MIT OR Apache-2.0"
+[workspace]
+members = [".", "esp8266", "procmacros", "esp8266-wifi-sys"]
+resolver = "2"
 
-keywords   = ["embedded", "embedded-hal", "esp", "esp8266", "no-std"]
+[package]
+name = "esp8266-hal"
+version = "0.5.1"
+authors = ["Jesse Braham <jesse@beta7.io>", "Robin Appelman <robin@icewind.nl>"]
+edition = "2021"
+description = "HAL for ESP8266 microcontrollers"
+repository = "https://github.com/esp-rs/esp8266-hal"
+license = "MIT OR Apache-2.0"
+
+keywords = ["embedded", "embedded-hal", "esp", "esp8266", "no-std"]
 categories = ["embedded", "hardware-support", "no-std"]
 
 [dependencies]
 embedded-hal = { version = "0.2", features = ["unproven"] }
-esp8266      = { version = "0.6", path = "./esp8266" }
-nb           = "1.0"
-paste        = { version = "1.0", optional = true }
-void         = { version = "1.0", default-features = false }
-xtensa-lx    = { version = "0.7", features = ["esp8266"] }
+esp8266 = { version = "0.7", path = "./esp8266" }
+nb = "1.0"
+paste = { version = "1.0", optional = true }
+void = { version = "1.0", default-features = false }
+xtensa-lx = { version = "0.8", features = ["esp8266"] }
 xtensa-lx-rt = { version = "0.12", features = ["esp8266"], optional = true }
 
-[dependencies.esp8266-hal-proc-macros]
-path    = "procmacros"
-version = "=0.1"
+esp8266-hal-proc-macros = { path = "procmacros", version = "=0.1" }
+
+# WiFi dependencies (optional, enabled by `wifi` feature)
+esp8266-wifi-sys = { path = "esp8266-wifi-sys", optional = true }
+portable-atomic = { version = "1", default-features = false, features = [
+  "unsafe-assume-single-core",
+], optional = true }
+heapless = { version = "0.8", optional = true }
+esp-alloc = { version = "=0.4.0", optional = true }
+bitflags = { version = "2", optional = true }
+log = { version = "0.4", optional = true }
+smoltcp = { version = "0.12", default-features = false, features = [
+  "medium-ethernet",
+  "proto-ipv4",
+  "socket-tcp",
+  "socket-udp",
+  "socket-dhcpv4",
+], optional = true }
+embassy-executor = { version = "=0.6.3", default-features = false, features = ["task-arena-size-1024"], optional = true }
+embassy-time = { version = "=0.3.2", default-features = false, features = [
+  "tick-hz-1_000_000",
+  "generic-queue-8",
+], optional = true }
+embassy-time-driver = { version = "=0.1.0", default-features = false, optional = true }
+embassy-time-queue-driver = { version = "=0.1.0", default-features = false, optional = true }
+embassy-sync = { version = "=0.6.2", default-features = false, optional = true }
+critical-section = { version = "1.2", features = [
+  "restore-state-u32",
+], optional = true }
+embassy-net-driver-channel = { version = "=0.3.0", optional = true }
+embassy-futures = { version = "=0.1.1", optional = true }
+static_cell = { version = "2", optional = true }
 
 [dev-dependencies]
-panic-halt = "0.2"
+panic-halt = "1.0"
+embassy-net = { version = "=0.5.0", default-features = false, features = [
+  "proto-ipv4",
+  "medium-ethernet",
+  "tcp",
+  "udp",
+  "dhcpv4",
+] }
+embedded-io-async = "0.6"
+embassy-futures = "0.1"
+
+[[example]]
+name = "tcp_client"
+required-features = ["wifi-embassy-net", "wifi-sta"]
+
+[[example]]
+name = "tcp_server"
+required-features = ["wifi-embassy-net", "wifi-sta"]
 
 [features]
-default   = ["interrupt", "rt"]
+default = ["interrupt", "rt"]
 interrupt = ["paste"]
-rt        = ["xtensa-lx-rt"]
+rt = ["xtensa-lx-rt"]
+wifi = [
+  "dep:esp8266-wifi-sys",
+  "dep:portable-atomic",
+  "dep:heapless",
+  "dep:esp-alloc",
+  "dep:bitflags",
+  "dep:log",
+  "dep:smoltcp",
+  "dep:embassy-executor",
+  "dep:embassy-time",
+  "dep:embassy-time-driver",
+  "dep:embassy-time-queue-driver",
+  "dep:embassy-sync",
+  "dep:critical-section",
+  "dep:static_cell",
+]
+wifi-sta = ["wifi"]
+wifi-ap = ["wifi"]
+wifi-embassy-net = [
+  "wifi",
+  "dep:embassy-net-driver-channel",
+  "dep:embassy-futures",
+]
+wifi-wps = ["wifi"]
+wifi-smartconfig = ["wifi", "esp8266-wifi-sys/smartconfig"]
+wifi-promiscuous = ["wifi"]
+wifi-esp-now = ["wifi", "esp8266-wifi-sys/esp-now"]
 
 # Place program completely in RAM (needed when e.g. using only ROM bootloader,
 # or for debugging).
 all_in_ram = []
 
 [profile.dev]
-lto       = true
-opt-level = 1
+lto = true
+opt-level = "s"
 
 # Workaround for linker errors when using lto with the dev profile:
 # https://github.com/rust-lang/compiler-builtins/issues/347
@@ -46,3 +123,8 @@ overflow-checks = false
 
 [profile.release]
 lto = true
+# codegen-units > 1 works around an Xtensa LLVM register-spill bug that
+# triggers with LTO + codegen-units=1 on the esp-rs 1.80.0.0 toolchain.
+# The .bss overhead from reduced dead-code elimination is acceptable given
+# the 80 KB DRAM budget.
+codegen-units = 8

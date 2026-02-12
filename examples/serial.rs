@@ -6,7 +6,7 @@ use esp8266_hal::prelude::*;
 use esp8266_hal::target::Peripherals;
 use panic_halt as _;
 
-#[entry]
+#[esp8266_hal::main]
 fn main() -> ! {
     let dp = Peripherals::take().unwrap();
     let pins = dp.GPIO.split();

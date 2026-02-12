@@ -1,3 +1,6 @@
+#[cfg(feature = "wifi")]
+use core::arch::asm;
+
 use xtensa_lx_rt::exception::Context;
 use xtensa_lx_rt::interrupt;
 
@@ -43,6 +46,7 @@ extern "Rust" {
     fn __timer1_hal_interrupt(context: &Context);
 }
 
+#[cfg(not(feature = "wifi"))]
 #[interrupt]
 #[ram]
 fn interrupt_trampoline(level: u32, frame: Context) {
@@ -84,6 +88,58 @@ fn interrupt_trampoline(level: u32, frame: Context) {
             __timer1_interrupt(&frame);
             __timer1_hal_interrupt(&frame);
         };
+    }
+}
+
+#[cfg(feature = "wifi")]
+#[naked]
+#[no_mangle]
+#[link_section = ".rwtext"]
+unsafe extern "C" fn __level_1_interrupt() {
+    asm!(
+        "movi a4, 0x23",
+        "wsr.ps a4",
+        "rsync",
+        "movi a4, _chip_interrupt_tmp",
+        "s32i a1, a4, 0",
+        "mov a1, a4",
+        "call0 __level_1_interrupt_body",
+        "movi a4, g_level1_restore_sp",
+        "l32i a5, a4, 0",
+        "beqz a5, 1f",
+        "movi a6, 0",
+        "s32i a6, a4, 0",
+        "j 2f",
+        "1:",
+        "movi a4, _chip_interrupt_tmp",
+        "l32i a5, a4, 0",
+        "2:",
+        "mov a2, a5",
+        "call0 commit_current_task_post_restore_stack_top",
+        "mov a1, a2",
+        "call0 restore_context",
+        "l32i a0, a1, 0x04",
+        "wsr.ps a0",
+        "l32i a0, a1, 0x00",
+        "wsr.epc1 a0",
+        "l32i a0, a1, 0x08",
+        "l32i a1, a1, 0x0c",
+        "rsync",
+        ".byte 0x00, 0x30, 0x00",
+        options(noreturn)
+    );
+}
+
+#[cfg(feature = "wifi")]
+#[no_mangle]
+#[ram]
+unsafe extern "C" fn __level_1_interrupt_body(_level: u32, frame: &mut Context) {
+    unsafe {
+        let frame_ptr = frame as *mut Context as *mut u8;
+
+        crate::wifi::compat::task::note_interrupt_frame(frame_ptr);
+        crate::wifi::compat::port::isr_dispatch();
+        crate::wifi::compat::port::apply_pending_context_switch(frame_ptr);
     }
 }
 

@@ -1,0 +1,25 @@
+[package]
+name = "esp8266-wifi-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Raw FFI bindings to the ESP8266 RTOS SDK WiFi driver"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/example/esp8266-wifi"
+categories = ["embedded", "hardware-support", "no-std"]
+keywords = ["esp8266", "wifi", "ffi", "no-std", "embedded"]
+links = "esp8266_wifi"
+
+[lib]
+name = "esp8266_wifi_sys"
+
+[dependencies]
+
+[build-dependencies]
+bindgen = { version = "0.70", default-features = false, features = ["runtime"] }
+cc = "1"
+embuild = { version = "0.30", features = ["git"] }
+
+[features]
+default = []
+smartconfig = []
+esp-now = []

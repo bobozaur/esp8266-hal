@@ -1,4 +1,4 @@
-  
+
 [package]
 authors = ["Robin Appelman <robin@icewind.nl>", "Arjan Mels <arjan@mels.email>"]
 categories = ["embedded", "no-std"]
@@ -8,14 +8,13 @@ license = "MIT OR Apache-2.0"
 name = "esp8266-hal-proc-macros"
 repository = "https://github.com/esp-rs/esp8266-hal"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 
 [lib]
 proc-macro = true
 
 [dependencies]
-quote = "1.0"
-proc-macro2 = "1.0"
-darling = "0.13"
-syn = {version = "1.0", features = ["extra-traits", "full"]}
-
+quote = "1"
+proc-macro2 = "1"
+darling = "0.20"
+syn = { version = "2", features = ["extra-traits", "full"] }

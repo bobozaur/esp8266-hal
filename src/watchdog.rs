@@ -178,7 +178,7 @@ pub struct Watchdog {
 impl WatchdogTrait for Watchdog {
     fn feed(&mut self) {
         self.watchdog
-            .wdt_rst
+            .wdt_rst()
             .write(|w| unsafe { w.bits(WATCHDOG_RESET_MAGIC) })
     }
 }
@@ -206,7 +206,7 @@ impl WatchdogEnable for Watchdog {
             return;
         }
 
-        self.watchdog.wdt_ctl.write(|w| {
+        self.watchdog.wdt_ctl().write(|w| {
             w.unknown_3()
                 .set_bit()
                 .unknown_4()
@@ -216,27 +216,29 @@ impl WatchdogEnable for Watchdog {
         });
 
         self.watchdog
-            .wdt_op
+            .wdt_op()
             .write(|w| unsafe { w.bits(period0 as u8 as u32) });
 
         if period1 == StageTimeout::StageDisabled {
             self.watchdog
-                .wdt_ctl
+                .wdt_ctl()
                 .modify(|_, w| w.stage_1_disable().set_bit());
         } else {
             self.watchdog
-                .wdt_op_nd
+                .wdt_op_nd()
                 .write(|w| unsafe { w.bits(period1 as u8 as u32) });
         }
 
         self.feed();
 
-        self.watchdog.wdt_ctl.modify(|_, w| w.enable().set_bit());
+        self.watchdog.wdt_ctl().modify(|_, w| w.enable().set_bit());
     }
 }
 
 impl WatchdogDisable for Watchdog {
     fn disable(&mut self) {
-        self.watchdog.wdt_ctl.modify(|_, w| w.enable().clear_bit());
+        self.watchdog
+            .wdt_ctl()
+            .modify(|_, w| w.enable().clear_bit());
     }
 }

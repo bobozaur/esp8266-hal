@@ -61,9 +61,9 @@ impl SPI1Master {
             mosi,
         };
 
-        unsafe { spi.spi.spi_ctrl.write_with_zero(|w| w) };
+        unsafe { spi.spi.spi_ctrl().write_with_zero(|w| w) };
         spi.set_frequency(frequency);
-        spi.spi.spi_user.write(|w| {
+        spi.spi.spi_user().write(|w| {
             w.spi_usr_mosi()
                 .set_bit()
                 .spi_duplex()
@@ -72,7 +72,7 @@ impl SPI1Master {
                 .set_bit()
         });
         spi.set_data_bits(8);
-        unsafe { spi.spi.spi_ctrl1.write_with_zero(|w| w) };
+        unsafe { spi.spi.spi_ctrl1().write_with_zero(|w| w) };
 
         spi
     }
@@ -86,19 +86,23 @@ impl SPI1Master {
         match mode.phase {
             Phase::CaptureOnFirstTransition => self
                 .spi
-                .spi_user
+                .spi_user()
                 .modify(|_, w| w.spi_ck_o_edge().clear_bit()),
-            Phase::CaptureOnSecondTransition => {
-                self.spi.spi_user.modify(|_, w| w.spi_ck_o_edge().set_bit())
-            }
+            Phase::CaptureOnSecondTransition => self
+                .spi
+                .spi_user()
+                .modify(|_, w| w.spi_ck_o_edge().set_bit()),
         }
 
         match mode.polarity {
             Polarity::IdleLow => self
                 .spi
-                .spi_pin
+                .spi_pin()
                 .modify(|_, w| w.spi_idle_edge().clear_bit()),
-            Polarity::IdleHigh => self.spi.spi_pin.modify(|_, w| w.spi_idle_edge().set_bit()),
+            Polarity::IdleHigh => self
+                .spi
+                .spi_pin()
+                .modify(|_, w| w.spi_idle_edge().set_bit()),
         }
     }
 
@@ -106,19 +110,19 @@ impl SPI1Master {
         let iomux = unsafe { &*IO_MUX::ptr() };
         if frequency == SpiClock::Spi80MHz {
             iomux
-                .io_mux_conf
+                .io_mux_conf()
                 .modify(|_, w| w.spi1_clk_equ_sys_clk().set_bit());
             unsafe {
                 self.spi
-                    .spi_clock
+                    .spi_clock()
                     .write_with_zero(|w| w.spi_clk_equ_sysclk().set_bit())
             };
         } else {
             iomux
-                .io_mux_conf
+                .io_mux_conf()
                 .modify(|_, w| w.spi1_clk_equ_sys_clk().clear_bit());
             unsafe {
-                self.spi.spi_clock.write_with_zero(|w| {
+                self.spi.spi_clock().write_with_zero(|w| {
                     w.spi_clkcnt_n()
                         .bits(frequency as u8 - 1)
                         .spi_clkcnt_h()
@@ -131,7 +135,7 @@ impl SPI1Master {
     }
 
     fn set_data_bits(&mut self, bits: u16) {
-        self.spi.spi_user1.write(|w| unsafe {
+        self.spi.spi_user1().write(|w| unsafe {
             w.reg_usr_mosi_bitlen()
                 .bits(bits - 1)
                 .reg_usr_miso_bitlen()
@@ -144,22 +148,22 @@ impl FullDuplex<u8> for SPI1Master {
     type Error = Void;
 
     fn read(&mut self) -> nb::Result<u8, Self::Error> {
-        if self.spi.spi_cmd.read().spi_usr().bit_is_set() {
+        if self.spi.spi_cmd().read().spi_usr().bit_is_set() {
             return Err(nb::Error::WouldBlock);
         }
 
-        Ok((self.spi.spi_w0.read().bits() & 0xFF) as u8)
+        Ok((self.spi.spi_w0().read().bits() & 0xFF) as u8)
     }
 
     fn send(&mut self, word: u8) -> nb::Result<(), Self::Error> {
-        if self.spi.spi_cmd.read().spi_usr().bit_is_set() {
+        if self.spi.spi_cmd().read().spi_usr().bit_is_set() {
             return Err(nb::Error::WouldBlock);
         }
 
         self.set_data_bits(8);
 
-        self.spi.spi_w0.write(|w| unsafe { w.bits(word as u32) });
-        self.spi.spi_cmd.modify(|_, w| w.spi_usr().set_bit());
+        self.spi.spi_w0().write(|w| unsafe { w.bits(word as u32) });
+        self.spi.spi_cmd().modify(|_, w| w.spi_usr().set_bit());
 
         Ok(())
     }

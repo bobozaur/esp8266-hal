@@ -62,8 +62,8 @@ impl Read<u8> for UART0Serial {
 
     /// Reads a single word from the serial interface.
     fn read(&mut self) -> nb::Result<u8, Self::Error> {
-        if self.uart.uart_status.read().rxfifo_cnt().bits() > 0 {
-            Ok(self.uart.uart_fifo.read().rxfifo_rd_byte().bits())
+        if self.uart.uart_status().read().rxfifo_cnt().bits() > 0 {
+            Ok(self.uart.uart_fifo().read().rxfifo_rd_byte().bits())
         } else {
             Err(nb::Error::WouldBlock)
         }
@@ -74,9 +74,9 @@ impl Write<u8> for UART0Serial {
     type Error = Void;
 
     fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
-        if self.uart.uart_status.read().txfifo_cnt().bits() < 128 {
+        if self.uart.uart_status().read().txfifo_cnt().bits() < 128 {
             self.uart
-                .uart_fifo
+                .uart_fifo()
                 .write(|w| unsafe { w.rxfifo_write_byte().bits(word) });
             Ok(())
         } else {
@@ -85,7 +85,7 @@ impl Write<u8> for UART0Serial {
     }
 
     fn flush(&mut self) -> nb::Result<(), Void> {
-        if self.uart.uart_status.read().txfifo_cnt().bits() > 0 {
+        if self.uart.uart_status().read().txfifo_cnt().bits() > 0 {
             Err(nb::Error::WouldBlock)
         } else {
             Ok(())
@@ -122,9 +122,9 @@ impl Write<u8> for UART1Serial {
     type Error = Void;
 
     fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
-        if self.uart.uart_status.read().txfifo_cnt().bits() < 128 {
+        if self.uart.uart_status().read().txfifo_cnt().bits() < 128 {
             self.uart
-                .uart_fifo
+                .uart_fifo()
                 .write(|w| unsafe { w.rxfifo_write_byte().bits(word) });
             Ok(())
         } else {
@@ -133,7 +133,7 @@ impl Write<u8> for UART1Serial {
     }
 
     fn flush(&mut self) -> nb::Result<(), Void> {
-        if self.uart.uart_status.read().txfifo_cnt().bits() > 0 {
+        if self.uart.uart_status().read().txfifo_cnt().bits() > 0 {
             Err(nb::Error::WouldBlock)
         } else {
             Ok(())
@@ -168,7 +168,10 @@ mod interrupt {
         ) -> Pin<UartInterruptHandler<impl FnMut(&mut UART0Serial)>> {
             UartInterruptHandler::new(self, move |serial: &mut UART0Serial| {
                 f(serial);
-                serial.uart.uart_int_clr.write(|w| unsafe { w.bits(0xff) });
+                serial
+                    .uart
+                    .uart_int_clr()
+                    .write(|w| unsafe { w.bits(0xff) });
             })
         }
     }

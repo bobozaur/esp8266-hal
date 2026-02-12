@@ -8,17 +8,17 @@ pub trait DPortExt {
 impl DPortExt for EFUSE {
     fn read_chip_id(&self) -> u32 {
         let (id0, id1) = (
-            self.efuse_data0.read().bits(),
-            self.efuse_data1.read().bits(),
+            self.efuse_data0().read().bits(),
+            self.efuse_data1().read().bits(),
         );
         (id0 >> 24) | (id1 << 8)
     }
 
     fn read_mac_addr(&self) -> [u8; 6] {
         let (mac0, mac1, mac2) = (
-            self.efuse_data0.read().bits(),
-            self.efuse_data1.read().bits(),
-            self.efuse_data3.read().bits(),
+            self.efuse_data0().read().bits(),
+            self.efuse_data1().read().bits(),
+            self.efuse_data3().read().bits(),
         );
         let oui = if mac2 != 0 {
             ((mac2 >> 16) as u8, (mac2 >> 8) as u8, mac2 as u8)

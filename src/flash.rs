@@ -61,20 +61,20 @@ pub struct ESPFlash {
 
 #[inline]
 fn write_enable(spi: &mut SPI0) {
-    spi.spi_addr.write(|w| unsafe { w.bits(0) });
-    spi.spi_cmd.write(|w| w.spi_write_enable().set_bit());
+    spi.spi_addr().write(|w| unsafe { w.bits(0) });
+    spi.spi_cmd().write(|w| w.spi_write_enable().set_bit());
 
-    while spi.spi_cmd.read().bits() > 0 {}
+    while spi.spi_cmd().read().bits() > 0 {}
 }
 
 #[inline]
 fn get_status(spi: &mut SPI0) -> u32 {
-    spi.spi_addr.write(|w| unsafe { w.bits(0) });
-    spi.spi_cmd.write(|w| w.spi_read_sr().set_bit());
+    spi.spi_addr().write(|w| unsafe { w.bits(0) });
+    spi.spi_cmd().write(|w| w.spi_read_sr().set_bit());
 
-    while spi.spi_cmd.read().bits() > 0 {}
+    while spi.spi_cmd().read().bits() > 0 {}
 
-    spi.spi_rd_status.read().bits()
+    spi.spi_rd_status().read().bits()
 }
 
 impl ESPFlash {
@@ -85,11 +85,11 @@ impl ESPFlash {
         write_enable(&mut spi);
 
         for i in 0..sector_count {
-            spi.spi_addr
+            spi.spi_addr()
                 .write(|w| unsafe { w.address().bits(addr + i as u32) });
-            spi.spi_cmd.write(|w| w.spi_se().set_bit());
+            spi.spi_cmd().write(|w| w.spi_se().set_bit());
 
-            while spi.spi_cmd.read().bits() > 0 {}
+            while spi.spi_cmd().read().bits() > 0 {}
 
             while get_status(&mut spi) & 1 > 0 {}
         }
@@ -102,9 +102,9 @@ impl ESPFlash {
         let mut spi = CachePauseGuard::new(&mut self.spi);
         write_enable(&mut spi);
 
-        spi.spi_cmd.write(|w| w.spi_ce().set_bit());
+        spi.spi_cmd().write(|w| w.spi_ce().set_bit());
 
-        while spi.spi_cmd.read().bits() > 0 {}
+        while spi.spi_cmd().read().bits() > 0 {}
 
         while get_status(&mut spi) & 1 > 0 {}
 
@@ -147,12 +147,12 @@ fn write_unaligned(spi: &mut SPI0, mut addr: u32, data: &[u8]) -> u32 {
     for byte in data {
         write_enable(spi);
 
-        spi.spi_addr
+        spi.spi_addr()
             .write(|w| unsafe { w.address().bits(addr).size().bits(1) });
-        spi.spi_w0.write(|w| unsafe { w.bits(*byte as u32) });
-        spi.spi_cmd.write(|w| w.spi_pp().set_bit());
+        spi.spi_w0().write(|w| unsafe { w.bits(*byte as u32) });
+        spi.spi_cmd().write(|w| w.spi_pp().set_bit());
 
-        while spi.spi_cmd.read().bits() > 0 {}
+        while spi.spi_cmd().read().bits() > 0 {}
 
         while get_status(spi) & 1 > 0 {}
 
@@ -169,19 +169,19 @@ fn write_aligned(spi: &mut SPI0, mut addr: u32, data: &[u32]) -> u32 {
 
         let byte_len = chunk.len() * 4;
 
-        spi.spi_addr
+        spi.spi_addr()
             .write(|w| unsafe { w.address().bits(addr).size().bits(byte_len as u8) });
 
-        let base = spi.spi_w0.as_ptr();
+        let base = spi.spi_w0().as_ptr();
         for (i, num) in chunk.iter().enumerate() {
             unsafe {
                 write_volatile(base.add(i), *num);
             }
         }
 
-        spi.spi_cmd.write(|w| w.spi_pp().set_bit());
+        spi.spi_cmd().write(|w| w.spi_pp().set_bit());
 
-        while spi.spi_cmd.read().bits() > 0 {}
+        while spi.spi_cmd().read().bits() > 0 {}
 
         while get_status(spi) & 1 > 0 {}
 
@@ -194,13 +194,13 @@ fn write_aligned(spi: &mut SPI0, mut addr: u32, data: &[u32]) -> u32 {
 #[ram]
 fn read_unaligned(spi: &mut SPI0, mut addr: u32, data: &mut [u8]) -> u32 {
     for byte in data.iter_mut() {
-        spi.spi_addr
+        spi.spi_addr()
             .write(|w| unsafe { w.address().bits(addr).size().bits(1) });
-        spi.spi_cmd.write(|w| w.spi_read().set_bit());
+        spi.spi_cmd().write(|w| w.spi_read().set_bit());
 
-        while spi.spi_cmd.read().bits() > 0 {}
+        while spi.spi_cmd().read().bits() > 0 {}
 
-        *byte = spi.spi_w0.read().bits() as u8;
+        *byte = spi.spi_w0().read().bits() as u8;
 
         addr += 1;
     }
@@ -214,13 +214,13 @@ fn read_aligned(spi: &mut SPI0, mut addr: u32, data: &mut [u32]) -> u32 {
     for chunk in data.chunks_mut(15) {
         let byte_len = chunk.len() * 4;
 
-        spi.spi_addr
+        spi.spi_addr()
             .write(|w| unsafe { w.address().bits(addr).size().bits(byte_len as u8) });
-        spi.spi_cmd.write(|w| w.spi_read().set_bit());
+        spi.spi_cmd().write(|w| w.spi_read().set_bit());
 
-        while spi.spi_cmd.read().bits() > 0 {}
+        while spi.spi_cmd().read().bits() > 0 {}
 
-        let base = spi.spi_w0.as_ptr();
+        let base = spi.spi_w0().as_ptr();
         for (i, num) in chunk.iter_mut().enumerate() {
             unsafe {
                 *num = read_volatile(base.add(i));
