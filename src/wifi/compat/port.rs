@@ -199,8 +199,8 @@ pub unsafe extern "C" fn PendSV(req: i32) {
             let current = task::debug_current_task_marker();
             if current == b'M' && !FIRST_TIMER_PENDSV_TRACE_DONE {
                 FIRST_TIMER_PENDSV_TRACE_DONE = true;
-                crate::logger::write_byte(b'p');
-                crate::logger::write_byte(current);
+                crate::logger::debug_byte(b'p');
+                crate::logger::debug_byte(current);
             }
             critical::vPortExitCritical();
         } else if req == 2 {
@@ -347,14 +347,14 @@ pub unsafe fn apply_pending_context_switch(frame: *mut u8) {
         let to_task = task::debug_current_task_marker();
         if from_task == b'M' && !FIRST_TIMER_CTX_SWITCH_TRACE_DONE {
             FIRST_TIMER_CTX_SWITCH_TRACE_DONE = true;
-            crate::logger::write_byte(b'c');
-            crate::logger::write_byte(from_task);
-            crate::logger::write_byte(to_task);
+            crate::logger::debug_byte(b'c');
+            crate::logger::debug_byte(from_task);
+            crate::logger::debug_byte(to_task);
         }
         g_ctx_stage = b'r' as u32;
         g_level1_restore_sp = task::prepare_current_frame_for_restore() as u32;
         if from_task == b'M' && to_task == b'U' {
-            crate::logger::write_byte(b'v');
+            crate::logger::debug_byte(b'v');
         }
         S_SWITCH_CTX_FLAG = 0;
         g_ctx_stage = b'z' as u32;
@@ -376,8 +376,8 @@ pub unsafe extern "C" fn SoftIsrHdl(_arg: *mut c_void) {
         let current = task::debug_current_task_marker();
         if current == b'M' && !FIRST_TIMER_SOFT_ISR_TRACE_DONE {
             FIRST_TIMER_SOFT_ISR_TRACE_DONE = true;
-            crate::logger::write_byte(b's');
-            crate::logger::write_byte(current);
+            crate::logger::debug_byte(b's');
+            crate::logger::debug_byte(current);
         }
         if MacIsrSigPostDefHdl() != 0 {
             portYIELD_FROM_ISR();
@@ -413,7 +413,7 @@ pub unsafe extern "C" fn xPortSysTickHandle(_p: *mut c_void) {
         let current = task::debug_current_task_marker();
         if current == b'U' && !FIRST_UI_TICK_TRACE_DONE {
             FIRST_UI_TICK_TRACE_DONE = true;
-            crate::logger::write_byte(b't');
+            crate::logger::debug_byte(b't');
         }
 
         // Match SDK port.c: reset CCOUNT, compute elapsed microseconds,

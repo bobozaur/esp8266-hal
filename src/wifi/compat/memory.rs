@@ -125,6 +125,15 @@ unsafe fn alloc_raw(layout: Layout) -> *mut u8 {
     unsafe {
         critical_section::with(|_| ensure_init());
 
+        if BOOT_STACK_REGION_RECLAIMED {
+            let ptr = HEAP_LO.alloc(layout);
+            if !ptr.is_null() {
+                return ptr;
+            }
+
+            return HEAP_HI.alloc(layout);
+        }
+
         let ptr = HEAP_HI.alloc(layout);
         if !ptr.is_null() {
             return ptr;
@@ -269,13 +278,23 @@ unsafe fn record_alloc_failure(kind: u8, size: usize) {
 // a size. We store the allocation size in a 4-byte header before the pointer.
 // ---------------------------------------------------------------------------
 
-const SIZE_HEADER: usize = 4;
+const HEADER_WORDS: usize = 2;
+const HEADER_SIZE: usize = HEADER_WORDS * core::mem::size_of::<u32>();
+const ALLOC_MAGIC: u32 = 0x8266_a110;
+const FREED_MAGIC: u32 = 0xdead_f833;
+
+fn raw_in_heap_regions(raw: *mut u8) -> bool {
+    unsafe {
+        ptr_in_region(raw, HEAP_HI_START, HEAP_HI_END)
+            || ptr_in_region(raw, HEAP_LO_START, HEAP_LO_END)
+    }
+}
 
 fn c_malloc_inner(kind: u8, size: usize) -> *mut c_void {
     if size == 0 {
         return ptr::null_mut();
     }
-    let total = size + SIZE_HEADER;
+    let total = size + HEADER_SIZE;
     critical_section::with(|_| unsafe {
         ensure_init();
         let layout = match Layout::from_size_align(total, 4) {
@@ -283,12 +302,15 @@ fn c_malloc_inner(kind: u8, size: usize) -> *mut c_void {
             Err(_) => return ptr::null_mut(),
         };
         let raw = alloc_raw(layout);
+        super::pp_stage::note_deliver_probe_alloc(size, !raw.is_null());
         if raw.is_null() {
             record_alloc_failure(kind, size);
             return ptr::null_mut();
         }
-        *(raw as *mut u32) = total as u32;
-        let user = (raw as usize + SIZE_HEADER) as *mut c_void;
+        let header = raw as *mut u32;
+        header.write(total as u32);
+        header.add(1).write(ALLOC_MAGIC);
+        let user = (raw as usize + HEADER_SIZE) as *mut c_void;
         trace_task3_overlap(user as usize, size, b'V', b'v');
         user
     })
@@ -303,8 +325,20 @@ fn c_free(ptr: *mut c_void) {
         return;
     }
     critical_section::with(|_| unsafe {
-        let raw = (ptr as usize - SIZE_HEADER) as *mut u8;
-        let total = *(raw as *const u32) as usize;
+        let raw = (ptr as usize).saturating_sub(HEADER_SIZE) as *mut u8;
+        ensure_init();
+        if !raw_in_heap_regions(raw) {
+            return;
+        }
+
+        let header = raw as *mut u32;
+        let total = header.read() as usize;
+        let magic = header.add(1).read();
+        if magic != ALLOC_MAGIC || total < HEADER_SIZE {
+            return;
+        }
+
+        header.add(1).write(FREED_MAGIC);
         let layout = Layout::from_size_align_unchecked(total, 4);
         dealloc_raw(raw, layout);
     })
@@ -318,8 +352,8 @@ fn c_realloc(ptr: *mut c_void, new_size: usize) -> *mut c_void {
         c_free(ptr);
         return ptr::null_mut();
     }
-    let old_total = unsafe { *((ptr as usize - SIZE_HEADER) as *const u32) } as usize;
-    let old_usable = old_total - SIZE_HEADER;
+    let old_total = unsafe { *((ptr as usize - HEADER_SIZE) as *const u32) } as usize;
+    let old_usable = old_total.saturating_sub(HEADER_SIZE);
 
     let new_ptr = c_malloc_inner(b'R', new_size);
     if !new_ptr.is_null() {
@@ -487,7 +521,9 @@ pub unsafe extern "C" fn heap_caps_get_dram_free_size() -> u32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn esp_get_free_heap_size() -> u32 {
-    total_free() as u32
+    let free = total_free() as u32;
+    unsafe { super::pp_stage::note_deliver_probe_free_heap(free) };
+    unsafe { super::pp_stage::adjust_deliver_free_heap(free) }
 }
 
 #[no_mangle]

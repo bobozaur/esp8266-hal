@@ -1,74 +1,98 @@
 //! WiFi driver for the ESP8266, built on the RTOS SDK.
 //!
-//! This module wraps the ESP8266 RTOS SDK WiFi C APIs with safe Rust
-//! abstractions modeled after the `esp-wifi` crate for ESP32.
+//! This module now has two layers:
+//!
+//! - typed driver lifecycle, configuration, events, resources, and feature
+//!   sessions re-exported from `crate::wifi_core`
+//! - ESP8266 target integration plus higher-level adapters for `smoltcp` and
+//!   `embassy-net`
+//!
+//! The recommended networking path is:
+//!
+//! 1. build a [`WifiDriver`]
+//! 2. connect with a temporary station handle from `driver.sta()`
+//! 3. hand ownership to networking with `driver.sta_link()`
 //!
 //! # Architecture (Embassy-first)
 //!
 //! The embassy executor owns the main thread. The FreeRTOS compat scheduler
 //! runs in the background (via tick ISR + PendSV) to service WiFi blob tasks.
 //!
-//! # Quick start
+//! RX packet ingress, link-state tracking, wake registration, and packet
+//! storage all live in caller-owned [`WifiResources`].
+//!
+//! # Typestate quick start
 //!
 //! ```rust,no_run
-//! use esp8266_hal::wifi::{WifiController, WifiMode, StaConfig};
-//! use esp8266_hal::wifi::controller::WifiInitConfig;
+//! use esp8266_hal::wifi::{
+//!     ClientConfig, Credential, Esp8266TargetBackend, InitConfig, Ssid, WifiDriver,
+//!     WifiResources,
+//! };
 //!
-//! let mut ctrl = WifiController::init(WifiInitConfig::default())
-//!     .expect("WiFi init failed");
+//! let resources = WifiResources::<8, 4, 2>::new();
+//! let backend = Esp8266TargetBackend::new(&resources);
+//! let driver = WifiDriver::with_backend(&resources, backend)
+//!     .initialize(InitConfig::default())
+//!     .expect("init");
 //!
-//! ctrl.set_mode(WifiMode::Sta).expect("set mode");
-//! ctrl.set_sta_config(
-//!     &StaConfig::builder("MyNetwork", "hunter2").build()
-//! ).expect("set config");
+//! let config = ClientConfig::new(
+//!     Ssid::try_from("MyNetwork").expect("ssid"),
+//!     Credential::Open,
+//! );
 //!
-//! ctrl.start().expect("start");
+//! let mut driver = driver.configure_sta(config).expect("config").start().expect("start");
+//! let mut station = driver.sta().expect("station handle");
+//! let _session = station.connect_blocking(15_000).expect("connect");
 //! ```
+//!
+//! The older controller-style implementation remains as target-internal
+//! compatibility plumbing while the public driver surface is the typed core
+//! plus adapters in this module.
 
-// FFI compat layer: all `extern "C"` functions called from C/blobs, not Rust API.
+// FFI compat layer: all `extern "C"` functions called from C/blobs.
 #[allow(clippy::missing_safety_doc, clippy::needless_range_loop)]
+#[doc(hidden)]
 pub mod compat;
-pub mod phy;
-pub mod timer_driver;
+pub(crate) mod phy;
+pub(crate) mod timer_driver;
 
 #[cfg(feature = "wifi-ap")]
-pub mod ap;
-pub mod config;
-pub mod controller;
-pub mod device;
-pub mod error;
+pub(crate) mod ap;
+pub(crate) mod config;
+pub(crate) mod controller;
+pub(crate) mod device;
+pub(crate) mod error;
 #[cfg(feature = "wifi-esp-now")]
-pub mod esp_now;
-pub mod event;
-pub mod ip;
+pub(crate) mod esp_now;
+pub(crate) mod event;
+pub(crate) mod ip;
 #[cfg(feature = "wifi-promiscuous")]
-pub mod promiscuous;
-pub mod scan;
+pub(crate) mod promiscuous;
+pub(crate) mod scan;
 #[cfg(feature = "wifi-smartconfig")]
-pub mod smartconfig;
+pub(crate) mod smartconfig;
 #[cfg(feature = "wifi-sta")]
-pub mod sta;
-pub mod stack;
+pub(crate) mod sta;
+pub(crate) mod stack;
 #[cfg(feature = "wifi-wps")]
-pub mod wps;
+pub(crate) mod wps;
 
+#[doc(hidden)]
 pub mod executor;
-pub mod sdk;
+pub(crate) mod sdk;
 
 #[cfg(feature = "wifi-embassy-net")]
 pub mod embassy_net;
 
-pub use config::{ApConfig, Configuration, StaConfig};
-pub use controller::{StaConnectionState, WifiController};
-pub use device::WifiDevice;
-pub use error::{EspError, WifiError};
-pub use event::{DisconnectReason, EventSubscriber, WifiEvent, WifiEventKind};
-pub use ip::{Ipv4Addr, Ipv4Info};
-pub use scan::{AccessPointInfo, ScanConfig};
+pub use crate::wifi_core::*;
+pub(crate) use config::{ApConfig, StaConfig};
+pub(crate) use controller::WifiController;
+pub use device::{ApWifiDevice, LinkDevice, WifiDevice};
+pub(crate) use error::{EspError, WifiError};
 
 /// Initialize the FreeRTOS compat scheduler in background mode.
 ///
-/// This is called automatically by [`WifiController::init`], but can be
+/// This is called automatically by the ESP8266 target backend, but can be
 /// called manually if you need the compat layer before WiFi initialization.
 ///
 /// Safe to call multiple times (subsequent calls are no-ops).
@@ -76,9 +100,25 @@ pub fn init_compat_scheduler() {
     unsafe { compat::entry::init_compat_scheduler() };
 }
 
+/// Yield the current compat task for `ticks` scheduler ticks.
+///
+/// This is primarily useful in synchronous examples after their terminal
+/// marker has been emitted. Async code should prefer `embassy_time::Timer`.
+pub fn delay_ticks(ticks: u32) {
+    unsafe { compat::task::vTaskDelay(ticks) };
+}
+
+/// Return the current compat heap free-byte estimate.
+///
+/// This is intended for examples and diagnostics that need a lightweight
+/// health marker without reaching into the target-internal compat layer.
+pub fn free_heap_bytes() -> u32 {
+    unsafe { compat::memory::esp_get_free_heap_size() }
+}
+
 /// WiFi operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WifiMode {
+pub(crate) enum WifiMode {
     /// Station mode — connects to an external access point.
     Sta,
     /// Soft-AP mode — acts as an access point for other stations.
@@ -104,21 +144,11 @@ impl WifiMode {
             _ => None,
         }
     }
-
-    /// Returns `true` if this mode includes station functionality.
-    pub fn is_sta(self) -> bool {
-        matches!(self, Self::Sta | Self::ApSta)
-    }
-
-    /// Returns `true` if this mode includes soft-AP functionality.
-    pub fn is_ap(self) -> bool {
-        matches!(self, Self::Ap | Self::ApSta)
-    }
 }
 
 /// Authentication mode for WiFi connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum AuthMode {
+pub(crate) enum AuthMode {
     Open,
     Wep,
     WpaPsk,
@@ -159,7 +189,7 @@ impl AuthMode {
 }
 
 /// WiFi protocol flags.
-pub mod protocol {
+pub(crate) mod protocol {
     bitflags::bitflags! {
         /// 802.11 protocol support flags.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,7 +208,7 @@ pub mod protocol {
 
 /// Channel bandwidth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bandwidth {
+pub(crate) enum Bandwidth {
     /// 20 MHz channel.
     Ht20,
     /// 40 MHz channel (requires 802.11n).
@@ -203,7 +233,7 @@ impl Bandwidth {
 
 /// Power-save mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PowerSave {
+pub(crate) enum PowerSave {
     /// No power save — maximum performance.
     None,
     /// Minimum modem sleep — wake at every DTIM beacon.
@@ -232,7 +262,7 @@ impl PowerSave {
 
 /// Secondary channel position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecondaryChannel {
+pub(crate) enum SecondaryChannel {
     None,
     Above,
     Below,
@@ -258,7 +288,7 @@ impl SecondaryChannel {
 
 /// WiFi configuration storage destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Storage {
+pub(crate) enum Storage {
     /// Persist to NVS flash and RAM.
     Flash,
     /// RAM only — lost on reboot.

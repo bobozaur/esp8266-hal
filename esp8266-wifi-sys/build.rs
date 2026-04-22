@@ -3,8 +3,9 @@
 //! 1. Generates `sdkconfig.h` with the CONFIG_* defines the SDK headers need.
 //! 2. Runs bindgen to produce Rust FFI bindings from the SDK headers.
 //! 3. Compiles the SDK C source files (FreeRTOS, esp_event, newlib, heap, log,
-//!    wpa_supplicant, etc.) via the `cc` crate. lwIP is **not** compiled —
-//!    networking is handled by smoltcp in the `esp8266-wifi` crate.
+//!    wpa_supplicant, etc.) via the `cc` crate. A small lwIP subset is also
+//!    compiled for the AP-side netif bridge; networking still remains
+//!    caller-owned in the `esp8266-wifi` crate.
 //! 4. Emits linker directives for the pre-built WiFi blob libraries and the
 //!    ROM / peripheral / memory-layout linker scripts.
 
@@ -35,6 +36,7 @@ fn main() {
     // Step 1: Generate sdkconfig.h
     let sdkconfig_h = out_dir.join("sdkconfig.h");
     generate_sdkconfig(&sdkconfig_h);
+    let _ = fs::remove_file(out_dir.join("esp_wifi_driver.h"));
 
     // Build the master include-path list. The generated sdkconfig.h in OUT_DIR
     // comes first so it shadows any stale shim.
@@ -69,6 +71,7 @@ fn main() {
     // Rebuild triggers
     println!("cargo:rerun-if-env-changed=ESP8266_RTOS_SDK");
     println!("cargo:rerun-if-changed=wrapper.h");
+    println!("cargo:rerun-if-changed=ap_netif_bridge.c");
     // sdk_overrides/ fully ported to Rust (src/wifi/sdk/).
 }
 
@@ -99,7 +102,7 @@ fn generate_sdkconfig(path: &Path) {
 
 /* ---------- Task stack sizes (esp_task.h) ---------- */
 #define CONFIG_ESP_TIMER_TASK_STACK_SIZE 2048
-#define CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE 2048
+#define CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE 1024
 #define CONFIG_ESP_MAIN_TASK_STACK_SIZE 3584
 #define CONFIG_LWIP_TCPIP_TASK_STACK_SIZE 2048
 
@@ -324,6 +327,7 @@ fn build_include_paths(sdk: &Path, out_dir: &Path) -> Vec<PathBuf> {
         sdk.join("components/wpa_supplicant/include/esp_supplicant"),
         sdk.join("components/wpa_supplicant/port/include"),
         sdk.join("components/wpa_supplicant/src"),
+        sdk.join("components/wpa_supplicant/src/esp_supplicant"),
         // log
         sdk.join("components/log/include"),
         // spi_flash
@@ -720,6 +724,52 @@ fn compile_sdk_sources(
         .define("PROJECT_VER", "\"0.1.0\"")
         .define("PROJECT_NAME", "\"esp8266-wifi\"");
 
+    // --- lwIP subset (AP-side netif bridge only) ---
+    //
+    // We do not enable the full SDK tcpip_adapter/lwIP ownership model. The
+    // Rust driver remains the packet owner. However, hardware validation shows
+    // the ESP8266 soft-AP data plane needs an AP-side netif brought up before
+    // client traffic is forwarded to the registered high-layer RX callback.
+    //
+    // Compile the minimum open-source lwIP core needed to create a tcpip
+    // thread, allocate a netif, and mark the AP-side netif up. Socket/VFS
+    // layers and the SDK tcpip_adapter event handlers remain out of scope.
+    let lwip_srcs = [
+        "components/lwip/lwip/src/api/err.c",
+        "components/lwip/lwip/src/api/tcpip.c",
+        "components/lwip/lwip/src/core/def.c",
+        "components/lwip/lwip/src/core/dns.c",
+        "components/lwip/lwip/src/core/inet_chksum.c",
+        "components/lwip/lwip/src/core/init.c",
+        "components/lwip/lwip/src/core/ip.c",
+        "components/lwip/lwip/src/core/mem.c",
+        "components/lwip/lwip/src/core/memp.c",
+        "components/lwip/lwip/src/core/netif.c",
+        "components/lwip/lwip/src/core/pbuf.c",
+        "components/lwip/lwip/src/core/raw.c",
+        "components/lwip/lwip/src/core/stats.c",
+        "components/lwip/lwip/src/core/sys.c",
+        "components/lwip/lwip/src/core/tcp.c",
+        "components/lwip/lwip/src/core/tcp_in.c",
+        "components/lwip/lwip/src/core/tcp_out.c",
+        "components/lwip/lwip/src/core/timeouts.c",
+        "components/lwip/lwip/src/core/udp.c",
+        "components/lwip/lwip/src/core/ipv4/autoip.c",
+        "components/lwip/lwip/src/core/ipv4/dhcp.c",
+        "components/lwip/lwip/src/core/ipv4/etharp.c",
+        "components/lwip/lwip/src/core/ipv4/icmp.c",
+        "components/lwip/lwip/src/core/ipv4/igmp.c",
+        "components/lwip/lwip/src/core/ipv4/ip4.c",
+        "components/lwip/lwip/src/core/ipv4/ip4_addr.c",
+        "components/lwip/lwip/src/core/ipv4/ip4_frag.c",
+        "components/lwip/lwip/src/netif/ethernet.c",
+        "components/lwip/port/esp8266/freertos/sys_arch.c",
+    ];
+    for src in &lwip_srcs {
+        build.file(comp(src));
+    }
+    build.file(local("ap_netif_bridge.c"));
+
     // --- esp8266 component ---
     let esp8266_srcs = [
         "components/esp8266/source/chip_boot.c",
@@ -743,6 +793,9 @@ fn compile_sdk_sources(
     for src in &esp8266_srcs {
         build.file(comp(src));
     }
+    if env::var("CARGO_FEATURE_SMARTCONFIG").is_ok() {
+        build.file(comp("components/esp8266/source/smartconfig.c"));
+    }
     // All sdk_overrides ported to Rust (src/wifi/sdk/).
 
     // --- Stubs for symbols not provided by compiled SDK sources ---
@@ -758,12 +811,17 @@ fn compile_sdk_sources(
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_libc.h"
+#include "esp_smartconfig.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "rom/ets_sys.h"
+#include <errno.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
 
-/* ---- tcpip_adapter (lwIP replaced by smoltcp) ---- */
+/* ---- tcpip_adapter compatibility (full adapter still disabled) ---- */
 
 int tcpip_adapter_set_default_wifi_handlers(void) { return ESP_OK; }
 int tcpip_adapter_clear_default_wifi_handlers(void) { return ESP_OK; }
@@ -772,9 +830,14 @@ int tcpip_adapter_get_ip_info(int tcpip_if, void *ip_info) {
 }
 void tcpip_adapter_init(void) {}
 
-/* SmartConfig ACK (libsmartconfig.a) */
-void sc_ack_send(void *param) { (void)param; }
-void sc_ack_send_stop(void) {}
+/* SmartConfig ACK: keep ACK ownership out of the SDK socket task. */
+esp_err_t sc_send_ack_start(smartconfig_type_t type, uint8_t token, uint8_t *cellphone_ip) {
+    (void)type;
+    (void)token;
+    (void)cellphone_ip;
+    return ESP_OK;
+}
+void sc_send_ack_stop(void) {}
 
 /* ---- IP_EVENT (normally from tcpip_adapter.c) ---- */
 /* ESP_EVENT_DECLARE_BASE / ESP_EVENT_DEFINE_BASE produce a const char* */
@@ -1563,13 +1626,67 @@ int nvs_set_blob(nvs_handle h, const char *k, const void *v, unsigned int l) {
 extern unsigned int compat_prvGetExpectedIdleTime(void);
 unsigned int prvGetExpectedIdleTime(void) { return compat_prvGetExpectedIdleTime(); }
 
-/* ---- pthread stubs (newlib vfprintf references pthread_setcancelstate) ---- */
+/* ---- lwIP bridge shims ---- */
+void *pvTaskGetThreadLocalStoragePointer(TaskHandle_t xTaskToQuery, BaseType_t xIndex) {
+    return pvTaskGetThreadLocalStorageBufferPointer(xTaskToQuery, xIndex);
+}
+
+void esp_vfs_lwip_sockets_register(void) {}
+
+/* ---- pthread stubs (newlib/lwIP reference a tiny subset) ---- */
+typedef void (*pthread_destructor_t)(void *);
+#define STUB_PTHREAD_KEYS 3
+static pthread_destructor_t s_stub_pthread_destructors[STUB_PTHREAD_KEYS];
+static pthread_key_t s_stub_next_pthread_key = 1;
+
+static BaseType_t stub_pthread_key_index(pthread_key_t key) {
+    if (key <= 0 || key > STUB_PTHREAD_KEYS) {
+        return -1;
+    }
+    return (BaseType_t)(key - 1);
+}
+
 int pthread_setcancelstate(int state, int *oldstate) {
     (void)state; (void)oldstate; return 0;
+}
+int pthread_key_create(pthread_key_t *key, pthread_destructor_t destructor) {
+    if (key == NULL || s_stub_next_pthread_key > STUB_PTHREAD_KEYS) {
+        return ENOMEM;
+    }
+    *key = s_stub_next_pthread_key;
+    s_stub_pthread_destructors[s_stub_next_pthread_key - 1] = destructor;
+    s_stub_next_pthread_key++;
+    return 0;
+}
+int pthread_key_delete(pthread_key_t key) {
+    BaseType_t index = stub_pthread_key_index(key);
+    if (index < 0) {
+        return EINVAL;
+    }
+    s_stub_pthread_destructors[index] = NULL;
+    return 0;
+}
+void *pthread_getspecific(pthread_key_t key) {
+    BaseType_t index = stub_pthread_key_index(key);
+    if (index < 0) {
+        return NULL;
+    }
+    return pvTaskGetThreadLocalStoragePointer(NULL, index);
+}
+int pthread_setspecific(pthread_key_t key, const void *value) {
+    BaseType_t index = stub_pthread_key_index(key);
+    if (index < 0) {
+        return EINVAL;
+    }
+    vTaskSetThreadLocalStoragePointer(NULL, index, (void *)value);
+    return 0;
 }
 int esp_pthread_init(void) { return 0; }
 
 /* ---- xtbsp_clock_freq_hz (FreeRTOS port.c, normally a macro) ---- */
+#ifdef xtbsp_clock_freq_hz
+#undef xtbsp_clock_freq_hz
+#endif
 unsigned int xtbsp_clock_freq_hz(void) { return 80000000; }
 
 /* ---- Interrupt handlers (override xtensa-lx-rt defaults) ---- */
@@ -1605,22 +1722,17 @@ void panicHandler(void *frame) {
 /* ---- C malloc/free routing ---- */
 /* Route newlib's malloc/free through our Rust heap (pvPortMalloc/vPortFree) */
 /* so that blob code calling C malloc works correctly. */
-extern void *pvPortMalloc(unsigned int size);
-extern void vPortFree(void *ptr);
-extern void *pvPortCalloc(unsigned int count, unsigned int size);
-extern void *pvPortZalloc(unsigned int size);
-
-void *_malloc_r(void *reent, unsigned int size) {
+void *_malloc_r(struct _reent *reent, size_t size) {
     (void)reent;
     return pvPortMalloc(size);
 }
 
-void _free_r(void *reent, void *ptr) {
+void _free_r(struct _reent *reent, void *ptr) {
     (void)reent;
     vPortFree(ptr);
 }
 
-void *_realloc_r(void *reent, void *ptr, unsigned int size) {
+void *_realloc_r(struct _reent *reent, void *ptr, size_t size) {
     (void)reent;
     if (!ptr) return pvPortMalloc(size);
     if (!size) { vPortFree(ptr); return (void *)0; }
@@ -1640,12 +1752,12 @@ void *_realloc_r(void *reent, void *ptr, unsigned int size) {
     return new_ptr;
 }
 
-void *_calloc_r(void *reent, unsigned int count, unsigned int size) {
+void *_calloc_r(struct _reent *reent, size_t count, size_t size) {
     (void)reent;
     return pvPortCalloc(count, size);
 }
 
-void *_sbrk_r(void *reent, int incr) {
+void *_sbrk_r(struct _reent *reent, ptrdiff_t incr) {
     (void)reent; (void)incr;
     return (void *)-1; /* never used — malloc routed through pvPortMalloc */
 }
@@ -1812,7 +1924,20 @@ void __atomic_store_4(volatile void *p, uint32_t v, int mo) {
         "components/wpa_supplicant/src/wps/wps_validate.c",
     ];
     for src in &wpa_srcs {
-        wpa_build.file(comp(src));
+        match *src {
+            "components/wpa_supplicant/src/esp_supplicant/esp_wps.c" => {
+                wpa_build.file(patch_esp_wps_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/wps/wps_attr_build.c" => {
+                wpa_build.file(patch_wps_attr_build_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/wps/wps_enrollee.c" => {
+                wpa_build.file(comp(src));
+            }
+            _ => {
+                wpa_build.file(comp(src));
+            }
+        }
     }
 
     // Compile the main SDK archive.
@@ -1823,6 +1948,214 @@ void __atomic_store_4(volatile void *p, uint32_t v, int mo) {
 
     // --- mbedTLS (compile separately with its own config) ---
     compile_mbedtls(sdk, include_paths, out_dir, gcc);
+}
+
+fn patch_esp_wps_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("esp_wps_patched.c");
+    let source_text = fs::read_to_string(source).expect("failed to read esp_wps.c");
+    let include_hook = concat!(
+        "#include \"esp_wifi_driver.h\"\n",
+        "#undef WPS_TASK_STACK_SIZE\n",
+        "#define WPS_TASK_STACK_SIZE (3584 + TASK_STACK_SIZE_ADD)\n",
+        "static unsigned char esp8266_hal_wps_pin_override[9];\n",
+        "static unsigned char esp8266_hal_wps_target_ssid[32];\n",
+        "static unsigned char esp8266_hal_wps_target_ssid_len;\n",
+        "static void esp8266_hal_wps_trace_char(char c) {\n",
+        "    volatile unsigned int *status = (volatile unsigned int *)(0x60000000 + 0x1c);\n",
+        "    volatile unsigned int *fifo = (volatile unsigned int *)0x60000000;\n",
+        "    if ((((*status) >> 16) & 0xffu) < 126u) {\n",
+        "        *fifo = (unsigned int)c;\n",
+        "    }\n",
+        "}\n",
+        "static void esp8266_hal_wps_trace_hex_nibble(unsigned int value) {\n",
+        "    value &= 0xFu;\n",
+        "    esp8266_hal_wps_trace_char((char)(value < 10u ? ('0' + value) : ('A' + (value - 10u))));\n",
+        "}\n",
+        "static void esp8266_hal_wps_trace_hex8(unsigned int value) {\n",
+        "    esp8266_hal_wps_trace_hex_nibble(value >> 4);\n",
+        "    esp8266_hal_wps_trace_hex_nibble(value);\n",
+        "}\n",
+        "static void esp8266_hal_wps_trace_hex32(unsigned int value) {\n",
+        "    for (int shift = 28; shift >= 0; shift -= 4) {\n",
+        "        esp8266_hal_wps_trace_hex_nibble(value >> (unsigned int)shift);\n",
+        "    }\n",
+        "}\n",
+        "void esp8266_hal_wps_set_pin(const unsigned char *pin) {\n",
+        "    if (pin) {\n",
+        "        memcpy(esp8266_hal_wps_pin_override, pin, 8);\n",
+        "        esp8266_hal_wps_pin_override[8] = 0;\n",
+        "    } else {\n",
+        "        memset(esp8266_hal_wps_pin_override, 0, sizeof(esp8266_hal_wps_pin_override));\n",
+        "    }\n",
+        "}\n",
+        "void esp8266_hal_wps_set_target_ssid(const unsigned char *ssid, unsigned int len) {\n",
+        "    if (ssid && len <= sizeof(esp8266_hal_wps_target_ssid)) {\n",
+        "        memcpy(esp8266_hal_wps_target_ssid, ssid, len);\n",
+        "        esp8266_hal_wps_target_ssid_len = len;\n",
+        "    } else {\n",
+        "        memset(esp8266_hal_wps_target_ssid, 0, sizeof(esp8266_hal_wps_target_ssid));\n",
+        "        esp8266_hal_wps_target_ssid_len = 0;\n",
+        "    }\n",
+        "}"
+    );
+    let patched_text = replace_required(
+        &source_text,
+        "#include \"esp_wifi_driver.h\"",
+        include_hook,
+        "esp_wps.c include hook",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        spin = wps_generate_pin();\n        sprintf((char *)data->dev_password, \"%08d\", spin);",
+        "        if (esp8266_hal_wps_pin_override[0] != 0) {\n            memcpy(data->dev_password, esp8266_hal_wps_pin_override, 8);\n            data->dev_password[8] = 0;\n        } else {\n            spin = wps_generate_pin();\n            sprintf((char *)data->dev_password, \"%08d\", spin);\n        }",
+        "esp_wps.c PIN override hook",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        wps_build_public_key(sm->wps, NULL, WPS_CALC_KEY_PRE_CALC);\n\n        wifi_wps_scan();",
+        "        if (wps_build_public_key(sm->wps, NULL, WPS_CALC_KEY_PRE_CALC) != 0) {\n            esp8266_hal_wps_trace_char('~');\n            esp8266_hal_wps_trace_char('K');\n            return ESP_ERR_NO_MEM;\n        }\n\n        wifi_wps_scan();",
+        "esp_wps.c checked WPS public-key precompute",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        if (wps_is_selected_pbc_registrar(buf, scan->bssid)\n                || wps_is_selected_pin_registrar(buf, scan->bssid)) {",
+        "        bool esp8266_hal_wps_selected = wps_is_selected_pbc_registrar(buf, scan->bssid)\n                || wps_is_selected_pin_registrar(buf, scan->bssid);\n        if (!esp8266_hal_wps_selected && esp8266_hal_wps_target_ssid_len != 0 &&\n                scan->ssid[1] == esp8266_hal_wps_target_ssid_len &&\n                memcmp(&scan->ssid[2], esp8266_hal_wps_target_ssid, esp8266_hal_wps_target_ssid_len) == 0) {\n            esp8266_hal_wps_trace_char('~');\n            esp8266_hal_wps_trace_char('t');\n            esp8266_hal_wps_trace_hex8(scan->chan);\n            esp8266_hal_wps_selected = true;\n        }\n        if (esp8266_hal_wps_selected) {\n            esp8266_hal_wps_trace_char('~');\n            esp8266_hal_wps_trace_char('S');\n            esp8266_hal_wps_trace_hex8(scan->chan);",
+        "esp_wps.c target SSID scan selection",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    if (sm->discover_ssid_cnt == 1) {\n        wps_set_status(WPS_STATUS_PENDING);",
+        "    esp8266_hal_wps_trace_char('~');\n    esp8266_hal_wps_trace_char('D');\n    esp8266_hal_wps_trace_hex8(sm->discover_ssid_cnt);\n    esp8266_hal_wps_trace_hex8(wps_get_status());\n\n    if (sm->discover_ssid_cnt == 1) {\n        wps_set_status(WPS_STATUS_PENDING);",
+        "esp_wps.c scan-done trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    ets_timer_arm(&sm->wps_timeout_timer, 120000, 0); /* 120s total */",
+        "    esp8266_hal_wps_trace_char('~');\n    esp8266_hal_wps_trace_char('B');\n    esp8266_hal_wps_trace_hex8(wps_get_type());\n    esp8266_hal_wps_trace_hex8(wps_get_status());\n\n    ets_timer_arm(&sm->wps_timeout_timer, 120000, 0); /* 120s total */",
+        "esp_wps.c start trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    ret = esp_wifi_get_assoc_bssid_internal(bssid);\n    if (ret != 0) {\n        wpa_printf(MSG_ERROR, \"bssid is empty!\");\n        return ret;\n    }\n\n    if (!sm) {",
+        "    ret = esp_wifi_get_assoc_bssid_internal(bssid);\n    if (ret != 0) {\n        esp8266_hal_wps_trace_char('~');\n        esp8266_hal_wps_trace_char('e');\n        esp8266_hal_wps_trace_hex8((unsigned int)(-ret));\n        wpa_printf(MSG_ERROR, \"bssid is empty!\");\n        return ret;\n    }\n\n    esp8266_hal_wps_trace_char('~');\n    esp8266_hal_wps_trace_char('E');\n\n    if (!sm) {",
+        "esp_wps.c eapol-start trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        case EAP_TYPE_IDENTITY:\n            wpa_printf(MSG_DEBUG, \"=========identity===========\");",
+        "        case EAP_TYPE_IDENTITY:\n            esp8266_hal_wps_trace_char('~');\n            esp8266_hal_wps_trace_char('I');\n            wpa_printf(MSG_DEBUG, \"=========identity===========\");",
+        "esp_wps.c identity trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        case EAP_TYPE_EXPANDED:\n            wpa_printf(MSG_DEBUG, \"=========expanded plen[%d], %d===========\", plen, sizeof(*ehdr));",
+        "        case EAP_TYPE_EXPANDED:\n            esp8266_hal_wps_trace_char('~');\n            esp8266_hal_wps_trace_char('X');\n            esp8266_hal_wps_trace_hex8(sm->wps->state);\n            wpa_printf(MSG_DEBUG, \"=========expanded plen[%d], %d===========\", plen, sizeof(*ehdr));",
+        "esp_wps.c expanded trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "            ret = wps_process_wps_mX_req(tmp, plen - sizeof(*ehdr) - 1, &res);\n            if (ret == 0 && res != WPS_FAILURE && res != WPS_IGNORE && res != WPS_FRAGMENT) {",
+        "            ret = wps_process_wps_mX_req(tmp, plen - sizeof(*ehdr) - 1, &res);\n            esp8266_hal_wps_trace_char('~');\n            esp8266_hal_wps_trace_char('x');\n            esp8266_hal_wps_trace_hex8(sm->wps->state);\n            esp8266_hal_wps_trace_hex8(res);\n            esp8266_hal_wps_trace_hex8((unsigned int)(-ret));\n            if (ret == 0 && res != WPS_FAILURE && res != WPS_IGNORE && res != WPS_FRAGMENT) {",
+        "esp_wps.c process-result trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    esp_wifi_disarm_sta_connection_timer_internal();\n\n    wps_set_status(WPS_STATUS_DISABLE);",
+        "    esp8266_hal_wps_trace_char('~');\n    esp8266_hal_wps_trace_char('T');\n    esp8266_hal_wps_trace_hex8(sm->wps->state);\n    esp8266_hal_wps_trace_hex8(wps_get_status());\n\n    esp_wifi_disarm_sta_connection_timer_internal();\n\n    wps_set_status(WPS_STATUS_DISABLE);",
+        "esp_wps.c timeout trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    if (sm->wps->state == WPS_FINISHED) {\n        wpa_printf(MSG_DEBUG, \"wps msg timeout WPS_FINISHED\");",
+        "    esp8266_hal_wps_trace_char('~');\n    esp8266_hal_wps_trace_char('M');\n    esp8266_hal_wps_trace_hex8(sm->wps->state);\n\n    if (sm->wps->state == WPS_FINISHED) {\n        wpa_printf(MSG_DEBUG, \"wps msg timeout WPS_FINISHED\");",
+        "esp_wps.c message-timeout trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        system_event_t evt;\n        evt.event_id = SYSTEM_EVENT_STA_WPS_ER_FAILED;\n        esp_event_send(&evt);\n\n        return ret;",
+        "        system_event_t evt;\n        evt.event_id = SYSTEM_EVENT_STA_WPS_ER_FAILED;\n        evt.event_info.sta_er_fail_reason = (((u32)sm->wps->state & 0xff) << 16) |\n                                            (((u32)res & 0xff) << 8) |\n                                            ((u32)(-ret) & 0xff);\n        esp_event_send(&evt);\n\n        return ret;",
+        "esp_wps.c WPS failure diagnostic reason",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched esp_wps.c");
+    patched
+}
+
+fn patch_wps_attr_build_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("wps_attr_build_patched.c");
+    let source_text = fs::read_to_string(source).expect("failed to read wps_attr_build.c");
+    let patched_text = replace_required(
+        &source_text,
+        "\t\t\twps->dh_ctx = dh5_init(&wps->dh_privkey, &pubkey);\n\n\t\t\twpa_printf(MSG_DEBUG, \"build public key finish\\n\");\n\n\t\t\tpubkey = wpabuf_zeropad(pubkey, 192);",
+        "\t\t\twps->dh_ctx = dh5_init(&wps->dh_privkey, &pubkey);\n\n\t\t\twpa_printf(MSG_DEBUG, \"build public key finish\\n\");\n\n\t\t\tif (pubkey == NULL) {\n\t\t\t\twpa_printf(MSG_DEBUG, \"WPS: Public key allocation failed\");\n\t\t\t\treturn -1;\n\t\t\t}\n\n\t\t\tpubkey = wpabuf_zeropad(pubkey, 192);",
+        "wps_attr_build.c precompute public-key null guard",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t\tif (wps->registrar)\n\t\t\tpubkey = wps->dh_pubkey_r;\n\t\telse\n\t\t\tpubkey = wps->dh_pubkey_e;\n\n\t\twpabuf_put_be16(msg, ATTR_PUBLIC_KEY);",
+        "\t\tif (wps->registrar)\n\t\t\tpubkey = wps->dh_pubkey_r;\n\t\telse\n\t\t\tpubkey = wps->dh_pubkey_e;\n\n\t\tif (pubkey == NULL) {\n\t\t\twpa_printf(MSG_DEBUG, \"WPS: Public key missing\");\n\t\t\treturn -1;\n\t\t}\n\n\t\twpabuf_put_be16(msg, ATTR_PUBLIC_KEY);",
+        "wps_attr_build.c public-key null guard",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched wps_attr_build.c");
+    patched
+}
+
+fn patch_wps_enrollee_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("wps_enrollee_patched.c");
+    let source_text = fs::read_to_string(source).expect("failed to read wps_enrollee.c");
+    let include_hook = concat!(
+        "#include \"wps/wps_dev_attr.h\"\n",
+        "static void esp8266_hal_wps_trace_char(char c) {\n",
+        "    volatile unsigned int *status = (volatile unsigned int *)(0x60000000 + 0x1c);\n",
+        "    volatile unsigned int *fifo = (volatile unsigned int *)0x60000000;\n",
+        "    if ((((*status) >> 16) & 0xffu) < 126u) {\n",
+        "        *fifo = (unsigned int)c;\n",
+        "    }\n",
+        "}\n"
+    );
+    let patched_text = replace_required(
+        &source_text,
+        "#include \"wps/wps_dev_attr.h\"\n",
+        include_hook,
+        "wps_enrollee.c trace hook",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        if (eattr == NULL) {\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "        if (eattr == NULL) {\n\t\tesp8266_hal_wps_trace_char('~');\n\t\tesp8266_hal_wps_trace_char('8');\n\t\tesp8266_hal_wps_trace_char('a');\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "wps_enrollee.c M8 eattr trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (wps_process_enrollee_nonce(wps, attr->enrollee_nonce) ||\n\t    wps_process_authenticator(wps, attr->authenticator, msg)) {\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "\tif (wps_process_enrollee_nonce(wps, attr->enrollee_nonce)) {\n\t\tesp8266_hal_wps_trace_char('~');\n\t\tesp8266_hal_wps_trace_char('8');\n\t\tesp8266_hal_wps_trace_char('n');\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}\n\tif (wps_process_authenticator(wps, attr->authenticator, msg)) {\n\t\tesp8266_hal_wps_trace_char('~');\n\t\tesp8266_hal_wps_trace_char('8');\n\t\tesp8266_hal_wps_trace_char('a');\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "wps_enrollee.c M8 nonce/auth trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (decrypted == NULL) {\n\t\twpa_printf(MSG_DEBUG,  \"WPS: Failed to decrypted Encrypted \"\n\t\t\t   \"Settings attribute\");\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "\tif (decrypted == NULL) {\n\t\tesp8266_hal_wps_trace_char('~');\n\t\tesp8266_hal_wps_trace_char('8');\n\t\tesp8266_hal_wps_trace_char('d');\n\t\twpa_printf(MSG_DEBUG,  \"WPS: Failed to decrypted Encrypted \"\n\t\t\t   \"Settings attribute\");\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "wps_enrollee.c M8 decrypt trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (wps_validate_m8_encr(decrypted, wps->wps->ap,\n\t\t\t\t attr->version2 != NULL) < 0) {\n\t\twpabuf_free(decrypted);\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "\tif (wps_validate_m8_encr(decrypted, wps->wps->ap,\n\t\t\t\t attr->version2 != NULL) < 0) {\n\t\tesp8266_hal_wps_trace_char('~');\n\t\tesp8266_hal_wps_trace_char('8');\n\t\tesp8266_hal_wps_trace_char('v');\n\t\twpabuf_free(decrypted);\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "wps_enrollee.c M8 validate trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (wps_parse_msg(decrypted, eattr) < 0 ||\n\t    wps_process_key_wrap_auth(wps, decrypted, eattr->key_wrap_auth) ||\n\t    wps_process_creds(wps, eattr->cred, eattr->cred_len,\n\t\t\t      eattr->num_cred, attr->version2 != NULL) ||\n\t    wps_process_ap_settings_e(wps, eattr, decrypted,\n\t\t\t\t      attr->version2 != NULL)) {\n\t\twpabuf_free(decrypted);\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "\tif (wps_parse_msg(decrypted, eattr) < 0) {\n\t\tesp8266_hal_wps_trace_char('~');\n\t\tesp8266_hal_wps_trace_char('8');\n\t\tesp8266_hal_wps_trace_char('p');\n\t\twpabuf_free(decrypted);\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}\n\tif (wps_process_key_wrap_auth(wps, decrypted, eattr->key_wrap_auth)) {\n\t\tesp8266_hal_wps_trace_char('~');\n\t\tesp8266_hal_wps_trace_char('8');\n\t\tesp8266_hal_wps_trace_char('k');\n\t\twpabuf_free(decrypted);\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}\n\tif (wps_process_creds(wps, eattr->cred, eattr->cred_len,\n\t\t\t      eattr->num_cred, attr->version2 != NULL)) {\n\t\tesp8266_hal_wps_trace_char('~');\n\t\tesp8266_hal_wps_trace_char('8');\n\t\tesp8266_hal_wps_trace_char('c');\n\t\twpabuf_free(decrypted);\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}\n\tif (wps_process_ap_settings_e(wps, eattr, decrypted,\n\t\t\t\t      attr->version2 != NULL)) {\n\t\tesp8266_hal_wps_trace_char('~');\n\t\tesp8266_hal_wps_trace_char('8');\n\t\tesp8266_hal_wps_trace_char('s');\n\t\twpabuf_free(decrypted);\n\t\twps->state = SEND_WSC_NACK;\n\t\tres = WPS_CONTINUE;\n\t\tgoto _out;\n\t}",
+        "wps_enrollee.c M8 final branch trace",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched wps_enrollee.c");
+    patched
+}
+
+fn replace_required(source: &str, from: &str, to: &str, label: &str) -> String {
+    let patched = source.replace(from, to);
+    assert_ne!(patched, source, "failed to patch {label}");
+    patched
 }
 
 /// Compile mbedTLS sources needed by wpa_supplicant and the TLS stack.

@@ -32,19 +32,129 @@ pub fn write_bytes(s: &[u8]) {
     }
 }
 
+/// Write a UTF-8 string directly to UART0.
+#[inline]
+pub fn write_str(s: &str) {
+    write_bytes(s.as_bytes());
+}
+
+/// Write a trailing CRLF.
+#[inline]
+pub fn write_newline() {
+    write_bytes(b"\r\n");
+}
+
+/// Convert a nibble to ASCII hex.
+#[inline]
+pub const fn hex_nibble(n: u8) -> u8 {
+    match n & 0x0f {
+        0..=9 => b'0' + (n & 0x0f),
+        _ => b'a' + ((n & 0x0f) - 10),
+    }
+}
+
+/// Write a `u32` as exactly 8 lowercase hex digits.
+#[inline]
+pub fn write_hex_u32(value: u32) {
+    write_byte(hex_nibble((value >> 28) as u8));
+    write_byte(hex_nibble((value >> 24) as u8));
+    write_byte(hex_nibble((value >> 20) as u8));
+    write_byte(hex_nibble((value >> 16) as u8));
+    write_byte(hex_nibble((value >> 12) as u8));
+    write_byte(hex_nibble((value >> 8) as u8));
+    write_byte(hex_nibble((value >> 4) as u8));
+    write_byte(hex_nibble(value as u8));
+}
+
+/// Write a `u8` as exactly 2 lowercase hex digits.
+#[inline]
+pub fn write_hex_u8(value: u8) {
+    write_byte(hex_nibble(value >> 4));
+    write_byte(hex_nibble(value));
+}
+
+/// Write a `u32` in decimal without using formatting machinery.
+#[inline]
+pub fn write_dec_u32(mut value: u32) {
+    let mut digits = [0u8; 10];
+    let mut cursor = digits.len();
+
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+
+    write_bytes(&digits[cursor..]);
+}
+
+/// Write an IPv4 address in dotted-decimal notation.
+#[inline]
+pub fn write_ipv4_octets(octets: [u8; 4]) {
+    write_dec_u32(octets[0] as u32);
+    write_byte(b'.');
+    write_dec_u32(octets[1] as u32);
+    write_byte(b'.');
+    write_dec_u32(octets[2] as u32);
+    write_byte(b'.');
+    write_dec_u32(octets[3] as u32);
+}
+
+/// Internal probe byte write.
+///
+/// In normal builds this compiles away entirely so compat/SDK tracing does not
+/// consume UART bandwidth or code size. Enable the `wifi-debug-trace` feature
+/// to keep the historical low-level probe stream.
+#[inline(always)]
+pub fn debug_byte(b: u8) {
+    #[cfg(feature = "wifi-debug-trace")]
+    {
+        write_byte(b);
+    }
+
+    #[cfg(not(feature = "wifi-debug-trace"))]
+    {
+        let _ = b;
+    }
+}
+
+/// Internal best-effort debug string write.
+#[inline(always)]
+pub fn debug_str(s: &str) {
+    #[cfg(feature = "wifi-debug-log")]
+    {
+        write_str(s);
+    }
+
+    #[cfg(not(feature = "wifi-debug-log"))]
+    {
+        let _ = s;
+    }
+}
+
 /// Best-effort single-byte trace write — tries briefly, then drops.
 ///
 /// Reduced spin count (was 16384) to avoid stalling the tick ISR when the
 /// UART FIFO fills up from trace output.
+#[inline(always)]
 pub fn trace_byte(b: u8) {
+    #[cfg(feature = "wifi-debug-trace")]
     unsafe {
         for _ in 0..8 {
             if (UART0_STATUS.read_volatile() >> 16) & 0xFF < 128 {
                 UART0_FIFO.write_volatile(b as u32);
-                break;
+                return;
             }
             core::hint::spin_loop();
         }
+    }
+
+    #[cfg(not(feature = "wifi-debug-trace"))]
+    {
+        let _ = b;
     }
 }
 
@@ -75,5 +185,22 @@ macro_rules! println {
         use core::fmt::Write;
         let _ = write!($crate::logger::UartWriter, $($arg)*);
         $crate::logger::write_bytes(b"\r\n");
+    }};
+}
+
+/// Internal text logging that compiles away unless `wifi-debug-log` is enabled.
+#[macro_export]
+macro_rules! wifi_debugln {
+    () => {{
+        #[cfg(feature = "wifi-debug-log")]
+        {
+            $crate::logger::write_newline();
+        }
+    }};
+    ($($arg:tt)*) => {{
+        #[cfg(feature = "wifi-debug-log")]
+        {
+            $crate::println!($($arg)*);
+        }
     }};
 }

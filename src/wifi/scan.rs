@@ -101,7 +101,7 @@ impl AccessPointInfo {
 /// Temporary buffers for the raw scan config. Must live as long as the SDK
 /// needs the `wifi_scan_config_t` (i.e., until the scan starts for blocking
 /// mode, or until scan completes for async mode).
-struct RawScanConfigBuffers {
+pub(crate) struct RawScanConfigBuffers {
     ssid_buf: [u8; 33],
     bssid_buf: [u8; 6],
     has_ssid: bool,
@@ -115,7 +115,7 @@ struct RawScanConfigBuffers {
 }
 
 impl RawScanConfigBuffers {
-    fn from_config(config: &ScanConfig) -> Self {
+    pub(crate) fn from_config(config: &ScanConfig) -> Self {
         let mut ssid_buf = [0u8; 33];
         let mut bssid_buf = [0u8; 6];
         let has_ssid = if let Some(s) = &config.ssid {
@@ -145,7 +145,7 @@ impl RawScanConfigBuffers {
         }
     }
 
-    fn to_raw(&mut self) -> sys::wifi_scan_config_t {
+    pub(crate) fn to_raw(&mut self) -> sys::wifi_scan_config_t {
         let ssid_ptr = if self.has_ssid {
             self.ssid_buf.as_mut_ptr()
         } else {
@@ -236,7 +236,7 @@ pub async fn scan_async(
     // Wait for scan completion.
     loop {
         let event = sub.next_message_pure().await;
-        if let crate::wifi::WifiEvent::ScanDone { success, .. } = event {
+        if let crate::wifi::event::WifiEvent::ScanDone { success, .. } = event {
             // Disarm the guard — we'll handle cleanup via get_scan_results.
             core::mem::forget(_guard);
             if success {

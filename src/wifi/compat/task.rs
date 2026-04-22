@@ -460,7 +460,7 @@ unsafe fn report_stack_canary_once(idx: usize) {
             b'I' => b'i',
             _ => b'x',
         };
-        crate::logger::write_byte(marker);
+        crate::logger::debug_byte(marker);
 
         let task = TASKS.as_mut_ptr().add(idx);
         super::port::vApplicationStackOverflowHook(task.cast::<c_void>(), (*task).name.as_ptr());
@@ -472,6 +472,7 @@ fn marker_from_task_name(name: &[u8; 16]) -> u8 {
         [b'u', b'i', b'T', ..] => b'U',
         [b's', b'y', b's', ..] => b'S',
         [b'p', b'p', b'T', ..] => b'P',
+        [b'w', b'p', b's', b'T', ..] => b'W',
         [b'T', b'm', b'r', ..] => b'M',
         [b'I', b'D', b'L', b'E', ..] => b'I',
         [b'm', b'a', b'i', b'n', ..] => b'B',
@@ -925,10 +926,10 @@ unsafe fn cleanup_deleted_tasks() {
             if let Some(idx) = idx {
                 if !FIRST_CLEANUP_TRACE_DONE {
                     FIRST_CLEANUP_TRACE_DONE = true;
-                    crate::logger::write_byte(b'Z');
-                    crate::logger::write_byte(debug_current_task_marker());
-                    crate::logger::write_byte(task_name_marker(idx));
-                    crate::logger::write_byte(task_state_marker(TASKS[idx].state));
+                    crate::logger::debug_byte(b'Z');
+                    crate::logger::debug_byte(debug_current_task_marker());
+                    crate::logger::debug_byte(task_name_marker(idx));
+                    crate::logger::debug_byte(task_state_marker(TASKS[idx].state));
                 }
                 destroy_task_slot(idx);
             } else {
@@ -1030,7 +1031,7 @@ pub(crate) unsafe fn create_idle_task() {
         xTaskCreate(
             idle_task,
             b"IDLE\0".as_ptr() as *const _,
-            1024, // Matches CONFIG_FREERTOS_IDLE_TASK_STACKSIZE on this branch.
+            512,
             core::ptr::null_mut(),
             0, // lowest priority
             core::ptr::null_mut(),
@@ -1119,7 +1120,7 @@ pub unsafe extern "C" fn xTaskCreate(
         TASK_MARKERS[slot] = marker_from_task_name(&tcb.name);
 
         // Debug: log task creation
-        crate::println!(
+        crate::wifi_debugln!(
             "xTaskCreate: [{}] prio={} name={}",
             slot,
             prio,
@@ -1144,11 +1145,11 @@ pub unsafe extern "C" fn xTaskCreate(
 
         if should_yield {
             if TASK_MARKERS[slot] == b'S' {
-                crate::logger::write_byte(b'(');
+                crate::logger::debug_byte(b'(');
             }
             super::port::PendSV(1);
             if TASK_MARKERS[slot] == b'S' {
-                crate::logger::write_byte(b')');
+                crate::logger::debug_byte(b')');
             }
         }
 
@@ -1202,11 +1203,11 @@ pub unsafe extern "C" fn vTaskDelete(handle: *mut c_void) {
         if idx < MAX_TASKS {
             if !FIRST_DELETE_TRACE_DONE {
                 FIRST_DELETE_TRACE_DONE = true;
-                crate::logger::write_byte(b'D');
-                crate::logger::write_byte(debug_current_task_marker());
-                crate::logger::write_byte(if idx == CURRENT_TASK { b'S' } else { b'O' });
-                crate::logger::write_byte(task_name_marker(idx));
-                crate::logger::write_byte(task_state_marker(TASKS[idx].state));
+                crate::logger::debug_byte(b'D');
+                crate::logger::debug_byte(debug_current_task_marker());
+                crate::logger::debug_byte(if idx == CURRENT_TASK { b'S' } else { b'O' });
+                crate::logger::debug_byte(task_name_marker(idx));
+                crate::logger::debug_byte(task_state_marker(TASKS[idx].state));
             }
             cancel_task_wait_locked(idx);
             clear_pending_ready_locked(idx);
@@ -1540,21 +1541,21 @@ unsafe fn xTaskIncrementTick_impl() -> i32 {
             0
         };
         if current_marker == b'U' && !FIRST_UI_TICK_DECISION_TRACE_DONE {
-            crate::logger::write_byte(b'1');
+            crate::logger::debug_byte(b'1');
         }
 
         g_tick_stage = b'w' as u32;
         let wake_switch = wake_timed_out_tasks_locked(current_prio);
         let mut switch_needed = wake_switch;
         if current_marker == b'U' && !FIRST_UI_TICK_DECISION_TRACE_DONE {
-            crate::logger::write_byte(if wake_switch { b'3' } else { b'2' });
+            crate::logger::debug_byte(if wake_switch { b'3' } else { b'2' });
         }
 
         // Process software timers
         g_tick_stage = b't' as u32;
         super::timer::process_timers(TICK_COUNT);
         if current_marker == b'U' && !FIRST_UI_TICK_DECISION_TRACE_DONE {
-            crate::logger::write_byte(b'4');
+            crate::logger::debug_byte(b'4');
         }
 
         // SDK `xTaskIncrementTick()` only does RTOS tick bookkeeping. Keep
@@ -1564,7 +1565,7 @@ unsafe fn xTaskIncrementTick_impl() -> i32 {
             g_tick_stage = b'a' as u32;
             crate::wifi::timer_driver::poll_alarms();
             if current_marker == b'U' && !FIRST_UI_TICK_DECISION_TRACE_DONE {
-                crate::logger::write_byte(b'5');
+                crate::logger::debug_byte(b'5');
                 FIRST_UI_TICK_DECISION_TRACE_DONE = true;
             }
         }
@@ -1986,8 +1987,8 @@ unsafe fn compact_pending_ready_locked() {
         let len = PENDING_READY_LEN.min(MAX_TASKS);
         if PENDING_READY_LEN > MAX_TASKS && !FIRST_PENDING_READY_LEN_CLAMP_TRACE_DONE {
             FIRST_PENDING_READY_LEN_CLAMP_TRACE_DONE = true;
-            crate::logger::write_byte(b'j');
-            crate::logger::write_byte(debug_current_task_marker());
+            crate::logger::debug_byte(b'j');
+            crate::logger::debug_byte(debug_current_task_marker());
         }
         let mut seen = [false; MAX_TASKS];
         let mut write = 0usize;
@@ -2019,8 +2020,8 @@ unsafe fn enqueue_deleted_task_locked(idx: usize) {
         let len = DELETED_TASK_QUEUE_LEN.min(MAX_TASKS);
         if DELETED_TASK_QUEUE_LEN > MAX_TASKS && !FIRST_DELETED_QUEUE_LEN_CLAMP_TRACE_DONE {
             FIRST_DELETED_QUEUE_LEN_CLAMP_TRACE_DONE = true;
-            crate::logger::write_byte(b'k');
-            crate::logger::write_byte(debug_current_task_marker());
+            crate::logger::debug_byte(b'k');
+            crate::logger::debug_byte(debug_current_task_marker());
         }
 
         for slot in 0..len {
@@ -2046,8 +2047,8 @@ unsafe fn pop_deleted_task_locked() -> Option<usize> {
         let len = DELETED_TASK_QUEUE_LEN.min(MAX_TASKS);
         if DELETED_TASK_QUEUE_LEN > MAX_TASKS && !FIRST_DELETED_QUEUE_LEN_CLAMP_TRACE_DONE {
             FIRST_DELETED_QUEUE_LEN_CLAMP_TRACE_DONE = true;
-            crate::logger::write_byte(b'k');
-            crate::logger::write_byte(debug_current_task_marker());
+            crate::logger::debug_byte(b'k');
+            crate::logger::debug_byte(debug_current_task_marker());
         }
 
         if DELETED_TASKS_WAITING_CLEANUP == 0 || len == 0 {

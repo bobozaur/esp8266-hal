@@ -6,6 +6,10 @@
 
 use core::ffi::c_void;
 use esp8266_wifi_sys as sys;
+use portable_atomic::{AtomicI32, AtomicU32, Ordering};
+
+#[cfg(feature = "wifi-debug-trace")]
+use crate::wifi_core::TxDebugSnapshot;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -13,9 +17,34 @@ use esp8266_wifi_sys as sys;
 
 const EP_OFFSET: usize = 36;
 
+static TX_CALLS: AtomicU32 = AtomicU32::new(0);
+static TX_OK: AtomicU32 = AtomicU32::new(0);
+static TX_WOULD_BLOCK: AtomicU32 = AtomicU32::new(0);
+static TX_NO_MEM: AtomicU32 = AtomicU32::new(0);
+static TX_REJECTED: AtomicU32 = AtomicU32::new(0);
+static TX_LAST_RET: AtomicI32 = AtomicI32::new(0);
+static TX_LAST_LEN: AtomicU32 = AtomicU32::new(0);
+static TX_LAST_ALLOC_SIZE: AtomicU32 = AtomicU32::new(0);
+static TX_LAST_FREE_HEAP: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(feature = "wifi-debug-trace")]
+pub fn internal_tx_debug_snapshot() -> TxDebugSnapshot {
+    TxDebugSnapshot {
+        calls: TX_CALLS.load(Ordering::Relaxed),
+        ok: TX_OK.load(Ordering::Relaxed),
+        would_block: TX_WOULD_BLOCK.load(Ordering::Relaxed),
+        no_mem: TX_NO_MEM.load(Ordering::Relaxed),
+        rejected: TX_REJECTED.load(Ordering::Relaxed),
+        last_ret: TX_LAST_RET.load(Ordering::Relaxed),
+        last_len: TX_LAST_LEN.load(Ordering::Relaxed),
+        last_alloc_size: TX_LAST_ALLOC_SIZE.load(Ordering::Relaxed),
+        last_free_heap: TX_LAST_FREE_HEAP.load(Ordering::Relaxed),
+    }
+}
+
 /// Default PPT task stack size (from SDK config).
 #[no_mangle]
-pub static _g_esp_wifi_ppt_task_stk_size: usize = 4096;
+pub static _g_esp_wifi_ppt_task_stk_size: usize = 2816;
 
 /// Whether to connect to open routers when a password is set.
 #[no_mangle]
@@ -179,8 +208,17 @@ pub unsafe extern "C" fn esp_wifi_try_rate_from_high() -> bool {
 pub unsafe extern "C" fn esp_wifi_internal_tx(wifi_if: u32, buffer: *mut c_void, len: u16) -> i32 {
     unsafe {
         let total = len as usize + EP_OFFSET;
+        TX_CALLS.fetch_add(1, Ordering::Relaxed);
+        TX_LAST_LEN.store(len as u32, Ordering::Relaxed);
+        TX_LAST_ALLOC_SIZE.store(total as u32, Ordering::Relaxed);
+        TX_LAST_FREE_HEAP.store(
+            super::super::compat::memory::esp_get_free_heap_size(),
+            Ordering::Relaxed,
+        );
         let alloc = super::super::compat::memory::malloc(total);
         if alloc.is_null() {
+            TX_NO_MEM.fetch_add(1, Ordering::Relaxed);
+            TX_LAST_RET.store(sys::ESP_ERR_NO_MEM, Ordering::Relaxed);
             return sys::ESP_ERR_NO_MEM;
         }
 
@@ -199,6 +237,18 @@ pub unsafe extern "C" fn esp_wifi_internal_tx(wifi_if: u32, buffer: *mut c_void,
         let ret = ieee80211_output_pbuf(&mut aio);
         if ret != 0 {
             super::super::compat::memory::free(aio.arg);
+        }
+        TX_LAST_RET.store(ret, Ordering::Relaxed);
+        match ret {
+            0 => {
+                TX_OK.fetch_add(1, Ordering::Relaxed);
+            }
+            -1 => {
+                TX_WOULD_BLOCK.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                TX_REJECTED.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         ret

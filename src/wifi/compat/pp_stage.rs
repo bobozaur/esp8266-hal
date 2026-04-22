@@ -147,6 +147,62 @@ pub static mut g_sig5_post_calls: u32 = 0;
 pub static mut g_sig5_post_lmac_snapshot: u32 = 0;
 #[no_mangle]
 pub static mut g_sig5_post_enqueue_snapshot: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_decap_calls: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_decap_zero_returns: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_ccmp_decrypt_calls: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_ccmp_decrypt_ok: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_ccmp_decrypt_fail: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_crypto_decap_calls: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_crypto_decap_ok: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_crypto_decap_fail: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_calls: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_if0: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_if1: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_other_if: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_last_if: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_last_len: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_last_sta_slot: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_last_ap_slot: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_cb_hit: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_cb_miss: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_last_cb_delta: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_heap_checks: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_last_free_heap: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_alloc_attempts: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_alloc_failures: u32 = 0;
+#[no_mangle]
+pub static mut g_ieee80211_deliver_data_last_alloc_size: u32 = 0;
+static mut g_ieee80211_deliver_data_probe_active: u32 = 0;
+const DELIVER_HEAP_GATE: u32 = 0x1800;
+const DELIVER_HEAP_MARGIN: u32 = 96;
+const DELIVER_HEAP_HEADER_BYTES: u32 = 4;
+static mut DELIVER_ENTER_LOGGED: bool = false;
+static mut DELIVER_HEAP_LOGGED: bool = false;
+static mut DELIVER_ALLOC_LOGGED: bool = false;
+static mut DELIVER_EXIT_LOGGED: bool = false;
 
 #[repr(C)]
 struct RomOsTimer {
@@ -193,6 +249,28 @@ unsafe fn set_stage(marker: u8) {
             return;
         }
         core::ptr::write_volatile(&raw mut g_pp_stage, marker as u32);
+    }
+}
+
+#[inline(always)]
+unsafe fn packet_payload_ptr(packet: u32) -> u32 {
+    if packet == 0 {
+        return 0;
+    }
+
+    unsafe { core::ptr::read_volatile((packet.wrapping_add(0x0c)) as *const u32) }
+}
+
+#[inline(always)]
+unsafe fn packet_len(packet: u32) -> u32 {
+    if packet == 0 {
+        return 0;
+    }
+
+    unsafe {
+        u32::from(core::ptr::read_unaligned(
+            (packet.wrapping_add(0x1a)) as *const u16,
+        ))
     }
 }
 
@@ -473,14 +551,14 @@ fn hex_nibble(n: u8) -> u8 {
 #[inline(always)]
 unsafe fn trace_hex32(value: u32) {
     unsafe {
-        crate::logger::write_byte(hex_nibble((value >> 28) as u8));
-        crate::logger::write_byte(hex_nibble((value >> 24) as u8));
-        crate::logger::write_byte(hex_nibble((value >> 20) as u8));
-        crate::logger::write_byte(hex_nibble((value >> 16) as u8));
-        crate::logger::write_byte(hex_nibble((value >> 12) as u8));
-        crate::logger::write_byte(hex_nibble((value >> 8) as u8));
-        crate::logger::write_byte(hex_nibble((value >> 4) as u8));
-        crate::logger::write_byte(hex_nibble(value as u8));
+        crate::logger::debug_byte(hex_nibble((value >> 28) as u8));
+        crate::logger::debug_byte(hex_nibble((value >> 24) as u8));
+        crate::logger::debug_byte(hex_nibble((value >> 20) as u8));
+        crate::logger::debug_byte(hex_nibble((value >> 16) as u8));
+        crate::logger::debug_byte(hex_nibble((value >> 12) as u8));
+        crate::logger::debug_byte(hex_nibble((value >> 8) as u8));
+        crate::logger::debug_byte(hex_nibble((value >> 4) as u8));
+        crate::logger::debug_byte(hex_nibble(value as u8));
     }
 }
 
@@ -572,6 +650,8 @@ pub(crate) unsafe fn reset_pp_stage_trace() {
 
 extern "C" {
     static g_wifi_nvs: *const u8;
+    static mut g_sta_rx_cb_calls: u32;
+    static mut sta_rxcb: [u32; 2];
     fn __real_pm_sleep_for(param: *const c_void) -> bool;
     fn __real_pm_onBcnRx(param_1: *mut c_void, param_2: *mut c_void, param_3: *mut c_void);
     fn __real_os_timer_disarm(timer: *mut c_void);
@@ -620,6 +700,8 @@ extern "C" {
     fn __real_ieee80211_setup_rates(param_1: u32, param_2: u32, param_3: u32, param_4: u32);
     fn __real_ieee80211_sta_new_state(param_1: u32, param_2: u32, param_3: u32) -> u32;
     fn __real_ieee80211_ccmp_decrypt(param_1: u32, param_2: u32) -> u32;
+    fn __real_ieee80211_crypto_decap(param_1: u32, param_2: u32, param_3: u32) -> u32;
+    fn __real_ieee80211_deliver_data(param_1: u32, param_2: u32);
     fn __real_ieee80211_send_mgmt(param_1: u32, param_2: u32, param_3: u32) -> u32;
     fn __real_ets_timer_proc();
     fn __real_ets_timer_setfn(timer: *mut c_void, callback: *mut c_void, arg: *mut c_void);
@@ -996,7 +1078,11 @@ pub unsafe extern "C" fn __wrap_ieee80211_decap(
 ) -> u32 {
     unsafe {
         set_stage(b'd');
+        g_ieee80211_decap_calls = g_ieee80211_decap_calls.wrapping_add(1);
         let ret = __real_ieee80211_decap(param_1, param_2, param_3, param_4);
+        if ret == 0 {
+            g_ieee80211_decap_zero_returns = g_ieee80211_decap_zero_returns.wrapping_add(1);
+        }
         set_stage(b'D');
         ret
     }
@@ -1034,9 +1120,149 @@ pub unsafe extern "C" fn __wrap_ieee80211_sta_new_state(
 pub unsafe extern "C" fn __wrap_ieee80211_ccmp_decrypt(param_1: u32, param_2: u32) -> u32 {
     unsafe {
         set_stage(b'c');
+        g_ieee80211_ccmp_decrypt_calls = g_ieee80211_ccmp_decrypt_calls.wrapping_add(1);
         let ret = __real_ieee80211_ccmp_decrypt(param_1, param_2);
+        if ret == 0 {
+            g_ieee80211_ccmp_decrypt_fail = g_ieee80211_ccmp_decrypt_fail.wrapping_add(1);
+        } else {
+            g_ieee80211_ccmp_decrypt_ok = g_ieee80211_ccmp_decrypt_ok.wrapping_add(1);
+        }
         set_stage(b'C');
         ret
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_ieee80211_crypto_decap(
+    param_1: u32,
+    param_2: u32,
+    param_3: u32,
+) -> u32 {
+    unsafe {
+        set_stage(b'z');
+        g_ieee80211_crypto_decap_calls = g_ieee80211_crypto_decap_calls.wrapping_add(1);
+        let ret = __real_ieee80211_crypto_decap(param_1, param_2, param_3);
+        if ret == 0 {
+            g_ieee80211_crypto_decap_fail = g_ieee80211_crypto_decap_fail.wrapping_add(1);
+        } else {
+            g_ieee80211_crypto_decap_ok = g_ieee80211_crypto_decap_ok.wrapping_add(1);
+        }
+        set_stage(b'Z');
+        ret
+    }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn note_deliver_probe_free_heap(free_heap: u32) {
+    unsafe {
+        if g_ieee80211_deliver_data_probe_active == 0 {
+            return;
+        }
+        g_ieee80211_deliver_data_heap_checks = g_ieee80211_deliver_data_heap_checks.wrapping_add(1);
+        g_ieee80211_deliver_data_last_free_heap = free_heap;
+    }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn note_deliver_probe_alloc(size: usize, success: bool) {
+    unsafe {
+        if g_ieee80211_deliver_data_probe_active == 0 {
+            return;
+        }
+        g_ieee80211_deliver_data_alloc_attempts =
+            g_ieee80211_deliver_data_alloc_attempts.wrapping_add(1);
+        g_ieee80211_deliver_data_last_alloc_size = size as u32;
+        if !success {
+            g_ieee80211_deliver_data_alloc_failures =
+                g_ieee80211_deliver_data_alloc_failures.wrapping_add(1);
+        }
+        let _ = size;
+        if !DELIVER_ALLOC_LOGGED {
+            DELIVER_ALLOC_LOGGED = true;
+            crate::logger::trace_byte(b'!');
+            crate::logger::trace_byte(if success { b'A' } else { b'a' });
+        }
+    }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn adjust_deliver_free_heap(free_heap: u32) -> u32 {
+    unsafe {
+        if g_ieee80211_deliver_data_probe_active == 0 {
+            return free_heap;
+        }
+
+        let needed =
+            g_ieee80211_deliver_data_last_len + DELIVER_HEAP_HEADER_BYTES + DELIVER_HEAP_MARGIN;
+        let adjusted = if free_heap >= DELIVER_HEAP_GATE {
+            free_heap
+        } else if free_heap >= needed {
+            DELIVER_HEAP_GATE
+        } else {
+            free_heap
+        };
+        if !DELIVER_HEAP_LOGGED {
+            let _ = (free_heap, needed);
+            DELIVER_HEAP_LOGGED = true;
+            crate::logger::trace_byte(b'!');
+            crate::logger::trace_byte(if adjusted == DELIVER_HEAP_GATE {
+                b'H'
+            } else {
+                b'h'
+            });
+        }
+        adjusted
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_ieee80211_deliver_data(param_1: u32, param_2: u32) {
+    unsafe {
+        set_stage(b'l');
+        g_ieee80211_deliver_data_calls = g_ieee80211_deliver_data_calls.wrapping_add(1);
+        g_ieee80211_deliver_data_last_if = param_1;
+        g_ieee80211_deliver_data_last_len = packet_len(param_2);
+        g_ieee80211_deliver_data_last_sta_slot = sta_rxcb[0];
+        g_ieee80211_deliver_data_last_ap_slot = sta_rxcb[1];
+        g_ieee80211_deliver_data_last_free_heap = 0;
+        g_ieee80211_deliver_data_last_alloc_size = 0;
+        if !DELIVER_ENTER_LOGGED {
+            let _ = param_1;
+            let _ = g_ieee80211_deliver_data_last_len;
+            DELIVER_ENTER_LOGGED = true;
+            crate::logger::trace_byte(b'!');
+            crate::logger::trace_byte(b'D');
+        }
+        match param_1 {
+            0 => g_ieee80211_deliver_data_if0 = g_ieee80211_deliver_data_if0.wrapping_add(1),
+            1 => g_ieee80211_deliver_data_if1 = g_ieee80211_deliver_data_if1.wrapping_add(1),
+            _ => {
+                g_ieee80211_deliver_data_other_if =
+                    g_ieee80211_deliver_data_other_if.wrapping_add(1)
+            }
+        }
+        let cb_calls_before = g_sta_rx_cb_calls;
+        g_ieee80211_deliver_data_probe_active = 1;
+        __real_ieee80211_deliver_data(param_1, param_2);
+        g_ieee80211_deliver_data_probe_active = 0;
+        let cb_delta = g_sta_rx_cb_calls.wrapping_sub(cb_calls_before);
+        g_ieee80211_deliver_data_last_cb_delta = cb_delta;
+        if cb_delta == 0 {
+            g_ieee80211_deliver_data_cb_miss = g_ieee80211_deliver_data_cb_miss.wrapping_add(1);
+        } else {
+            g_ieee80211_deliver_data_cb_hit = g_ieee80211_deliver_data_cb_hit.wrapping_add(1);
+        }
+        if !DELIVER_EXIT_LOGGED {
+            let _ = (
+                g_ieee80211_deliver_data_heap_checks,
+                g_ieee80211_deliver_data_alloc_attempts,
+                g_ieee80211_deliver_data_alloc_failures,
+            );
+            DELIVER_EXIT_LOGGED = true;
+            crate::logger::trace_byte(b'!');
+            crate::logger::trace_byte(if cb_delta == 0 { b'x' } else { b'X' });
+        }
+        set_stage(b'L');
     }
 }
 

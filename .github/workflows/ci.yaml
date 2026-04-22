@@ -9,19 +9,71 @@ name: CI
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
 
 jobs:
-  check-xtensa:
-    name: Check the examples
+  test-host-core:
+    name: Host core tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests
+
+  test-xtask:
+    name: xtask tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p xtask --target x86_64-unknown-linux-gnu
+
+  test-vendored-smoltcp:
+    name: Vendored smoltcp tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --manifest-path vendor/smoltcp/Cargo.toml --target x86_64-unknown-linux-gnu --no-default-features --features alloc,medium-ethernet,proto-ipv4,socket-tcp,socket-udp,socket-dhcpv4
+
+  check-wifi-examples:
+    name: Check WiFi example (${{ matrix.example }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: wifi_core_connect
+            features: interrupt,rt,wifi-core,wifi,wifi-sta
+          - example: raw_scan
+            features: interrupt,rt,wifi-core,wifi,wifi-sta
+          - example: wifi_core_dhcp_probe
+            features: interrupt,rt,wifi-embassy-net,wifi-sta
+          - example: tcp_server
+            features: interrupt,rt,wifi-embassy-net,wifi-sta
+          - example: tcp_client
+            features: interrupt,rt,wifi-embassy-net,wifi-sta
+          - example: sta_static_ip
+            features: interrupt,rt,wifi-embassy-net,wifi-sta
+          - example: wifi_ap
+            features: interrupt,rt,wifi-ap,wifi-embassy-net
+          - example: wifi_ap_sta
+            features: interrupt,rt,wifi-ap,wifi-sta,wifi-embassy-net
+          - example: wifi_wps
+            features: interrupt,rt,wifi-sta,wifi-wps
+          - example: wifi_smartconfig
+            features: interrupt,rt,wifi-sta,wifi-smartconfig
+          - example: wifi_esp_now_tx
+            features: interrupt,rt,wifi-sta,wifi-esp-now
+          - example: wifi_esp_now_rx
+            features: interrupt,rt,wifi-sta,wifi-esp-now
+          - example: wifi_promisc
+            features: interrupt,rt,wifi-sta,wifi-promiscuous
+    steps:
+      - uses: actions/checkout@v4
       - uses: esp-rs/xtensa-toolchain@v1.1
         with:
           default: true
           ldproxy: false
-      - uses: Swatinem/rust-cache@v1
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --examples --target=xtensa-esp8266-none-elf -Zbuild-std=core
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --example ${{ matrix.example }} --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features ${{ matrix.features }}

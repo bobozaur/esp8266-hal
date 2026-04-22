@@ -144,7 +144,7 @@ pub unsafe fn hardware_init() {
         // ---- Reset reason bookkeeping ----
         crate::logger::trace_byte(b'E');
         esp_reset_reason_init();
-        crate::println!("rr {} {}", reset_reason_early, esp_reset_reason());
+        crate::wifi_debugln!("rr {} {}", reset_reason_early, esp_reset_reason());
 
         // ---- Task watchdog ----
         crate::logger::trace_byte(b'F');
@@ -167,7 +167,7 @@ pub unsafe fn hardware_init_safe() {
     unsafe {
         let reset_reason_early = esp_reset_reason_early();
 
-        crate::println!("hw[1] init_array");
+        crate::wifi_debugln!("hw[1] init_array");
         let mut func = __init_array_start as *const unsafe extern "C" fn();
         let end = __init_array_end as *const unsafe extern "C" fn();
         while func < end {
@@ -175,31 +175,31 @@ pub unsafe fn hardware_init_safe() {
             func = func.add(1);
         }
 
-        crate::println!("hw[2] phy_clk");
+        crate::wifi_debugln!("hw[2] phy_clk");
         esp_phy_init_clk();
 
-        crate::println!("hw[3] gpio");
+        crate::wifi_debugln!("hw[3] gpio");
         let ret = base_gpio_init();
-        crate::println!("hw[3] gpio = {}", ret);
+        crate::wifi_debugln!("hw[3] gpio = {}", ret);
 
-        crate::println!("hw[4] mac");
+        crate::wifi_debugln!("hw[4] mac");
         if reset_reason_early != ESP_RST_FAST_SW {
             let ret = esp_mac_init();
-            crate::println!("hw[4] mac = {}", ret);
+            crate::wifi_debugln!("hw[4] mac = {}", ret);
         }
 
-        crate::println!("hw[5] reset_reason");
+        crate::wifi_debugln!("hw[5] reset_reason");
         esp_reset_reason_init();
-        crate::println!("rr {} {}", reset_reason_early, esp_reset_reason());
+        crate::wifi_debugln!("rr {} {}", reset_reason_early, esp_reset_reason());
 
-        crate::println!("hw[6] wdt");
+        crate::wifi_debugln!("hw[6] wdt");
         esp_task_wdt_init();
 
-        crate::println!("hw[7] pthread");
+        crate::wifi_debugln!("hw[7] pthread");
         let ret = esp_pthread_init();
-        crate::println!("hw[7] pthread = {}", ret);
+        crate::wifi_debugln!("hw[7] pthread = {}", ret);
 
-        crate::println!("hw_init: done");
+        crate::wifi_debugln!("hw_init: done");
     }
 }
 
@@ -252,16 +252,19 @@ pub unsafe fn init_compat_scheduler() {
 /// - `components/esp_common/include/esp_task.h`
 /// - `components/esp8266/source/startup.c`
 const SDK_MAIN_TASK_STACK_BYTES: usize = 3584;
-/// Rust async `uiT` needs extra headroom beyond the SDK's C main task.
+/// Rust async `uiT` needs the SDK's C main-task stack budget.
 ///
 /// Basis:
-/// - verified `tcp_server` build: main-task poll frame `0x720`
-/// - verified `minimal_connect` build: main-task poll frame `0x180`
+/// - the cleaned `tcp_server` path still leaves `2732` bytes of untouched
+///   `uiT` stack at the observed worst point (`step444`: `ui_size=5296`)
+/// - `ppT` creation was simultaneously short by ~`1400` bytes
+/// - ESP-NOW initialization uses the WiFi SDK initialization path deeply enough
+///   to require near-SDK main-task stack headroom
 ///
-/// The extra `0x600` bytes rounds up the observed `0x5A0` poll-frame delta.
-const RUST_ASYNC_MAIN_TASK_EXTRA_STACK_BYTES: usize = 0x600;
-const RUST_ASYNC_MAIN_TASK_STACK_BYTES: usize =
-    SDK_MAIN_TASK_STACK_BYTES + RUST_ASYNC_MAIN_TASK_EXTRA_STACK_BYTES;
+/// The WiFi blob can use deep SDK init paths before the executor yields to
+/// smaller feature tasks. Keep the stack aligned with the SDK main task rather
+/// than trading away correctness for a small heap gain.
+const RUST_ASYNC_MAIN_TASK_STACK_BYTES: usize = SDK_MAIN_TASK_STACK_BYTES;
 const RUST_ASYNC_MAIN_TASK_STACK_DEPTH: u16 = RUST_ASYNC_MAIN_TASK_STACK_BYTES as u16;
 const SDK_MAIN_TASK_PRIORITY: u32 = 1;
 

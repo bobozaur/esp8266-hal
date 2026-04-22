@@ -144,33 +144,33 @@ pub unsafe fn init_rf() {
         buf[..128].copy_from_slice(&PHY_INIT_DATA_DEFAULT);
         // cal_data is all zeros → full calibration will be performed.
 
-        crate::println!("phy: rf init start");
+        crate::wifi_debugln!("phy: rf init start");
 
         // Set RF wakeup option.
         phy_afterwake_set_rfoption(1);
-        crate::println!("phy: afterwake done");
+        crate::wifi_debugln!("phy: afterwake done");
 
         // Full calibration (option 3 = cal data invalid → recalibrate).
         phy_set_powerup_option(3);
-        crate::println!("phy: powerup option done");
+        crate::wifi_debugln!("phy: powerup option done");
 
         // Flush UARTs — register_chipv6_phy may touch clock config.
         uart_tx_wait_idle(UART0_BASE);
         uart_tx_wait_idle(UART1_BASE);
 
         // The main blob call — configures all RF hardware.
-        crate::println!("phy: register_chipv6_phy...");
+        crate::wifi_debugln!("phy: register_chipv6_phy...");
         register_chipv6_phy(buf.as_ptr());
-        crate::println!("phy: register_chipv6_phy done");
+        crate::wifi_debugln!("phy: register_chipv6_phy done");
 
         // Disable AGC after init (SDK does this).
         phy_disable_agc();
-        crate::println!("phy: agc disabled");
+        crate::wifi_debugln!("phy: agc disabled");
 
         // Read back calibration results from RTC memory.
         let mut cal_out = [0u8; 628];
         get_data_from_rtc(cal_out.as_mut_ptr());
-        crate::println!("phy: rf init complete");
+        crate::wifi_debugln!("phy: rf init complete");
     }
 }
 

@@ -43,14 +43,14 @@ fn hex_nibble(value: u8) -> u8 {
 
 #[inline(always)]
 fn trace_mac_bytes(call_idx: u8, mac_type: u32, mac: &[u8; 6]) {
-    crate::logger::write_byte(b'~');
-    crate::logger::write_byte(hex_nibble(call_idx));
-    crate::logger::write_byte(hex_nibble(mac_type as u8));
+    crate::logger::debug_byte(b'~');
+    crate::logger::debug_byte(hex_nibble(call_idx));
+    crate::logger::debug_byte(hex_nibble(mac_type as u8));
     for &byte in mac {
-        crate::logger::write_byte(hex_nibble(byte >> 4));
-        crate::logger::write_byte(hex_nibble(byte));
+        crate::logger::debug_byte(hex_nibble(byte >> 4));
+        crate::logger::debug_byte(hex_nibble(byte));
     }
-    crate::logger::write_byte(b'~');
+    crate::logger::debug_byte(b'~');
 }
 
 /// CPU clock ticks per microsecond. Used by `esp_timer_get_time` and

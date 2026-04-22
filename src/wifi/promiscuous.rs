@@ -50,7 +50,10 @@ bitflags::bitflags! {
         const CONTROL = sys::WIFI_PROMIS_FILTER_MASK_CTRL;
         const DATA = sys::WIFI_PROMIS_FILTER_MASK_DATA;
         const MISC = sys::WIFI_PROMIS_FILTER_MASK_MISC;
-        const ALL = sys::WIFI_PROMIS_FILTER_MASK_ALL;
+        const ALL = Self::MANAGEMENT.bits()
+            | Self::CONTROL.bits()
+            | Self::DATA.bits()
+            | Self::MISC.bits();
     }
 }
 

@@ -216,3 +216,9 @@ pub struct wifi_promiscuous_pkt_t {
 
 /// Maximum number of stations connectable to the soft-AP.
 pub const ESP_WIFI_MAX_CONN_NUM: usize = 10;
+
+extern "C" {
+    pub fn esp8266_hal_ap_netif_init() -> esp_err_t;
+    pub fn esp8266_hal_ap_netif_start(mac: *const u8) -> esp_err_t;
+    pub fn esp8266_hal_ap_netif_stop() -> esp_err_t;
+}

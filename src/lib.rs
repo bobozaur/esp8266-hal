@@ -28,6 +28,13 @@ pub mod watchdog;
 
 pub mod logger;
 
+#[cfg(feature = "wifi-core")]
+#[path = "wifi/core/mod.rs"]
+pub mod wifi_core;
+
+#[cfg(all(feature = "wifi-core", not(feature = "wifi")))]
+pub use wifi_core as wifi;
+
 #[cfg(feature = "wifi")]
 #[deny(unsafe_op_in_unsafe_fn)]
 pub mod wifi;

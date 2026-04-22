@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "esp8266", "procmacros", "esp8266-wifi-sys"]
+members = [".", "esp8266", "procmacros", "esp8266-wifi-sys", "xtask"]
 resolver = "2"
 
 [package]
@@ -10,6 +10,7 @@ edition = "2021"
 description = "HAL for ESP8266 microcontrollers"
 repository = "https://github.com/esp-rs/esp8266-hal"
 license = "MIT OR Apache-2.0"
+autoexamples = false
 
 keywords = ["embedded", "embedded-hal", "esp", "esp8266", "no-std"]
 categories = ["embedded", "hardware-support", "no-std"]
@@ -27,9 +28,7 @@ esp8266-hal-proc-macros = { path = "procmacros", version = "=0.1" }
 
 # WiFi dependencies (optional, enabled by `wifi` feature)
 esp8266-wifi-sys = { path = "esp8266-wifi-sys", optional = true }
-portable-atomic = { version = "1", default-features = false, features = [
-  "unsafe-assume-single-core",
-], optional = true }
+portable-atomic = { version = "1", default-features = false, optional = true }
 heapless = { version = "0.8", optional = true }
 esp-alloc = { version = "=0.4.0", optional = true }
 bitflags = { version = "2", optional = true }
@@ -41,10 +40,9 @@ smoltcp = { version = "0.12", default-features = false, features = [
   "socket-udp",
   "socket-dhcpv4",
 ], optional = true }
-embassy-executor = { version = "=0.6.3", default-features = false, features = ["task-arena-size-1024"], optional = true }
+embassy-executor = { version = "=0.6.3", default-features = false, features = ["task-arena-size-1024", "integrated-timers"], optional = true }
 embassy-time = { version = "=0.3.2", default-features = false, features = [
   "tick-hz-1_000_000",
-  "generic-queue-8",
 ], optional = true }
 embassy-time-driver = { version = "=0.1.0", default-features = false, optional = true }
 embassy-time-queue-driver = { version = "=0.1.0", default-features = false, optional = true }
@@ -55,6 +53,11 @@ critical-section = { version = "1.2", features = [
 embassy-net-driver-channel = { version = "=0.3.0", optional = true }
 embassy-futures = { version = "=0.1.1", optional = true }
 static_cell = { version = "2", optional = true }
+
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+portable-atomic = { version = "1", default-features = false, features = [
+  "unsafe-assume-single-core",
+], optional = true }
 
 [dev-dependencies]
 panic-halt = "1.0"
@@ -68,6 +71,27 @@ embassy-net = { version = "=0.5.0", default-features = false, features = [
 embedded-io-async = "0.6"
 embassy-futures = "0.1"
 
+[target.'cfg(not(target_arch = "xtensa"))'.dev-dependencies]
+proptest = { version = "=1.6.0", default-features = false, features = ["std"] }
+
+[[example]]
+name = "blinky"
+
+[[example]]
+name = "entry_probe"
+
+[[example]]
+name = "flash"
+
+[[example]]
+name = "reset_probe"
+
+[[example]]
+name = "serial"
+
+[[example]]
+name = "uart_interrupt"
+
 [[example]]
 name = "tcp_client"
 required-features = ["wifi-embassy-net", "wifi-sta"]
@@ -76,14 +100,62 @@ required-features = ["wifi-embassy-net", "wifi-sta"]
 name = "tcp_server"
 required-features = ["wifi-embassy-net", "wifi-sta"]
 
+[[example]]
+name = "sta_static_ip"
+required-features = ["wifi-embassy-net", "wifi-sta"]
+
+[[example]]
+name = "wifi_core_connect"
+required-features = ["wifi-core", "wifi", "wifi-sta", "rt", "interrupt"]
+
+[[example]]
+name = "wifi_core_dhcp_probe"
+required-features = ["wifi-embassy-net", "wifi-sta"]
+
+[[example]]
+name = "raw_scan"
+required-features = ["wifi-core", "wifi", "wifi-sta", "rt", "interrupt"]
+
+[[example]]
+name = "wifi_ap"
+required-features = ["wifi-ap", "rt", "interrupt"]
+
+[[example]]
+name = "wifi_ap_sta"
+required-features = ["wifi-ap", "wifi-sta", "wifi-embassy-net", "rt", "interrupt"]
+
+[[example]]
+name = "wifi_promisc"
+required-features = ["wifi-promiscuous", "wifi-sta", "rt", "interrupt"]
+
+[[example]]
+name = "wifi_esp_now_tx"
+required-features = ["wifi-esp-now", "wifi-sta", "rt", "interrupt"]
+
+[[example]]
+name = "wifi_esp_now_rx"
+required-features = ["wifi-esp-now", "wifi-sta", "rt", "interrupt"]
+
+[[example]]
+name = "wifi_wps"
+required-features = ["wifi-wps", "wifi-sta", "rt", "interrupt"]
+
+[[example]]
+name = "wifi_smartconfig"
+required-features = ["wifi-smartconfig", "wifi-sta", "rt", "interrupt"]
+
 [features]
 default = ["interrupt", "rt"]
 interrupt = ["paste"]
 rt = ["xtensa-lx-rt"]
-wifi = [
-  "dep:esp8266-wifi-sys",
+wifi-core = [
   "dep:portable-atomic",
   "dep:heapless",
+  "dep:critical-section",
+]
+wifi = [
+  "wifi-core",
+  "dep:esp8266-wifi-sys",
   "dep:esp-alloc",
   "dep:bitflags",
   "dep:log",
@@ -107,6 +179,8 @@ wifi-wps = ["wifi"]
 wifi-smartconfig = ["wifi", "esp8266-wifi-sys/smartconfig"]
 wifi-promiscuous = ["wifi"]
 wifi-esp-now = ["wifi", "esp8266-wifi-sys/esp-now"]
+wifi-debug-log = []
+wifi-debug-trace = ["wifi-debug-log"]
 
 # Place program completely in RAM (needed when e.g. using only ROM bootloader,
 # or for debugging).
@@ -122,9 +196,13 @@ opt-level = "s"
 overflow-checks = false
 
 [profile.release]
-lto = true
-# codegen-units > 1 works around an Xtensa LLVM register-spill bug that
-# triggers with LTO + codegen-units=1 on the esp-rs 1.80.0.0 toolchain.
-# The .bss overhead from reduced dead-code elimination is acceptable given
-# the 80 KB DRAM budget.
+lto = "thin"
+# Full/fat LTO still trips an Xtensa LLVM register-spill bug on the esp-rs
+# 1.80.0.0 toolchain when compiling the larger embassy-net examples. Thin LTO
+# preserves cross-CGU optimization while keeping release builds reliable.
+# codegen-units > 1 remains necessary on this toolchain, and the resulting
+# .bss overhead is acceptable given the 80 KB DRAM budget.
 codegen-units = 8
+
+[patch.crates-io]
+smoltcp = { path = "vendor/smoltcp" }

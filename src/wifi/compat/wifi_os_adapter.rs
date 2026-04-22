@@ -67,6 +67,30 @@ pub static mut g_wifi_sched_ret: u32 = 0;
 pub static mut g_wifi_sched_suspend_calls: u32 = 0;
 #[no_mangle]
 pub static mut g_wifi_sched_resume_calls: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_queue_send_calls: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_queue_send_from_isr_calls: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_queue_sig5_sends: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_queue_sig10_sends: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_queue_last_sig_sent: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_queue_last_send_ret: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_queue_recv_sig5: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_queue_recv_sig10: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_sig5_mgmt_frames: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_sig5_ctrl_frames: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_sig5_data_frames: u32 = 0;
+#[no_mangle]
+pub static mut g_pp_sig5_last_fc0: u32 = 0;
 
 extern "C" {
     static mut pTxRx: *mut u8;
@@ -75,22 +99,75 @@ extern "C" {
 
 #[inline]
 fn hex_nibble(n: u8) -> u8 {
-    match n & 0x0f {
-        0..=9 => b'0' + (n & 0x0f),
-        _ => b'a' + ((n & 0x0f) - 10),
-    }
+    crate::logger::hex_nibble(n)
 }
 
 #[inline]
 fn trace_hex_u32(value: u32) {
-    crate::logger::trace_byte(hex_nibble((value >> 28) as u8));
-    crate::logger::trace_byte(hex_nibble((value >> 24) as u8));
-    crate::logger::trace_byte(hex_nibble((value >> 20) as u8));
-    crate::logger::trace_byte(hex_nibble((value >> 16) as u8));
-    crate::logger::trace_byte(hex_nibble((value >> 12) as u8));
-    crate::logger::trace_byte(hex_nibble((value >> 8) as u8));
-    crate::logger::trace_byte(hex_nibble((value >> 4) as u8));
-    crate::logger::trace_byte(hex_nibble(value as u8));
+    crate::logger::trace_byte(crate::logger::hex_nibble((value >> 28) as u8));
+    crate::logger::trace_byte(crate::logger::hex_nibble((value >> 24) as u8));
+    crate::logger::trace_byte(crate::logger::hex_nibble((value >> 20) as u8));
+    crate::logger::trace_byte(crate::logger::hex_nibble((value >> 16) as u8));
+    crate::logger::trace_byte(crate::logger::hex_nibble((value >> 12) as u8));
+    crate::logger::trace_byte(crate::logger::hex_nibble((value >> 8) as u8));
+    crate::logger::trace_byte(crate::logger::hex_nibble((value >> 4) as u8));
+    crate::logger::trace_byte(crate::logger::hex_nibble(value as u8));
+}
+
+#[inline(always)]
+fn wifi_task_name_bytes(name: *const u8) -> [u8; 16] {
+    let mut name_buf = [0u8; 16];
+    if name.is_null() {
+        return name_buf;
+    }
+
+    let mut i = 0usize;
+    while i < name_buf.len() - 1 {
+        let byte = unsafe { *name.add(i) };
+        if byte == 0 {
+            break;
+        }
+        name_buf[i] = byte;
+        i += 1;
+    }
+    name_buf
+}
+
+#[inline(always)]
+fn tuned_wifi_task_stack_depth(name: &[u8; 16], requested: u16) -> u16 {
+    match &name[..] {
+        [b's', b'y', b's', b'_', b'e', b'v', b't', ..] => requested.min(1024),
+        _ => requested,
+    }
+}
+
+#[inline(never)]
+fn log_task_create_failed(name: &[u8; 16], stack_depth: u16, prio: u32, free: u32) {
+    let ui_stack_free = super::task::debug_task_stack_high_water_bytes(b'U');
+    let ui_stack_size = super::task::debug_task_stack_size_bytes(b'U');
+    let (_, _, hi_free, _, _, lo_free) = super::memory::debug_region_info();
+    crate::logger::write_bytes(b"wifi_task_create FAILED: name=");
+    for &byte in name.iter() {
+        if byte == 0 {
+            break;
+        }
+        crate::logger::write_byte(byte);
+    }
+    crate::logger::write_bytes(b" depth=");
+    crate::logger::write_dec_u32(stack_depth as u32);
+    crate::logger::write_bytes(b" prio=");
+    crate::logger::write_dec_u32(prio);
+    crate::logger::write_bytes(b" heap_free=0x");
+    crate::logger::write_hex_u32(free);
+    crate::logger::write_bytes(b" ui_free=");
+    crate::logger::write_dec_u32(ui_stack_free);
+    crate::logger::write_bytes(b" ui_size=");
+    crate::logger::write_dec_u32(ui_stack_size);
+    crate::logger::write_bytes(b" hi_free=");
+    crate::logger::write_dec_u32(hi_free as u32);
+    crate::logger::write_bytes(b" lo_free=");
+    crate::logger::write_dec_u32(lo_free as u32);
+    crate::logger::write_newline();
 }
 
 #[inline]
@@ -160,13 +237,13 @@ unsafe fn sdk_panic_frame_from_xtensa_rt(frame: *const u8) -> *mut c_void {
 unsafe fn trace_pp_rx_head_summary() {
     unsafe {
         if pTxRx.is_null() {
-            crate::logger::write_byte(b'x');
+            crate::logger::debug_byte(b'x');
             return;
         }
 
         let rx_head = ptr::read(pTxRx.add(0xb0) as *const *mut u8);
         if rx_head.is_null() {
-            crate::logger::write_byte(b'0');
+            crate::logger::debug_byte(b'0');
             return;
         }
 
@@ -176,11 +253,11 @@ unsafe fn trace_pp_rx_head_summary() {
         } else {
             ptr::read(rx_mode_ptr)
         };
-        crate::logger::write_byte(if (rx_mode & 0x10) != 0 { b'M' } else { b'm' });
+        crate::logger::debug_byte(if (rx_mode & 0x10) != 0 { b'M' } else { b'm' });
 
         let hdr = ptr::read(rx_head.add(0x0c) as *const *const u8);
         if hdr.is_null() {
-            crate::logger::write_byte(b'h');
+            crate::logger::debug_byte(b'h');
             return;
         }
 
@@ -188,8 +265,8 @@ unsafe fn trace_pp_rx_head_summary() {
         let fc1 = ptr::read(hdr.add(1));
         let seq_frag = ptr::read_unaligned(hdr.add(0x16) as *const u16);
 
-        crate::logger::write_byte(hex_nibble(fc0 >> 4));
-        crate::logger::write_byte(hex_nibble(fc0));
+        crate::logger::debug_byte(hex_nibble(fc0 >> 4));
+        crate::logger::debug_byte(hex_nibble(fc0));
 
         let reassembly_case =
             (fc0 & 0x04) == 0 && (((fc1 & 0x04) != 0) || ((seq_frag & 0x000f) != 0));
@@ -200,11 +277,11 @@ unsafe fn trace_pp_rx_head_summary() {
         } else {
             b'N'
         };
-        crate::logger::write_byte(path_marker);
+        crate::logger::debug_byte(path_marker);
 
         let rx_desc = ptr::read(rx_head.add(0x10) as *const *const u32);
         if rx_desc.is_null() {
-            crate::logger::write_byte(b'x');
+            crate::logger::debug_byte(b'x');
             return;
         }
 
@@ -212,9 +289,9 @@ unsafe fn trace_pp_rx_head_summary() {
         let desc2 = ptr::read(rx_desc.add(2));
         let desc2_byte = (desc2 & 0xff) as u8;
 
-        crate::logger::write_byte(hex_nibble((desc0 >> 28) as u8));
-        crate::logger::write_byte(hex_nibble(desc2_byte >> 4));
-        crate::logger::write_byte(hex_nibble(desc2_byte));
+        crate::logger::debug_byte(hex_nibble((desc0 >> 28) as u8));
+        crate::logger::debug_byte(hex_nibble(desc2_byte >> 4));
+        crate::logger::debug_byte(hex_nibble(desc2_byte));
 
         let g_ic_base = &raw const g_ic as *const u32;
         let scan_cb_base = ptr::read(g_ic_base.add(0x51)) as *const u32;
@@ -249,57 +326,84 @@ unsafe fn trace_pp_rx_head_summary() {
         let scan_mask_state =
             ((scan_mask & (1 << 5)) != 0) as u8 | ((((scan_mask & (1 << 8)) != 0) as u8) << 1);
 
-        crate::logger::write_byte(b'k');
-        crate::logger::write_byte(hex_nibble(scan_state));
-        crate::logger::write_byte(hex_nibble(wps_state));
-        crate::logger::write_byte(hex_nibble(scan_mask_state));
-        crate::logger::write_byte(hex_nibble(scan_disable));
+        crate::logger::debug_byte(b'k');
+        crate::logger::debug_byte(hex_nibble(scan_state));
+        crate::logger::debug_byte(hex_nibble(wps_state));
+        crate::logger::debug_byte(hex_nibble(scan_mask_state));
+        crate::logger::debug_byte(hex_nibble(scan_disable));
+    }
+}
+
+unsafe fn observe_pp_sig5_head() {
+    unsafe {
+        if pTxRx.is_null() {
+            return;
+        }
+
+        let rx_head = ptr::read(pTxRx.add(0xb0) as *const *mut u8);
+        if rx_head.is_null() {
+            return;
+        }
+
+        let hdr = ptr::read(rx_head.add(0x0c) as *const *const u8);
+        if hdr.is_null() {
+            return;
+        }
+
+        let fc0 = ptr::read(hdr);
+        g_pp_sig5_last_fc0 = fc0 as u32;
+        match fc0 & 0x0c {
+            0x00 => g_pp_sig5_mgmt_frames = g_pp_sig5_mgmt_frames.wrapping_add(1),
+            0x04 => g_pp_sig5_ctrl_frames = g_pp_sig5_ctrl_frames.wrapping_add(1),
+            0x08 => g_pp_sig5_data_frames = g_pp_sig5_data_frames.wrapping_add(1),
+            _ => {}
+        }
     }
 }
 
 unsafe fn trace_pp_tx_head_summary() {
     unsafe {
         if pTxRx.is_null() {
-            crate::logger::write_byte(b'x');
+            crate::logger::debug_byte(b'x');
             return;
         }
 
         let tx_head = ptr::read(pTxRx.add(0xa8) as *const *mut u8);
         if tx_head.is_null() {
-            crate::logger::write_byte(b'0');
+            crate::logger::debug_byte(b'0');
             return;
         }
 
         let hdr = ptr::read(tx_head.add(0x0c) as *const *const u8);
         if hdr.is_null() {
-            crate::logger::write_byte(b'h');
+            crate::logger::debug_byte(b'h');
             return;
         }
 
         let fc0 = ptr::read(hdr);
-        crate::logger::write_byte(if fc0 == 0x40 { b'P' } else { b'p' });
-        crate::logger::write_byte(hex_nibble(fc0 >> 4));
-        crate::logger::write_byte(hex_nibble(fc0));
+        crate::logger::debug_byte(if fc0 == 0x40 { b'P' } else { b'p' });
+        crate::logger::debug_byte(hex_nibble(fc0 >> 4));
+        crate::logger::debug_byte(hex_nibble(fc0));
 
         let addr1 = hdr.add(4);
         let addr2 = hdr.add(10);
         let addr3 = hdr.add(16);
         let addr1_bcast = (0..6).all(|i| ptr::read(addr1.add(i)) == 0xff);
         let addr3_bcast = (0..6).all(|i| ptr::read(addr3.add(i)) == 0xff);
-        crate::logger::write_byte(if addr1_bcast { b'b' } else { b'u' });
-        crate::logger::write_byte(if addr3_bcast { b'b' } else { b'u' });
-        crate::logger::write_byte(b'a');
-        crate::logger::write_byte(hex_nibble(ptr::read(addr2) >> 4));
-        crate::logger::write_byte(hex_nibble(ptr::read(addr2)));
-        crate::logger::write_byte(hex_nibble(ptr::read(addr2.add(1)) >> 4));
-        crate::logger::write_byte(hex_nibble(ptr::read(addr2.add(1))));
+        crate::logger::debug_byte(if addr1_bcast { b'b' } else { b'u' });
+        crate::logger::debug_byte(if addr3_bcast { b'b' } else { b'u' });
+        crate::logger::debug_byte(b'a');
+        crate::logger::debug_byte(hex_nibble(ptr::read(addr2) >> 4));
+        crate::logger::debug_byte(hex_nibble(ptr::read(addr2)));
+        crate::logger::debug_byte(hex_nibble(ptr::read(addr2.add(1)) >> 4));
+        crate::logger::debug_byte(hex_nibble(ptr::read(addr2.add(1))));
 
         let ie = hdr.add(24);
         let tag = ptr::read(ie);
         let len = ptr::read(ie.add(1));
-        crate::logger::write_byte(if tag == 0 { b's' } else { b'i' });
-        crate::logger::write_byte(hex_nibble(len >> 4));
-        crate::logger::write_byte(hex_nibble(len));
+        crate::logger::debug_byte(if tag == 0 { b's' } else { b'i' });
+        crate::logger::debug_byte(hex_nibble(len >> 4));
+        crate::logger::debug_byte(hex_nibble(len));
     }
 }
 
@@ -348,7 +452,9 @@ pub unsafe extern "C" fn __wifi_task_create(
         // The ESP8266 RTOS SDK port defines `StackType_t = uint8_t`, so the
         // blob-provided `stack_depth` already matches the SDK `xTaskCreate`
         // unit: byte-counted stack items.
-        let stack_depth = stack_depth as u16;
+        let requested_stack_depth = stack_depth as u16;
+        let name_buf = wifi_task_name_bytes(name);
+        let stack_depth = tuned_wifi_task_stack_depth(&name_buf, requested_stack_depth);
         let mut handle: *mut c_void = core::ptr::null_mut();
         let ret = task::xTaskCreate(
             task_func,
@@ -361,29 +467,8 @@ pub unsafe extern "C" fn __wifi_task_create(
         if ret == 1 {
             handle
         } else {
-            let mut name_buf = [0u8; 16];
-            if !name.is_null() {
-                let mut i = 0usize;
-                while i < name_buf.len() - 1 {
-                    let c = *name.add(i);
-                    if c == 0 {
-                        break;
-                    }
-                    name_buf[i] = c;
-                    i += 1;
-                }
-            }
-            let task_name = core::str::from_utf8(&name_buf)
-                .unwrap_or("?")
-                .trim_end_matches('\0');
             let free = unsafe { super::memory::esp_get_free_heap_size() };
-            crate::println!(
-                "wifi_task_create FAILED: name={} depth={} prio={} heap_free=0x{:X}",
-                task_name,
-                stack_depth,
-                prio,
-                free,
-            );
+            log_task_create_failed(&name_buf, stack_depth, prio, free);
             core::ptr::null_mut()
         }
     }
@@ -532,6 +617,17 @@ pub unsafe extern "C" fn __wifi_queue_send(
         };
 
         let ret = queue::xQueueGenericSend(q, item as *const c_void, timeout, os_pos);
+        if PP_QUEUE_PTR.load(Ordering::Acquire) == q as usize && !item.is_null() {
+            let sig = *(item as *const u32);
+            g_pp_queue_send_calls = g_pp_queue_send_calls.wrapping_add(1);
+            g_pp_queue_last_sig_sent = sig;
+            g_pp_queue_last_send_ret = ret as u32;
+            if sig == 5 {
+                g_pp_queue_sig5_sends = g_pp_queue_sig5_sends.wrapping_add(1);
+            } else if sig == 0x10 {
+                g_pp_queue_sig10_sends = g_pp_queue_sig10_sends.wrapping_add(1);
+            }
+        }
         if ret == 1 {
             1
         } else {
@@ -549,6 +645,17 @@ pub unsafe extern "C" fn __wifi_queue_send_from_isr(
 ) -> i32 {
     unsafe {
         let ret = queue::xQueueSendFromISR(q, item as *const c_void, hptw);
+        if PP_QUEUE_PTR.load(Ordering::Acquire) == q as usize && !item.is_null() {
+            let sig = *(item as *const u32);
+            g_pp_queue_send_from_isr_calls = g_pp_queue_send_from_isr_calls.wrapping_add(1);
+            g_pp_queue_last_sig_sent = sig;
+            g_pp_queue_last_send_ret = ret as u32;
+            if sig == 5 {
+                g_pp_queue_sig5_sends = g_pp_queue_sig5_sends.wrapping_add(1);
+            } else if sig == 0x10 {
+                g_pp_queue_sig10_sends = g_pp_queue_sig10_sends.wrapping_add(1);
+            }
+        }
         if ret == 1 {
             1
         } else {
@@ -583,6 +690,12 @@ pub unsafe extern "C" fn __wifi_queue_recv(
                 super::pp_stage::reset_pp_stage_trace();
                 g_pp_last_sig = sig;
                 g_pp_last_arg = *((item as *const u32).add(1));
+                if sig == 5 {
+                    g_pp_queue_recv_sig5 = g_pp_queue_recv_sig5.wrapping_add(1);
+                    observe_pp_sig5_head();
+                } else if sig == 0x10 {
+                    g_pp_queue_recv_sig10 = g_pp_queue_recv_sig10.wrapping_add(1);
+                }
                 if sig == 0x10 {
                     reset_sig10_sched_trace();
                 }
@@ -598,19 +711,19 @@ pub unsafe extern "C" fn __wifi_queue_recv(
             let sig = *(item as *const u32);
             match sig {
                 4 => {
-                    crate::logger::write_byte(b'4');
+                    crate::logger::debug_byte(b'4');
                     trace_pp_tx_head_summary();
                 }
-                5 => crate::logger::write_byte(b'5'),
-                8 => crate::logger::write_byte(b'8'),
-                9 => crate::logger::write_byte(b'9'),
-                0x0b => crate::logger::write_byte(b'B'),
-                0x0c => crate::logger::write_byte(b'C'),
-                0x10 => crate::logger::write_byte(b'T'),
+                5 => crate::logger::debug_byte(b'5'),
+                8 => crate::logger::debug_byte(b'8'),
+                9 => crate::logger::debug_byte(b'9'),
+                0x0b => crate::logger::debug_byte(b'B'),
+                0x0c => crate::logger::debug_byte(b'C'),
+                0x10 => crate::logger::debug_byte(b'T'),
                 _ => {
-                    crate::logger::write_byte(b'X');
-                    crate::logger::write_byte(hex_nibble((sig >> 4) as u8));
-                    crate::logger::write_byte(hex_nibble(sig as u8));
+                    crate::logger::debug_byte(b'X');
+                    crate::logger::debug_byte(hex_nibble((sig >> 4) as u8));
+                    crate::logger::debug_byte(hex_nibble(sig as u8));
                 }
             }
             if sig == 5 {

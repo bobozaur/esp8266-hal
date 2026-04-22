@@ -1,8 +1,9 @@
-//! WiFi controller — lifecycle management and configuration.
+//! Legacy WiFi controller — lifecycle management and configuration.
 //!
-//! [`WifiController`] is the primary entry point. It manages the WiFi driver
-//! lifecycle (init → set mode → set config → start → connect/…) and ensures
-//! proper teardown on drop.
+//! The strong-typestate `crate::wifi_core::WifiDriver` is the public design
+//! center for new driver code. [`WifiController`] remains as target backend
+//! compatibility plumbing around the ESP8266 SDK lifecycle while the typed core
+//! owns validation, packet/event resources, and feature sessions.
 
 use core::ffi::c_void;
 
@@ -10,7 +11,6 @@ use esp8266_wifi_sys as sys;
 use portable_atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use crate::wifi::config::{ApConfig, Configuration, StaConfig};
-use crate::wifi::device::WifiDevice;
 use crate::wifi::error::{EspError, WifiError};
 use crate::wifi::protocol::Protocol;
 use crate::wifi::scan::{AccessPointInfo, ScanConfig};
@@ -24,9 +24,50 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Atomic connection state, updated from the event trampoline.
 pub(crate) static STA_STATE: AtomicU8 = AtomicU8::new(StaConnectionState::Disconnected as u8);
 pub(crate) static AP_STATE: AtomicU8 = AtomicU8::new(0); // 0 = stopped, 1 = started
+/// Monotonic STA_START event sequence used to make `start()` wait until the
+/// SDK has made station connect calls meaningful.
+pub(crate) static STA_START_SEQ: AtomicU32 = AtomicU32::new(0);
 pub(crate) static STA_DISCONNECT_SEQ: AtomicU32 = AtomicU32::new(0);
 pub(crate) static STA_DISCONNECT_REASON: AtomicU8 =
     AtomicU8::new(sys::WIFI_REASON_UNSPECIFIED as u8);
+
+#[inline(never)]
+fn log_wifi_alloc_failure(kind: u8, size: usize, free: usize, task: u8, count: u32) {
+    let ui_free = super::compat::task::debug_task_stack_high_water_bytes(b'U');
+    let ui_size = super::compat::task::debug_task_stack_size_bytes(b'U');
+    let idle_free = super::compat::task::debug_task_stack_high_water_bytes(b'I');
+    let idle_size = super::compat::task::debug_task_stack_size_bytes(b'I');
+    let tmr_free = super::compat::task::debug_task_stack_high_water_bytes(b'M');
+    let tmr_size = super::compat::task::debug_task_stack_size_bytes(b'M');
+    let (_, _, hi_free, _, _, lo_free) = super::compat::memory::debug_region_info();
+    crate::logger::write_bytes(b"wifi alloc fail kind=");
+    crate::logger::write_byte(kind);
+    crate::logger::write_bytes(b" size=0x");
+    crate::logger::write_hex_u32(size as u32);
+    crate::logger::write_bytes(b" free=0x");
+    crate::logger::write_hex_u32(free as u32);
+    crate::logger::write_bytes(b" task=");
+    crate::logger::write_byte(task);
+    crate::logger::write_bytes(b" count=");
+    crate::logger::write_dec_u32(count);
+    crate::logger::write_bytes(b" ui_free=");
+    crate::logger::write_dec_u32(ui_free);
+    crate::logger::write_bytes(b" ui_size=");
+    crate::logger::write_dec_u32(ui_size);
+    crate::logger::write_bytes(b" idle_free=");
+    crate::logger::write_dec_u32(idle_free);
+    crate::logger::write_bytes(b" idle_size=");
+    crate::logger::write_dec_u32(idle_size);
+    crate::logger::write_bytes(b" tmr_free=");
+    crate::logger::write_dec_u32(tmr_free);
+    crate::logger::write_bytes(b" tmr_size=");
+    crate::logger::write_dec_u32(tmr_size);
+    crate::logger::write_bytes(b" hi_free=");
+    crate::logger::write_dec_u32(hi_free as u32);
+    crate::logger::write_bytes(b" lo_free=");
+    crate::logger::write_dec_u32(lo_free as u32);
+    crate::logger::write_newline();
+}
 
 /// Station connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,8 +107,8 @@ pub fn is_ap_active() -> bool {
 }
 
 /// Update connection state from event trampoline. Called from `event.rs`.
-pub(crate) fn update_state_from_event(event: &crate::wifi::WifiEvent) {
-    use crate::wifi::WifiEvent;
+pub(crate) fn update_state_from_event(event: &crate::wifi::event::WifiEvent) {
+    use crate::wifi::event::WifiEvent;
     match event {
         WifiEvent::StaStart => {
             STA_STATE.store(StaConnectionState::Connecting as u8, Ordering::Release);
@@ -260,7 +301,6 @@ impl WifiController {
     /// and starting the WiFi task. Only one controller can be active; returns
     /// [`WifiError::Internal`] if already initialized.
     pub fn init(config: WifiInitConfig) -> Result<Self, WifiError> {
-        crate::println!("WifiController::init enter");
         if INITIALIZED.swap(true, Ordering::AcqRel) {
             return Err(WifiError::Internal(EspError(sys::ESP_ERR_INVALID_STATE)));
         }
@@ -270,11 +310,8 @@ impl WifiController {
             static g_phyFuns: *const u32;
         }
         let funs = unsafe { g_phyFuns };
-        crate::println!("g_phyFuns = {:#010x}", funs as usize);
         if !funs.is_null() {
-            crate::logger::write_byte(b'Y');
             let _first = unsafe { *funs };
-            crate::logger::write_byte(b'Z');
         }
 
         // PHY clocks already initialized by esp_phy_init_clk() in hardware_init.
@@ -292,46 +329,26 @@ impl WifiController {
 
         // Ensure the compat scheduler is running — WiFi blob tasks need it
         // for internal timing during RF calibration.
-        crate::logger::write_byte(b'S');
         let guard = CompatGuard::new();
-        crate::logger::write_byte(b'T');
 
         // Match the SDK startup contract: `esp_mac_init()` belongs to startup
         // before `app_main`, and `hardware_init()` already mirrors that order.
-        crate::logger::write_byte(b'6');
 
         // DPORT double-clock already set above before scheduler.
 
-        crate::logger::write_byte(b'7');
         EspError::check(unsafe { sys::esp_event_loop_create_default() })?;
-        crate::logger::write_byte(b'{');
-        crate::logger::write_byte(b'1');
 
         // Mark WDEV registers as accessible before WiFi init starts
-        crate::logger::write_byte(b'2');
         unsafe { super::compat::critical::mark_wdev_ready() };
-        crate::logger::write_byte(b'}');
-        crate::logger::write_byte(b'3');
 
-        crate::logger::write_byte(b'W');
         super::compat::memory::clear_alloc_failure_debug();
         let raw = config.to_raw();
-        crate::logger::write_byte(b'<');
         let ret = unsafe { sys::esp_wifi_init(&raw) };
-        crate::logger::write_byte(if ret == sys::ESP_OK { b'w' } else { b'!' });
-        crate::logger::write_byte(b'>');
         if ret != sys::ESP_OK {
             if let Some((kind, size, free, task, count)) =
                 super::compat::memory::debug_last_alloc_failure()
             {
-                crate::println!(
-                    "wifi alloc fail kind={} size=0x{:X} free=0x{:X} task={} count={}",
-                    kind as char,
-                    size,
-                    free,
-                    task as char,
-                    count,
-                );
+                log_wifi_alloc_failure(kind, size, free, task, count);
             }
         }
         if let Err(e) = EspError::check(ret) {
@@ -454,6 +471,7 @@ impl WifiController {
     /// events yourself.
     pub fn connect(&mut self) -> Result<(), WifiError> {
         EspError::check(unsafe { sys::esp_wifi_connect() })?;
+        STA_STATE.store(StaConnectionState::Connecting as u8, Ordering::Release);
         Ok(())
     }
 
@@ -654,7 +672,7 @@ impl WifiController {
 
         loop {
             let event = sub.next_message_pure().await;
-            if matches!(event, crate::wifi::WifiEvent::StaDisconnected { .. }) {
+            if matches!(event, crate::wifi::event::WifiEvent::StaDisconnected { .. }) {
                 return Ok(());
             }
         }
@@ -871,45 +889,6 @@ impl WifiController {
         config: &ScanConfig,
     ) -> Result<heapless::Vec<AccessPointInfo, 32>, WifiError> {
         crate::wifi::scan::scan_blocking(config)
-    }
-
-    // -----------------------------------------------------------------------
-    // Device creation
-    // -----------------------------------------------------------------------
-
-    /// Create a [`WifiDevice`] for the given interface.
-    ///
-    /// This is a convenience method. The device must have its RX callback
-    /// registered (via [`WifiDevice::register_rx_callback`]) after
-    /// [`start()`](Self::start).
-    pub fn create_device(&self, interface: WifiInterface) -> WifiDevice {
-        WifiDevice::new(interface)
-    }
-
-    /// Initialize WiFi and create devices for the configured mode.
-    ///
-    /// Returns the controller and one or two [`WifiDevice`]s depending on
-    /// the mode set in `config`. The RX callbacks still need to be
-    /// registered after calling [`start()`](WifiController::start).
-    pub fn init_with_devices(
-        config: WifiInitConfig,
-        wifi_config: &Configuration,
-    ) -> Result<(Self, WifiDevice, Option<WifiDevice>), WifiError> {
-        let mut ctrl = Self::init(config)?;
-        ctrl.set_configuration(wifi_config)?;
-
-        let (sta_dev, ap_dev) = match wifi_config {
-            Configuration::None | Configuration::Client(_) => {
-                (WifiDevice::new(WifiInterface::Sta), None)
-            }
-            Configuration::AccessPoint(_) => (WifiDevice::new(WifiInterface::Ap), None),
-            Configuration::Mixed(_, _) => (
-                WifiDevice::new(WifiInterface::Sta),
-                Some(WifiDevice::new(WifiInterface::Ap)),
-            ),
-        };
-
-        Ok((ctrl, sta_dev, ap_dev))
     }
 
     /// De-initialize the WiFi subsystem explicitly.

@@ -20,9 +20,10 @@ const MAX_TIMERS: usize = 12;
 const TIMER_QUEUE_LENGTH: u32 = 10;
 const PD_PASS: i32 = 1;
 const PD_FALSE: i32 = 0;
-// Match SDK `configTIMER_TASK_STACK_DEPTH = CONFIG_FREERTOS_TIMER_STACKSIZE`
-// with `CONFIG_FREERTOS_TIMER_STACKSIZE = 2048` bytes on this branch.
-const TIMER_DAEMON_STACK_BYTES: u16 = 2048;
+// The current Rust timer daemon uses about 512 bytes at the measured
+// `esp_wifi_init` worst point, so a 1024-byte request still keeps healthy
+// slack while reclaiming DRAM for the WiFi blob's large internal tasks.
+const TIMER_DAEMON_STACK_BYTES: u16 = 768;
 // Match the generated `sdkconfig.h` on this branch:
 // `CONFIG_ESP_TIMER_TASK_STACK_SIZE = 2048`.
 // `components/esp_common/include/esp_task.h` defines
@@ -121,7 +122,7 @@ unsafe extern "C" fn ets_timer_task(_param: *mut c_void) {
             let trace_armed = ETS_TIMER_CONNECT_TRACE.load(Ordering::Acquire) == 1;
             if trace_armed {
                 ETS_TIMER_CONNECT_TRACE.store(2, Ordering::Release);
-                crate::logger::write_byte(b'u');
+                crate::logger::debug_byte(b'u');
             }
             // SDK ets_sys.h documents os_timer callbacks with scheduling
             // disabled. Mirror that around the task-dispatched timer pass.
@@ -129,7 +130,7 @@ unsafe extern "C" fn ets_timer_task(_param: *mut c_void) {
             ets_timer_proc();
             task::xTaskResumeAll();
             if trace_armed {
-                crate::logger::write_byte(b'U');
+                crate::logger::debug_byte(b'U');
                 ETS_TIMER_CONNECT_TRACE.store(3, Ordering::Release);
             }
             task::vTaskDelay(1); // 1 tick = 10ms at 100Hz
@@ -142,18 +143,18 @@ unsafe extern "C" fn ets_timer_task(_param: *mut c_void) {
 /// Runs in task context like SDK `prvTimerTask(...)`, so timer callbacks can
 /// safely call blocking APIs.
 unsafe extern "C" fn timer_daemon_task(_param: *mut c_void) {
-    crate::println!("Tmr entry");
+    crate::wifi_debugln!("Tmr entry");
     loop {
         unsafe {
-            crate::println!("Tmr 0");
+            crate::wifi_debugln!("Tmr 0");
             let now = task::get_tick_count();
-            crate::println!("Tmr 1");
+            crate::wifi_debugln!("Tmr 1");
             if process_expired_timers(now) {
-                crate::println!("Tmr exp");
+                crate::wifi_debugln!("Tmr exp");
                 continue;
             }
 
-            crate::println!("Tmr 2");
+            crate::wifi_debugln!("Tmr 2");
             let wait_ticks = next_timer_wait(now);
             let mut message = DaemonTaskMessage {
                 command_id: 0,
@@ -161,13 +162,13 @@ unsafe extern "C" fn timer_daemon_task(_param: *mut c_void) {
                 timer: core::ptr::null_mut(),
             };
 
-            crate::println!("Tmr wait");
+            crate::wifi_debugln!("Tmr wait");
             let recv = queue::xQueueReceive(
                 TIMER_QUEUE_HANDLE,
                 &mut message as *mut DaemonTaskMessage as *mut c_void,
                 wait_ticks,
             );
-            crate::println!("Tmr recv {}", recv);
+            crate::wifi_debugln!("Tmr recv {}", recv);
 
             if recv == PD_PASS {
                 process_timer_command(message);

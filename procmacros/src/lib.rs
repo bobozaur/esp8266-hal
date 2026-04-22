@@ -455,12 +455,45 @@ fn main_sync(f: ItemFn) -> TokenStream {
     let attrs = &f.attrs;
     let body = &f.block;
     let unsafety = &f.sig.unsafety;
+    let user_main_call = if f.sig.unsafety.is_some() {
+        quote! { unsafe { __esp8266_hal_user_main() } }
+    } else {
+        quote! { __esp8266_hal_user_main() }
+    };
 
     let output = quote! {
         #(#attrs)*
-        #[export_name = "main"]
-        pub #unsafety fn __esp8266_hal_main() -> ! {
+        #unsafety fn __esp8266_hal_user_main() -> ! {
             #body
+        }
+
+        #[export_name = "main"]
+        pub extern "C" fn __esp8266_hal_main() -> ! {
+            #[cfg(feature = "wifi")]
+            {
+                // Keep sync WiFi examples runtime-neutral, but still enter
+                // through the SDK-style task/bootstrap context required by
+                // the WiFi blob and compat scheduler.
+                ::esp8266_hal::wifi::compat::memory::init();
+                ::esp8266_hal::wifi::compat::entry::init_newlib_reent();
+
+                unsafe {
+                    ::esp8266_hal::wifi::compat::entry::run_sdk_main_task(
+                        __esp8266_hal_sync_main_task,
+                    )
+                }
+            }
+
+            #[cfg(not(feature = "wifi"))]
+            {
+                #user_main_call
+            }
+        }
+
+        #[cfg(feature = "wifi")]
+        unsafe extern "C" fn __esp8266_hal_sync_main_task(_param: *mut ::core::ffi::c_void) {
+            ::esp8266_hal::wifi::compat::memory::reclaim_boot_stack_reservation();
+            #user_main_call
         }
     };
 
@@ -518,32 +551,29 @@ fn main_async(f: ItemFn) -> TokenStream {
     let output = quote! {
         #[no_mangle]
         pub extern "C" fn main() -> ! {
-            ::esp8266_hal::logger::trace_byte(b'a');
             // Initialize the Rust heap (backed by esp-alloc).
             ::esp8266_hal::wifi::compat::memory::init();
-            ::esp8266_hal::logger::trace_byte(b'b');
 
             // Initialize newlib's _global_impure_ptr so C library functions
             // (calloc, printf, etc.) used by WiFi blob don't crash.
             ::esp8266_hal::wifi::compat::entry::init_newlib_reent();
-            ::esp8266_hal::logger::trace_byte(b'c');
 
             unsafe { ::esp8266_hal::wifi::compat::entry::run_sdk_main_task(__esp8266_hal_executor_task) }
         }
 
         unsafe extern "C" fn __esp8266_hal_executor_task(_param: *mut ::core::ffi::c_void) {
-            ::esp8266_hal::logger::write_byte(b'j');
-            ::esp8266_hal::println!("uiT entry");
-            ::esp8266_hal::logger::write_byte(b'k');
             ::esp8266_hal::wifi::compat::memory::reclaim_boot_stack_reservation();
             static __EXECUTOR: ::static_cell::StaticCell<::esp8266_hal::wifi::executor::Executor> =
                 ::static_cell::StaticCell::new();
             let executor = __EXECUTOR.init(::esp8266_hal::wifi::executor::Executor::new());
-            ::esp8266_hal::logger::trace_byte(b'd');
             executor.run(|spawner| {
-                ::esp8266_hal::logger::trace_byte(b'e');
-                spawner.must_spawn(__esp8266_hal_main_task(#spawn_args));
+                spawner.must_spawn(__esp8266_hal_bootstrap_task(spawner));
             })
+        }
+
+        #[::embassy_executor::task]
+        async fn __esp8266_hal_bootstrap_task(spawner: ::embassy_executor::Spawner) {
+            spawner.must_spawn(__esp8266_hal_main_task(#spawn_args));
         }
 
         #(#attrs)*

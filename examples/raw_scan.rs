@@ -1,91 +1,119 @@
 #![no_std]
 #![no_main]
-use embassy_executor::Spawner;
-use esp8266_hal::println;
-use esp8266_hal::wifi::controller::WifiInitConfig;
-use esp8266_hal::wifi::event::{self, WifiEvent};
-use esp8266_hal::wifi::{WifiController, WifiMode};
-use esp8266_wifi_sys as sys;
-use portable_atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
-static SCAN_DONE_SEQ: AtomicU32 = AtomicU32::new(0);
-static SCAN_DONE_COUNT: AtomicU8 = AtomicU8::new(0);
-static SCAN_DONE_SUCCESS: AtomicBool = AtomicBool::new(false);
+use panic_halt as _;
 
-fn scan_event_handler(event: WifiEvent) {
-    if let WifiEvent::ScanDone { count, success } = event {
-        SCAN_DONE_COUNT.store(count, Ordering::Release);
-        SCAN_DONE_SUCCESS.store(success, Ordering::Release);
-        SCAN_DONE_SEQ.fetch_add(1, Ordering::AcqRel);
-    }
-}
+use esp8266_hal::wifi::{
+    AccessPointRecord, DriverError, Esp8266TargetBackend, InitConfig, InitError, ScanOptions,
+    ScanTimings, WifiDriver, WifiResources,
+};
+use static_cell::StaticCell;
 
-#[inline(never)]
-fn nmi_count() -> u32 {
-    extern "C" {
-        static g_nmi_call_count: u32;
-    }
+static RESOURCES: StaticCell<WifiResources<8, 4, 2>> = StaticCell::new();
+static SCAN_RECORDS: StaticCell<heapless::Vec<AccessPointRecord, 16>> = StaticCell::new();
 
-    unsafe { g_nmi_call_count }
-}
-
-#[inline(never)]
-fn reset_scan_done_probe() {
-    SCAN_DONE_COUNT.store(0, Ordering::Release);
-    SCAN_DONE_SUCCESS.store(false, Ordering::Release);
-    SCAN_DONE_SEQ.store(0, Ordering::Release);
-}
-
-#[inline(never)]
-fn run_scan(label: &str, cfg: &sys::wifi_scan_config_t) {
-    reset_scan_done_probe();
-    esp8266_hal::wifi::compat::wifi_os_adapter::arm_pp_sig_trace(12);
-    let nmi_before = nmi_count();
-    let start_us = unsafe { sys::esp_timer_get_time() };
-    unsafe { sys::esp_wifi_scan_start(cfg, true) };
-    let elapsed_us = unsafe { sys::esp_timer_get_time() } - start_us;
-    let nmi_after = nmi_count();
-    let mut count: u16 = 0;
-    unsafe { sys::esp_wifi_scan_get_ap_num(&mut count) };
-    println!(
-        "{}: event_seq={} event_ok={} event_count={} ap_num={} dt_us={} nmi={}->{}",
-        label,
-        SCAN_DONE_SEQ.load(Ordering::Acquire),
-        SCAN_DONE_SUCCESS.load(Ordering::Acquire) as u8,
-        SCAN_DONE_COUNT.load(Ordering::Acquire),
-        count,
-        elapsed_us,
-        nmi_before,
-        nmi_after
-    );
+#[inline(always)]
+fn log_line(message: &[u8]) {
+    esp8266_hal::logger::write_bytes(message);
+    esp8266_hal::logger::write_newline();
 }
 
 #[esp8266_hal::main]
-async fn main(_spawner: Spawner) {
-    for _ in 0..20_000_000u32 {
-        core::hint::spin_loop();
-    }
-    let mut wifi = WifiController::init(WifiInitConfig::default()).expect("wifi");
-    event::set_event_handler(scan_event_handler).expect("event_handler");
-    wifi.set_mode(WifiMode::Sta).expect("mode");
-    wifi.start().expect("start");
+fn main() -> ! {
+    log_line(b"wifi_core_scan start");
 
-    let passive_cfg = sys::wifi_scan_config_t {
-        ssid: core::ptr::null_mut(),
-        bssid: core::ptr::null_mut(),
-        channel: 6,
-        show_hidden: true,
-        scan_type: sys::WIFI_SCAN_TYPE_PASSIVE,
-        scan_time: sys::wifi_scan_time_t { passive: 500 },
-    };
-    run_scan("ch6 passive-any", &passive_cfg);
-    println!("done");
+    let resources = RESOURCES.init(WifiResources::new());
+    let backend = Esp8266TargetBackend::new(resources);
+    let driver =
+        match WifiDriver::with_backend(resources, backend).initialize(InitConfig::default()) {
+            Ok(driver) => driver,
+            Err(error) => {
+                esp8266_hal::logger::write_bytes(b"wifi core scan init error ");
+                esp8266_hal::logger::write_bytes(init_error_name(error).as_bytes());
+                esp8266_hal::logger::write_newline();
+                loop {
+                    esp8266_hal::wifi::delay_ticks(100);
+                }
+            }
+        };
+    log_line(b"wifi core scan initialized");
+
+    let mut driver = driver
+        .enable_sta()
+        .expect("configure")
+        .start()
+        .expect("start");
+    log_line(b"wifi core scan started");
+
+    let options = ScanOptions::all()
+        .show_hidden(true)
+        .timings(ScanTimings::active(200, 500));
+
+    let records = SCAN_RECORDS.init(heapless::Vec::new());
+    match driver.scan_blocking_into(&options, records) {
+        Ok(()) => {
+            esp8266_hal::logger::write_bytes(b"wifi core scan done count=");
+            esp8266_hal::logger::write_dec_u32(records.len() as u32);
+            esp8266_hal::logger::write_newline();
+            for record in records.iter() {
+                esp8266_hal::logger::write_bytes(b"ap ssid=");
+                esp8266_hal::logger::write_bytes(record.ssid());
+                esp8266_hal::logger::write_bytes(b" bssid=");
+                for (index, byte) in record.bssid().iter().enumerate() {
+                    if index != 0 {
+                        esp8266_hal::logger::write_byte(b':');
+                    }
+                    esp8266_hal::logger::write_hex_u8(*byte);
+                }
+                esp8266_hal::logger::write_bytes(b" ch=");
+                esp8266_hal::logger::write_dec_u32(record.channel().get() as u32);
+                esp8266_hal::logger::write_bytes(b" rssi=");
+                if record.rssi() < 0 {
+                    esp8266_hal::logger::write_byte(b'-');
+                    esp8266_hal::logger::write_dec_u32(record.rssi().unsigned_abs() as u32);
+                } else {
+                    esp8266_hal::logger::write_dec_u32(record.rssi() as u32);
+                }
+                esp8266_hal::logger::write_bytes(b" auth=");
+                esp8266_hal::logger::write_dec_u32(record.auth_mode() as u32);
+                esp8266_hal::logger::write_bytes(b" wps=");
+                esp8266_hal::logger::write_dec_u32(record.wps() as u32);
+                esp8266_hal::logger::write_newline();
+            }
+            log_line(b"scan-ok");
+        }
+        Err(error) => {
+            esp8266_hal::logger::write_bytes(b"wifi core scan error ");
+            esp8266_hal::logger::write_bytes(driver_error_name(error).as_bytes());
+            esp8266_hal::logger::write_newline();
+        }
+    }
+
     loop {
-        embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
+        esp8266_hal::wifi::delay_ticks(100);
     }
 }
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    esp8266_hal::logger::write_byte(b'?');
-    loop {}
+
+fn init_error_name(error: InitError) -> &'static str {
+    match error {
+        InitError::AlreadyInitialized => "already-initialized",
+        InitError::BackendUnavailable => "backend-unavailable",
+    }
+}
+
+fn driver_error_name(error: DriverError) -> &'static str {
+    match error {
+        DriverError::Timeout => "timeout",
+        DriverError::StaStartTimeout => "sta-start-timeout",
+        DriverError::Disconnected => "disconnected",
+        DriverError::EventOverflow => "event-overflow",
+        DriverError::PacketOverflow => "packet-overflow",
+        DriverError::PeerOverflow => "peer-overflow",
+        DriverError::PayloadTooLong => "payload-too-long",
+        DriverError::OutOfMemory => "out-of-memory",
+        DriverError::NotStarted => "not-started",
+        DriverError::WouldBlock => "would-block",
+        DriverError::BackendRejected => "backend-rejected",
+        DriverError::BackendError(_) => "backend-error",
+    }
 }

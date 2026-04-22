@@ -148,10 +148,10 @@ pub unsafe extern "C" fn esp_phy_rf_init(
 
         let cal_check = phy_check_calibration_data(cal_data)
             || phy_check_data_table(phy_rx_gain_dc_table, 125, 1) != 0;
-        crate::logger::write_byte(b'c');
+        crate::logger::debug_byte(b'c');
 
         phy_afterwake_set_rfoption(1);
-        crate::logger::write_byte(b'd');
+        crate::logger::debug_byte(b'd');
 
         if !cal_check {
             phy_set_powerup_option(1);
@@ -159,22 +159,22 @@ pub unsafe extern "C" fn esp_phy_rf_init(
         } else {
             phy_set_powerup_option(3);
         }
-        crate::logger::write_byte(b'e');
+        crate::logger::debug_byte(b'e');
 
         let mut sta_mac = [0u8; 6];
         super::system::esp_efuse_mac_get_default(sta_mac.as_mut_ptr());
-        crate::logger::write_byte(b'f');
+        crate::logger::debug_byte(b'f');
 
         uart_tx_wait_idle(0);
-        crate::logger::write_byte(b'g');
+        crate::logger::debug_byte(b'g');
         uart_tx_wait_idle(1);
-        crate::logger::write_byte(b'h');
+        crate::logger::debug_byte(b'h');
 
         let ret = register_chipv6_phy(local_init_data);
-        crate::logger::write_byte(b'j');
+        crate::logger::debug_byte(b'j');
 
         phy_disable_agc();
-        crate::logger::write_byte(b'k');
+        crate::logger::debug_byte(b'k');
 
         // Read back calibration results
         get_data_from_rtc(cal_data);
@@ -312,34 +312,34 @@ pub unsafe extern "C" fn esp_phy_store_cal_data_to_nvs(cal_data: *const u8) -> i
 /// calibration is performed.
 #[no_mangle]
 pub unsafe extern "C" fn esp_phy_load_cal_and_init(_module: u32) {
-    crate::logger::write_byte(b'Q');
+    crate::logger::debug_byte(b'Q');
     unsafe {
         // esp_phy_calibration_data_t = rf_cal_data[128] + rx_gain_dc_table[500]
         let cal_data_size = 128 + 4 * 125; // 628 bytes
         let cal_data = super::super::compat::memory::calloc(1, cal_data_size) as *mut u8;
-        crate::logger::write_byte(if cal_data.is_null() { b'X' } else { b'q' });
+        crate::logger::debug_byte(if cal_data.is_null() { b'X' } else { b'q' });
         if cal_data.is_null() {
             // Fatal: can't allocate calibration buffer
             loop {}
         }
 
         let init_data = esp_phy_get_init_data();
-        crate::logger::write_byte(if init_data.is_null() { b'X' } else { b'i' });
+        crate::logger::debug_byte(if init_data.is_null() { b'X' } else { b'i' });
         if init_data.is_null() {
             loop {}
         }
 
         let mut mode: u32 = 0;
-        crate::logger::write_byte(b'n');
+        crate::logger::debug_byte(b'n');
         let err = esp_phy_load_cal_data_from_nvs(cal_data);
-        crate::logger::write_byte(b'N');
+        crate::logger::debug_byte(b'N');
         if err != sys::ESP_OK {
             mode = 2;
         }
 
-        crate::logger::write_byte(b'r');
+        crate::logger::debug_byte(b'r');
         esp_phy_rf_init(init_data, mode, cal_data, _module);
-        crate::logger::write_byte(b'R');
+        crate::logger::debug_byte(b'R');
 
         // Store calibration data back to NVS if we did a full cal
         if mode == 2 || err != sys::ESP_OK {

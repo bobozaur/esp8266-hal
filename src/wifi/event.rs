@@ -52,7 +52,7 @@ pub enum WifiEvent {
     /// WPS enrollment succeeded.
     StaWpsSuccess,
     /// WPS enrollment failed.
-    StaWpsFailed,
+    StaWpsFailed { reason: Option<u32> },
     /// WPS enrollment timed out.
     StaWpsTimeout,
     /// WPS PIN code received.
@@ -113,7 +113,7 @@ impl WifiEvent {
             WifiEvent::StaAuthModeChanged { .. } => WifiEventKind::StaAuthModeChanged,
             WifiEvent::StaBssRssiLow { .. } => WifiEventKind::StaBssRssiLow,
             WifiEvent::StaWpsSuccess => WifiEventKind::StaWpsSuccess,
-            WifiEvent::StaWpsFailed => WifiEventKind::StaWpsFailed,
+            WifiEvent::StaWpsFailed { .. } => WifiEventKind::StaWpsFailed,
             WifiEvent::StaWpsTimeout => WifiEventKind::StaWpsTimeout,
             WifiEvent::StaWpsPin { .. } => WifiEventKind::StaWpsPin,
             WifiEvent::ApStart => WifiEventKind::ApStart,
@@ -331,12 +331,11 @@ pub fn set_event_handler(handler: fn(WifiEvent)) -> Result<(), crate::wifi::Wifi
     ensure_trampoline_registered()
 }
 
-/// Enable SDK-style station auto-connect handling in the event task.
+/// Enable bounded station reconnect handling in the Rust event task.
 ///
-/// This matches the ESP8266 RTOS SDK station example shape:
-/// `WIFI_EVENT_STA_START` issues the first `esp_wifi_connect()`, and
-/// `WIFI_EVENT_STA_DISCONNECTED` retries it up to `max_retries` times before
-/// latching a failure sequence.
+/// The caller owns the first `esp_wifi_connect()` attempt and the hard
+/// deadline. While enabled, `WIFI_EVENT_STA_DISCONNECTED` retries that connect
+/// up to `max_retries` times before latching a failure sequence.
 pub fn enable_sdk_sta_auto_connect(max_retries: u32) -> Result<(), crate::wifi::WifiError> {
     ensure_sdk_sta_auto_connect_event_group()?;
     SDK_STA_AUTO_CONNECT_RETRY_COUNT.store(0, Ordering::Release);
@@ -344,6 +343,20 @@ pub fn enable_sdk_sta_auto_connect(max_retries: u32) -> Result<(), crate::wifi::
     SDK_STA_AUTO_CONNECT_MAX_RETRIES.store(max_retries, Ordering::Release);
     SDK_STA_AUTO_CONNECT_ENABLED.store(true, Ordering::Release);
     ensure_trampoline_registered()
+}
+
+pub fn disable_sdk_sta_auto_connect() {
+    SDK_STA_AUTO_CONNECT_ENABLED.store(false, Ordering::Release);
+    SDK_STA_AUTO_CONNECT_RETRY_COUNT.store(0, Ordering::Release);
+    SDK_STA_AUTO_CONNECT_MAX_RETRIES.store(0, Ordering::Release);
+    if let Ok(group) = ensure_sdk_sta_auto_connect_event_group() {
+        unsafe {
+            crate::wifi::compat::event_group::xEventGroupClearBits(
+                group,
+                SDK_STA_CONNECTED_BIT | SDK_STA_FAIL_BIT,
+            );
+        }
+    }
 }
 
 fn ensure_sdk_sta_auto_connect_event_group(
@@ -441,9 +454,12 @@ unsafe extern "C" fn wifi_event_trampoline(
 /// Update STA/AP atomic state directly from raw event_id. Minimal stack.
 #[inline(never)]
 fn update_sta_state_raw(event_id: i32, event_data: *mut core::ffi::c_void) {
-    use crate::wifi::controller::{note_sta_disconnect, StaConnectionState, AP_STATE, STA_STATE};
+    use crate::wifi::controller::{
+        note_sta_disconnect, StaConnectionState, AP_STATE, STA_START_SEQ, STA_STATE,
+    };
     match event_id as u32 {
         sys::WIFI_EVENT_STA_START => {
+            STA_START_SEQ.fetch_add(1, Ordering::AcqRel);
             STA_STATE.store(StaConnectionState::Connecting as u8, Ordering::Release);
             if SDK_STA_AUTO_CONNECT_ENABLED.load(Ordering::Acquire) {
                 if let Ok(group) = ensure_sdk_sta_auto_connect_event_group() {
@@ -455,7 +471,6 @@ fn update_sta_state_raw(event_id: i32, event_data: *mut core::ffi::c_void) {
                     }
                 }
                 SDK_STA_AUTO_CONNECT_RETRY_COUNT.store(0, Ordering::Release);
-                let _ = unsafe { sys::esp_wifi_connect() };
             }
         }
         sys::WIFI_EVENT_STA_CONNECTED => {
@@ -476,7 +491,7 @@ fn update_sta_state_raw(event_id: i32, event_data: *mut core::ffi::c_void) {
             if !event_data.is_null() {
                 let reason = unsafe { *(event_data as *const u8).add(32 + 1 + 6) };
                 note_sta_disconnect(DisconnectReason::from_raw(reason));
-                crate::println!("DISCONNECT reason={}", reason);
+                crate::wifi_debugln!("DISCONNECT reason={}", reason);
             } else {
                 note_sta_disconnect(DisconnectReason::Unspecified);
             }
@@ -595,7 +610,16 @@ unsafe fn parse_event(event_id: i32, event_data: *mut core::ffi::c_void) -> Opti
             WifiEvent::StaBssRssiLow { rssi: d.rssi }
         }
         sys::WIFI_EVENT_STA_WPS_ER_SUCCESS => WifiEvent::StaWpsSuccess,
-        sys::WIFI_EVENT_STA_WPS_ER_FAILED => WifiEvent::StaWpsFailed,
+        sys::WIFI_EVENT_STA_WPS_ER_FAILED => {
+            let reason = if event_data.is_null() {
+                None
+            } else {
+                Some(unsafe {
+                    *(event_data as *const sys::wifi_event_sta_wps_fail_reason_t) as u32
+                })
+            };
+            WifiEvent::StaWpsFailed { reason }
+        }
         sys::WIFI_EVENT_STA_WPS_ER_TIMEOUT => WifiEvent::StaWpsTimeout,
         sys::WIFI_EVENT_STA_WPS_ER_PIN => {
             let d = unsafe { &*(event_data as *const sys::wifi_event_sta_wps_er_pin_t) };

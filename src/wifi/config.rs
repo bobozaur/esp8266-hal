@@ -73,6 +73,34 @@ impl StaConfig {
         cfg
     }
 
+    pub(crate) fn from_validated_bytes(
+        ssid: &[u8],
+        password: &[u8],
+        auth_threshold: crate::wifi::AuthMode,
+    ) -> Self {
+        debug_assert!(ssid.len() <= 32);
+        debug_assert!(password.len() <= 64);
+
+        let mut ssid_vec = heapless::Vec::new();
+        let _ = ssid_vec.extend_from_slice(ssid);
+        let mut password_vec = heapless::Vec::new();
+        let _ = password_vec.extend_from_slice(password);
+
+        Self {
+            ssid: ssid_vec,
+            password: password_vec,
+            bssid: None,
+            channel: 0,
+            scan_method: ScanMethod::Fast,
+            sort_method: SortMethod::Signal,
+            rssi_threshold: -127,
+            auth_threshold,
+            listen_interval: 0,
+            pmf_capable: false,
+            pmf_required: false,
+        }
+    }
+
     pub(crate) fn from_raw(raw: &sys::wifi_sta_config_t) -> Self {
         let ssid_bytes = crate::wifi::bytes_to_str(&raw.ssid);
         let pwd_bytes = crate::wifi::bytes_to_str(&raw.password);
@@ -233,6 +261,33 @@ impl ApConfig {
         cfg.max_connection = self.max_connections;
         cfg.beacon_interval = self.beacon_interval;
         cfg
+    }
+
+    pub(crate) fn from_validated_bytes(
+        ssid: &[u8],
+        password: &[u8],
+        channel: u8,
+        max_connections: u8,
+        beacon_interval: u16,
+        auth_mode: crate::wifi::AuthMode,
+    ) -> Self {
+        debug_assert!(ssid.len() <= 32);
+        debug_assert!(password.len() <= 64);
+
+        let mut ssid_vec = heapless::Vec::new();
+        let _ = ssid_vec.extend_from_slice(ssid);
+        let mut password_vec = heapless::Vec::new();
+        let _ = password_vec.extend_from_slice(password);
+
+        Self {
+            ssid: ssid_vec,
+            password: password_vec,
+            channel,
+            auth_mode,
+            ssid_hidden: false,
+            max_connections,
+            beacon_interval,
+        }
     }
 
     pub(crate) fn from_raw(raw: &sys::wifi_ap_config_t) -> Self {
