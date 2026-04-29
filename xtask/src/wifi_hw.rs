@@ -21,7 +21,7 @@ const DEFAULT_UART_BAUD: u32 = 115_200;
 const DEFAULT_FLASH_BAUD: u32 = 460_800;
 const DEFAULT_SERIAL_PORT: &str = "/dev/ttyUSB0";
 const DEFAULT_COMPANION_PORT: &str = esp32_companion::DEFAULT_COMPANION_PORT;
-const DEFAULT_MATRIX_ATTEMPTS: usize = 2;
+const DEFAULT_MATRIX_ATTEMPTS: usize = 3;
 const MATRIX_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 const COMPANION_TCP_CONNECT_TIMEOUT_MS: u32 = 20_000;
 const RIG_BLOCKED_PROMISC_CONTROL: &str =
@@ -1141,6 +1141,13 @@ fn promisc_success_marker(name: &str) -> &'static str {
     }
 }
 
+fn promisc_raw_kind(name: &str) -> &'static str {
+    match name {
+        "promisc_data_companion" => "data",
+        _ => "ap-beacon",
+    }
+}
+
 fn configured_promisc_channel() -> Result<u8> {
     let value = env::var("ESP8266_HAL_PROMISC_CHANNEL")
         .or_else(|_| env::var("ESP8266_HAL_COMPANION_AP_CHANNEL"))
@@ -1519,6 +1526,20 @@ fn companion_command_timeout(command: &str, default: Duration) -> Duration {
         .map_or(default, |timeout| timeout.max(default))
 }
 
+fn bounded_timeout(requested: Duration, remaining: Duration) -> Option<Duration> {
+    const MIN_TIMEOUT: Duration = Duration::from_millis(250);
+
+    (remaining > MIN_TIMEOUT).then(|| requested.min(remaining))
+}
+
+fn bounded_companion_command_timeout(
+    command: &str,
+    default: Duration,
+    remaining: Duration,
+) -> Option<Duration> {
+    bounded_timeout(companion_command_timeout(command, default), remaining)
+}
+
 fn companion_join_with_retry(
     log: &mut File,
     companion: &CompanionRig,
@@ -1600,10 +1621,17 @@ fn companion_session_join_with_retry(
     ok_command: &str,
     attempts: usize,
     expected_ip_prefix: Option<&str>,
+    deadline: Instant,
 ) -> Result<String> {
     let mut last_error = None;
-    let command_timeout = companion_command_timeout(command, Duration::from_secs(25));
     for attempt in 1..=attempts {
+        let Some(command_timeout) = bounded_companion_command_timeout(
+            command,
+            Duration::from_secs(25),
+            deadline.saturating_duration_since(Instant::now()),
+        ) else {
+            break;
+        };
         let response = companion_session_command(
             &mut session.log,
             &mut session.commands,
@@ -1618,12 +1646,17 @@ fn companion_session_join_with_retry(
                         "session join attempt {attempt} failed: {error:#}"
                     )?;
                     last_error = Some(error);
-                    let _ = companion_session_command(
-                        &mut session.log,
-                        &mut session.commands,
-                        "STA_DISCONNECT",
+                    if let Some(timeout) = bounded_timeout(
                         Duration::from_secs(5),
-                    );
+                        deadline.saturating_duration_since(Instant::now()),
+                    ) {
+                        let _ = companion_session_command(
+                            &mut session.log,
+                            &mut session.commands,
+                            "STA_DISCONNECT",
+                            timeout,
+                        );
+                    }
                     thread::sleep(Duration::from_millis(750));
                     continue;
                 }
@@ -1636,12 +1669,17 @@ fn companion_session_join_with_retry(
                             "session join attempt {attempt} failed: {error:#}"
                         )?;
                         last_error = Some(error);
-                        let _ = companion_session_command(
-                            &mut session.log,
-                            &mut session.commands,
-                            "STA_DISCONNECT",
+                        if let Some(timeout) = bounded_timeout(
                             Duration::from_secs(5),
-                        );
+                            deadline.saturating_duration_since(Instant::now()),
+                        ) {
+                            let _ = companion_session_command(
+                                &mut session.log,
+                                &mut session.commands,
+                                "STA_DISCONNECT",
+                                timeout,
+                            );
+                        }
                         thread::sleep(Duration::from_millis(750));
                         continue;
                     };
@@ -1652,12 +1690,17 @@ fn companion_session_join_with_retry(
                             "session join attempt {attempt} failed: {error:#}"
                         )?;
                         last_error = Some(error);
-                        let _ = companion_session_command(
-                            &mut session.log,
-                            &mut session.commands,
-                            "STA_DISCONNECT",
+                        if let Some(timeout) = bounded_timeout(
                             Duration::from_secs(5),
-                        );
+                            deadline.saturating_duration_since(Instant::now()),
+                        ) {
+                            let _ = companion_session_command(
+                                &mut session.log,
+                                &mut session.commands,
+                                "STA_DISCONNECT",
+                                timeout,
+                            );
+                        }
                         thread::sleep(Duration::from_millis(750));
                         continue;
                     }
@@ -1670,12 +1713,17 @@ fn companion_session_join_with_retry(
                     "session join attempt {attempt} failed: {error:#}"
                 )?;
                 last_error = Some(error);
-                let _ = companion_session_command(
-                    &mut session.log,
-                    &mut session.commands,
-                    "STA_DISCONNECT",
+                if let Some(timeout) = bounded_timeout(
                     Duration::from_secs(5),
-                );
+                    deadline.saturating_duration_since(Instant::now()),
+                ) {
+                    let _ = companion_session_command(
+                        &mut session.log,
+                        &mut session.commands,
+                        "STA_DISCONNECT",
+                        timeout,
+                    );
+                }
                 thread::sleep(Duration::from_millis(750));
             }
         }
@@ -1698,12 +1746,13 @@ fn run_ap_station_list_companion(
         "Guru Meditation",
     ];
 
-    let mut port = open_serial_port(serial_port)?;
-    pulse_reset(port.as_mut())?;
     let uart_path = run_dir.join("uart.log");
     let mut uart_log = File::create(&uart_path)
         .with_context(|| format!("failed to create {}", uart_path.display()))?;
     let mut companion_log = open_companion_log(run_dir)?;
+
+    let mut port = open_serial_port(serial_port)?;
+    pulse_reset(port.as_mut())?;
     let start = Instant::now();
     let timeout = Duration::from_secs(70);
     let mut buffer = Vec::with_capacity(32 * 1024);
@@ -1747,6 +1796,9 @@ fn run_ap_station_list_companion(
                                 &mut buffer,
                                 Duration::from_secs(6),
                             );
+                            if String::from_utf8_lossy(&buffer).contains(SUCCESS_MARKER) {
+                                return Ok(());
+                            }
                             return Err(error);
                         }
                     };
@@ -2131,6 +2183,7 @@ fn run_ap_sta_downstream_companion(
         .with_context(|| format!("failed to create {}", uart_path.display()))?;
     let start = Instant::now();
     let timeout = Duration::from_secs(70);
+    let deadline = start + timeout;
     let mut buffer = Vec::with_capacity(32 * 1024);
     let mut joined = false;
 
@@ -2162,6 +2215,7 @@ fn run_ap_sta_downstream_companion(
                         "STA_JOIN_KEEP_AP",
                         6,
                         Some("192.168.4."),
+                        deadline,
                     ) {
                         Ok(response) => response,
                         Err(error) => {
@@ -2508,10 +2562,7 @@ fn run_promisc_companion(
         "Guru Meditation",
     ];
 
-    let raw_kind = match scenario_name {
-        "promisc_data_companion" => "data",
-        _ => "management",
-    };
+    let raw_kind = promisc_raw_kind(scenario_name);
     let raw_count = match scenario_name {
         "promisc_control_filters" => 64,
         _ => 24,
@@ -2527,12 +2578,24 @@ fn run_promisc_companion(
         None
     };
 
-    let mut port = open_serial_port(serial_port)?;
-    pulse_reset(port.as_mut())?;
     let uart_path = run_dir.join("uart.log");
     let mut uart_log = File::create(&uart_path)
         .with_context(|| format!("failed to create {}", uart_path.display()))?;
     let mut companion_log = open_companion_log(run_dir)?;
+    let passive_ap_beacon = raw_kind == "ap-beacon";
+    if passive_ap_beacon {
+        let response = companion_command(
+            &mut companion_log,
+            companion,
+            &format!("AP_START ssid=esp8266-hal-promisc pass=open channel={channel}"),
+            Duration::from_secs(30),
+        )?;
+        ensure_ok_response(&response, "AP_START")?;
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    let mut port = open_serial_port(serial_port)?;
+    pulse_reset(port.as_mut())?;
 
     let start = Instant::now();
     let timeout = Duration::from_secs(45);
@@ -2573,7 +2636,7 @@ fn run_promisc_companion(
             Err(error) => return Err(error).context("failed while reading UART"),
         }
 
-        if promisc_started && Instant::now() >= next_traffic {
+        if promisc_started && !passive_ap_beacon && Instant::now() >= next_traffic {
             let destination = destination
                 .as_ref()
                 .map(|mac| format!(" dest={mac}"))
@@ -3669,7 +3732,9 @@ fn repo_root() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::command_field;
+    use std::time::Duration;
+
+    use super::{bounded_companion_command_timeout, command_field, promisc_raw_kind};
 
     #[test]
     fn command_field_extracts_ssid_from_join_command() {
@@ -3682,5 +3747,34 @@ mod tests {
         let command = "STA_JOIN open timeout_ms=12000";
         assert_eq!(command_field(command, "ssid"), None);
         assert_eq!(command_field(command, "timeout_ms"), Some("12000"));
+    }
+
+    #[test]
+    fn companion_command_timeout_is_capped_by_remaining_budget() {
+        let command = "STA_JOIN_KEEP_AP timeout_ms=30000";
+
+        assert_eq!(
+            bounded_companion_command_timeout(
+                command,
+                Duration::from_secs(25),
+                Duration::from_secs(3)
+            ),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            bounded_companion_command_timeout(
+                command,
+                Duration::from_secs(25),
+                Duration::from_millis(250)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn promiscuous_management_scenarios_use_beacon_stimulus() {
+        assert_eq!(promisc_raw_kind("promisc_capture"), "ap-beacon");
+        assert_eq!(promisc_raw_kind("promisc_filters"), "ap-beacon");
+        assert_eq!(promisc_raw_kind("promisc_data_companion"), "data");
     }
 }

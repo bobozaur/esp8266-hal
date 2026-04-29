@@ -33,10 +33,11 @@ const DHCP_REPLY_FRAME_BYTES: usize =
     ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN + DHCP_PACKET_BYTES;
 const DHCP_REPLY_HEADERS: usize = ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN;
 
-type ApResources = WifiResources<8, 4, 2>;
-type ApBackend = Esp8266TargetBackend<'static, 8, 4, 2>;
-type ApDriver = WifiDriver<'static, Started<ApMode>, ApBackend, 8, 4, 2>;
-type ApNetDevice = ApWifiDevice<'static, ApMode, ApBackend, 8, 4, 2>;
+type ApResources = WifiResources<8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type ApBackend = Esp8266TargetBackend<'static, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type ApDriver =
+    WifiDriver<'static, Started<ApMode>, ApBackend, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type ApNetDevice = ApWifiDevice<'static, ApMode, ApBackend, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
 
 struct ApNetRuntime {
     device: ApNetDevice,

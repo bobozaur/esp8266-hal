@@ -35,7 +35,23 @@ pub type WifiDevice<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
-> = LinkDevice<StaLink<'d, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>>;
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
+> = LinkDevice<
+    StaLink<
+        'd,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
+>;
 
 /// An access-point-backed `smoltcp` device.
 pub type ApWifiDevice<
@@ -48,7 +64,23 @@ pub type ApWifiDevice<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
-> = LinkDevice<ApLink<'d, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>>;
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
+> = LinkDevice<
+    ApLink<
+        'd,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
+>;
 
 impl<L: WifiDataLink> LinkDevice<L> {
     pub fn new(link: L) -> Self {

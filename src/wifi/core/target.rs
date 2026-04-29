@@ -23,60 +23,99 @@ extern "C" {
     fn esp8266_hal_wps_set_target_ssid(ssid: *const u8, len: u32);
 }
 
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_cb_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_cb_enqueued: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_cb_rejected: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_cb_null_resources: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_cb_last_len: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_attach_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_refresh_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_detach_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_register_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_unregister_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_last_register_ret: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_last_unregister_ret: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_sta_rx_expected_slot: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_cb_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_cb_enqueued: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_cb_rejected: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_cb_null_resources: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_cb_last_len: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_attach_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_refresh_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_detach_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_register_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_unregister_calls: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_last_register_ret: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_last_unregister_ret: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "wifi-debug-trace")]
 #[no_mangle]
 static g_ap_rx_expected_slot: AtomicU32 = AtomicU32::new(0);
 static PROMISCUOUS_FILTER_BITS: AtomicU32 = AtomicU32::new(0);
+static PROMISCUOUS_CHANNEL: AtomicU32 = AtomicU32::new(0);
 static CORE_STA_START_SEQ: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(feature = "wifi-debug-trace")]
+macro_rules! rx_debug {
+    ($($statement:stmt)*) => {
+        $($statement)*
+    };
+}
+
+#[cfg(not(feature = "wifi-debug-trace"))]
+macro_rules! rx_debug {
+    ($($statement:stmt)*) => {};
+}
 
 // STA_START normally arrives on the first scheduler turn after
 // `esp_wifi_start()`. Keep a wide 1s margin so `start()` fails explicitly
@@ -96,11 +135,32 @@ pub struct Esp8266TargetBackend<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
     controller: Option<crate::wifi::WifiController>,
-    resources: &'d WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    resources: &'d WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     registration: Option<
-        CallbackRegistration<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+        CallbackRegistration<
+            'd,
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
     >,
     event_handler_registered: bool,
     #[cfg(feature = "wifi-smartconfig")]
@@ -119,10 +179,32 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > Esp8266TargetBackend<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    Esp8266TargetBackend<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub fn new(
-        resources: &'d WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+        resources: &'d WifiResources<
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
     ) -> Self {
         Self {
             controller: None,
@@ -222,6 +304,8 @@ impl<
                         ESP_NOW_PEERS,
                         ESP_NOW_RX,
                         PROMISCUOUS_RX,
+                        AP_RX_SLOTS,
+                        AP_RX_BYTES,
                     >,
                 ),
                 core::ptr::null_mut(),
@@ -249,6 +333,8 @@ impl<
                         ESP_NOW_PEERS,
                         ESP_NOW_RX,
                         PROMISCUOUS_RX,
+                        AP_RX_SLOTS,
+                        AP_RX_BYTES,
                     >,
                 ),
             )
@@ -274,6 +360,8 @@ impl<
                         ESP_NOW_PEERS,
                         ESP_NOW_RX,
                         PROMISCUOUS_RX,
+                        AP_RX_SLOTS,
+                        AP_RX_BYTES,
                     >,
                 ),
                 core::ptr::null_mut(),
@@ -302,6 +390,8 @@ impl<
                         ESP_NOW_PEERS,
                         ESP_NOW_RX,
                         PROMISCUOUS_RX,
+                        AP_RX_SLOTS,
+                        AP_RX_BYTES,
                     >,
                 ),
             )
@@ -315,17 +405,28 @@ impl<
             esp8266_wifi_sys::esp_wifi_internal_reg_rxcb(
                 crate::wifi::controller::WifiInterface::Sta.to_raw(),
                 Some(
-                    rx_callback_sta::<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+                    rx_callback_sta::<
+                        EVENTS,
+                        RX,
+                        SUBS,
+                        ESP_NOW_PEERS,
+                        ESP_NOW_RX,
+                        PROMISCUOUS_RX,
+                        AP_RX_SLOTS,
+                        AP_RX_BYTES,
+                    >,
                 ),
             )
         };
-        g_sta_rx_register_calls.fetch_add(1, Ordering::AcqRel);
-        g_sta_rx_last_register_ret.store(ret as u32, Ordering::Release);
-        g_sta_rx_expected_slot.store(
-            rx_callback_sta::<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX> as usize
-                as u32,
-            Ordering::Release,
-        );
+        rx_debug! {
+            g_sta_rx_register_calls.fetch_add(1, Ordering::AcqRel);
+            g_sta_rx_last_register_ret.store(ret as u32, Ordering::Release);
+            g_sta_rx_expected_slot.store(
+                rx_callback_sta::<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX, AP_RX_SLOTS, AP_RX_BYTES> as usize
+                    as u32,
+                Ordering::Release,
+            );
+        }
         crate::wifi::EspError::check(ret).map_err(|_| DriverError::BackendRejected)
     }
 
@@ -333,39 +434,56 @@ impl<
         let ret = unsafe {
             esp8266_wifi_sys::esp_wifi_internal_reg_rxcb(
                 crate::wifi::controller::WifiInterface::Ap.to_raw(),
-                Some(rx_callback_ap::<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>),
+                Some(
+                    rx_callback_ap::<
+                        EVENTS,
+                        RX,
+                        SUBS,
+                        ESP_NOW_PEERS,
+                        ESP_NOW_RX,
+                        PROMISCUOUS_RX,
+                        AP_RX_SLOTS,
+                        AP_RX_BYTES,
+                    >,
+                ),
             )
         };
-        g_ap_rx_register_calls.fetch_add(1, Ordering::AcqRel);
-        g_ap_rx_last_register_ret.store(ret as u32, Ordering::Release);
-        g_ap_rx_expected_slot.store(
-            rx_callback_ap::<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX> as usize
-                as u32,
-            Ordering::Release,
-        );
+        rx_debug! {
+            g_ap_rx_register_calls.fetch_add(1, Ordering::AcqRel);
+            g_ap_rx_last_register_ret.store(ret as u32, Ordering::Release);
+            g_ap_rx_expected_slot.store(
+                rx_callback_ap::<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX, AP_RX_SLOTS, AP_RX_BYTES> as usize
+                    as u32,
+                Ordering::Release,
+            );
+        }
         crate::wifi::EspError::check(ret).map_err(|_| DriverError::BackendRejected)
     }
 
     fn unregister_sta_rx_callback(&mut self) {
-        let ret = unsafe {
+        let _ret = unsafe {
             esp8266_wifi_sys::esp_wifi_internal_reg_rxcb(
                 crate::wifi::controller::WifiInterface::Sta.to_raw(),
                 None,
             )
         };
-        g_sta_rx_unregister_calls.fetch_add(1, Ordering::AcqRel);
-        g_sta_rx_last_unregister_ret.store(ret as u32, Ordering::Release);
+        rx_debug! {
+            g_sta_rx_unregister_calls.fetch_add(1, Ordering::AcqRel);
+            g_sta_rx_last_unregister_ret.store(_ret as u32, Ordering::Release);
+        }
     }
 
     fn unregister_ap_rx_callback(&mut self) {
-        let ret = unsafe {
+        let _ret = unsafe {
             esp8266_wifi_sys::esp_wifi_internal_reg_rxcb(
                 crate::wifi::controller::WifiInterface::Ap.to_raw(),
                 None,
             )
         };
-        g_ap_rx_unregister_calls.fetch_add(1, Ordering::AcqRel);
-        g_ap_rx_last_unregister_ret.store(ret as u32, Ordering::Release);
+        rx_debug! {
+            g_ap_rx_unregister_calls.fetch_add(1, Ordering::AcqRel);
+            g_ap_rx_last_unregister_ret.store(_ret as u32, Ordering::Release);
+        }
     }
 
     fn ensure_ap_netif_started(&mut self) -> Result<(), DriverError> {
@@ -395,32 +513,34 @@ impl<
 
 #[inline(never)]
 fn reset_sta_rx_callback_debug() {
-    g_sta_rx_cb_calls.store(0, Ordering::Release);
-    g_sta_rx_cb_enqueued.store(0, Ordering::Release);
-    g_sta_rx_cb_rejected.store(0, Ordering::Release);
-    g_sta_rx_cb_null_resources.store(0, Ordering::Release);
-    g_sta_rx_cb_last_len.store(0, Ordering::Release);
-    g_sta_rx_attach_calls.store(0, Ordering::Release);
-    g_sta_rx_refresh_calls.store(0, Ordering::Release);
-    g_sta_rx_detach_calls.store(0, Ordering::Release);
-    g_sta_rx_register_calls.store(0, Ordering::Release);
-    g_sta_rx_unregister_calls.store(0, Ordering::Release);
-    g_sta_rx_last_register_ret.store(0, Ordering::Release);
-    g_sta_rx_last_unregister_ret.store(0, Ordering::Release);
-    g_sta_rx_expected_slot.store(0, Ordering::Release);
-    g_ap_rx_cb_calls.store(0, Ordering::Release);
-    g_ap_rx_cb_enqueued.store(0, Ordering::Release);
-    g_ap_rx_cb_rejected.store(0, Ordering::Release);
-    g_ap_rx_cb_null_resources.store(0, Ordering::Release);
-    g_ap_rx_cb_last_len.store(0, Ordering::Release);
-    g_ap_rx_attach_calls.store(0, Ordering::Release);
-    g_ap_rx_refresh_calls.store(0, Ordering::Release);
-    g_ap_rx_detach_calls.store(0, Ordering::Release);
-    g_ap_rx_register_calls.store(0, Ordering::Release);
-    g_ap_rx_unregister_calls.store(0, Ordering::Release);
-    g_ap_rx_last_register_ret.store(0, Ordering::Release);
-    g_ap_rx_last_unregister_ret.store(0, Ordering::Release);
-    g_ap_rx_expected_slot.store(0, Ordering::Release);
+    rx_debug! {
+        g_sta_rx_cb_calls.store(0, Ordering::Release);
+        g_sta_rx_cb_enqueued.store(0, Ordering::Release);
+        g_sta_rx_cb_rejected.store(0, Ordering::Release);
+        g_sta_rx_cb_null_resources.store(0, Ordering::Release);
+        g_sta_rx_cb_last_len.store(0, Ordering::Release);
+        g_sta_rx_attach_calls.store(0, Ordering::Release);
+        g_sta_rx_refresh_calls.store(0, Ordering::Release);
+        g_sta_rx_detach_calls.store(0, Ordering::Release);
+        g_sta_rx_register_calls.store(0, Ordering::Release);
+        g_sta_rx_unregister_calls.store(0, Ordering::Release);
+        g_sta_rx_last_register_ret.store(0, Ordering::Release);
+        g_sta_rx_last_unregister_ret.store(0, Ordering::Release);
+        g_sta_rx_expected_slot.store(0, Ordering::Release);
+        g_ap_rx_cb_calls.store(0, Ordering::Release);
+        g_ap_rx_cb_enqueued.store(0, Ordering::Release);
+        g_ap_rx_cb_rejected.store(0, Ordering::Release);
+        g_ap_rx_cb_null_resources.store(0, Ordering::Release);
+        g_ap_rx_cb_last_len.store(0, Ordering::Release);
+        g_ap_rx_attach_calls.store(0, Ordering::Release);
+        g_ap_rx_refresh_calls.store(0, Ordering::Release);
+        g_ap_rx_detach_calls.store(0, Ordering::Release);
+        g_ap_rx_register_calls.store(0, Ordering::Release);
+        g_ap_rx_unregister_calls.store(0, Ordering::Release);
+        g_ap_rx_last_register_ret.store(0, Ordering::Release);
+        g_ap_rx_last_unregister_ret.store(0, Ordering::Release);
+        g_ap_rx_expected_slot.store(0, Ordering::Release);
+    }
 }
 
 #[inline(always)]
@@ -533,8 +653,20 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > Drop
-    for Esp8266TargetBackend<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for Esp8266TargetBackend<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn drop(&mut self) {
         crate::wifi::event::disable_sdk_sta_auto_connect();
@@ -557,8 +689,20 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > WifiLifecycleBackend
-    for Esp8266TargetBackend<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for Esp8266TargetBackend<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn initialize(&mut self, config: &InitConfig) -> Result<(), InitError> {
         let mut controller = crate::wifi::WifiController::init(map_init_config(config))
@@ -641,8 +785,20 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > WifiStaBackend
-    for Esp8266TargetBackend<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for Esp8266TargetBackend<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn configure_sta(&mut self, config: &ClientConfig) -> Result<(), DriverError> {
         self.station_power_save = config.power_save();
@@ -689,8 +845,20 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > WifiApBackend
-    for Esp8266TargetBackend<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for Esp8266TargetBackend<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn configure_ap(&mut self, config: &AccessPointConfig) -> Result<(), DriverError> {
         let controller = self.controller_mut()?;
@@ -766,17 +934,29 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > WifiPacketBackend
-    for Esp8266TargetBackend<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for Esp8266TargetBackend<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn attach_sta_rx(&mut self) -> Result<(), DriverError> {
         if self.sta_rx_registered {
             return Ok(());
         }
 
-        g_sta_rx_attach_calls.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_sta_rx_attach_calls.fetch_add(1, Ordering::AcqRel); }
         reset_sta_rx_callback_debug();
-        g_sta_rx_attach_calls.store(1, Ordering::Release);
+        rx_debug! { g_sta_rx_attach_calls.store(1, Ordering::Release); }
         self.register_sta_rx_callback()?;
         self.sta_rx_registered = true;
         Ok(())
@@ -787,7 +967,7 @@ impl<
             return Ok(());
         }
 
-        g_ap_rx_attach_calls.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_ap_rx_attach_calls.fetch_add(1, Ordering::AcqRel); }
         self.ensure_ap_netif_started()?;
         self.register_ap_rx_callback()?;
         self.ap_rx_registered = true;
@@ -795,9 +975,9 @@ impl<
     }
 
     fn refresh_sta_rx(&mut self) -> Result<(), DriverError> {
-        g_sta_rx_refresh_calls.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_sta_rx_refresh_calls.fetch_add(1, Ordering::AcqRel); }
         reset_sta_rx_callback_debug();
-        g_sta_rx_refresh_calls.store(1, Ordering::Release);
+        rx_debug! { g_sta_rx_refresh_calls.store(1, Ordering::Release); }
         if self.sta_rx_registered {
             self.unregister_sta_rx_callback();
         }
@@ -807,7 +987,7 @@ impl<
     }
 
     fn refresh_ap_rx(&mut self) -> Result<(), DriverError> {
-        g_ap_rx_refresh_calls.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_ap_rx_refresh_calls.fetch_add(1, Ordering::AcqRel); }
         self.ensure_ap_netif_started()?;
         if self.ap_rx_registered {
             self.unregister_ap_rx_callback();
@@ -819,7 +999,7 @@ impl<
 
     fn detach_sta_rx(&mut self) {
         if self.sta_rx_registered {
-            g_sta_rx_detach_calls.fetch_add(1, Ordering::AcqRel);
+            rx_debug! { g_sta_rx_detach_calls.fetch_add(1, Ordering::AcqRel); }
             self.unregister_sta_rx_callback();
             self.sta_rx_registered = false;
         }
@@ -827,7 +1007,7 @@ impl<
 
     fn detach_ap_rx(&mut self) {
         if self.ap_rx_registered {
-            g_ap_rx_detach_calls.fetch_add(1, Ordering::AcqRel);
+            rx_debug! { g_ap_rx_detach_calls.fetch_add(1, Ordering::AcqRel); }
             self.unregister_ap_rx_callback();
             self.ap_rx_registered = false;
         }
@@ -875,8 +1055,20 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > WifiScanBackend
-    for Esp8266TargetBackend<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for Esp8266TargetBackend<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn scan_into<const N: usize>(
         &mut self,
@@ -1044,17 +1236,33 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > WifiFeatureBackend
-    for Esp8266TargetBackend<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for Esp8266TargetBackend<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn set_channel(&mut self, channel: Channel) -> Result<(), DriverError> {
-        crate::wifi::EspError::check(unsafe {
+        let result = crate::wifi::EspError::check(unsafe {
             esp8266_wifi_sys::esp_wifi_set_channel(
                 channel.get(),
                 esp8266_wifi_sys::WIFI_SECOND_CHAN_NONE,
             )
         })
-        .map_err(|_| DriverError::BackendRejected)
+        .map_err(|_| DriverError::BackendRejected);
+        if result.is_ok() {
+            PROMISCUOUS_CHANNEL.store(channel.get() as u32, Ordering::Release);
+        }
+        result
     }
 
     fn enable_promiscuous(&mut self, filter: PromiscuousFilter) -> Result<(), DriverError> {
@@ -1079,7 +1287,16 @@ impl<
 
         if let Err(error) = crate::wifi::EspError::check(unsafe {
             esp8266_wifi_sys::esp_wifi_set_promiscuous_rx_cb(Some(
-                promiscuous_callback::<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+                promiscuous_callback::<
+                    EVENTS,
+                    RX,
+                    SUBS,
+                    ESP_NOW_PEERS,
+                    ESP_NOW_RX,
+                    PROMISCUOUS_RX,
+                    AP_RX_SLOTS,
+                    AP_RX_BYTES,
+                >,
             ))
         })
         .map_err(|_| DriverError::BackendRejected)
@@ -1113,6 +1330,7 @@ impl<
         })
         .map_err(|_| DriverError::BackendRejected);
         PROMISCUOUS_FILTER_BITS.store(0, Ordering::Release);
+        PROMISCUOUS_CHANNEL.store(0, Ordering::Release);
         let disable_result = crate::wifi::EspError::check(unsafe {
             esp8266_wifi_sys::esp_wifi_set_promiscuous(false)
         })
@@ -1126,14 +1344,18 @@ impl<
             .map_err(|_| DriverError::BackendRejected)?;
 
         if crate::wifi::EspError::check(unsafe {
-            esp8266_wifi_sys::esp_now_register_recv_cb(Some(esp_now_recv_callback::<
-                EVENTS,
-                RX,
-                SUBS,
-                ESP_NOW_PEERS,
-                ESP_NOW_RX,
-                PROMISCUOUS_RX,
-            >))
+            esp8266_wifi_sys::esp_now_register_recv_cb(Some(
+                esp_now_recv_callback::<
+                    EVENTS,
+                    RX,
+                    SUBS,
+                    ESP_NOW_PEERS,
+                    ESP_NOW_RX,
+                    PROMISCUOUS_RX,
+                    AP_RX_SLOTS,
+                    AP_RX_BYTES,
+                >,
+            ))
         })
         .is_err()
         {
@@ -1142,14 +1364,18 @@ impl<
         }
 
         if crate::wifi::EspError::check(unsafe {
-            esp8266_wifi_sys::esp_now_register_send_cb(Some(esp_now_send_callback::<
-                EVENTS,
-                RX,
-                SUBS,
-                ESP_NOW_PEERS,
-                ESP_NOW_RX,
-                PROMISCUOUS_RX,
-            >))
+            esp8266_wifi_sys::esp_now_register_send_cb(Some(
+                esp_now_send_callback::<
+                    EVENTS,
+                    RX,
+                    SUBS,
+                    ESP_NOW_PEERS,
+                    ESP_NOW_RX,
+                    PROMISCUOUS_RX,
+                    AP_RX_SLOTS,
+                    AP_RX_BYTES,
+                >,
+            ))
         })
         .is_err()
         {
@@ -1328,8 +1554,20 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > WifiRuntimeBackend
-    for Esp8266TargetBackend<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for Esp8266TargetBackend<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn now_ms(&self) -> u64 {
         let _ = self.controller();
@@ -1359,6 +1597,8 @@ unsafe extern "C" fn wifi_core_event_trampoline<
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
+    const AP_RX_SLOTS: usize,
+    const AP_RX_BYTES: usize,
 >(
     _arg: *mut core::ffi::c_void,
     _base: esp8266_wifi_sys::esp_event_base_t,
@@ -1375,6 +1615,8 @@ unsafe extern "C" fn wifi_core_event_trampoline<
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
         >()
     };
     if resources.is_null() {
@@ -1475,6 +1717,8 @@ unsafe extern "C" fn smartconfig_event_trampoline<
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
+    const AP_RX_SLOTS: usize,
+    const AP_RX_BYTES: usize,
 >(
     _arg: *mut core::ffi::c_void,
     _base: esp8266_wifi_sys::esp_event_base_t,
@@ -1489,6 +1733,8 @@ unsafe extern "C" fn smartconfig_event_trampoline<
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
         >()
     };
     if resources.is_null() {
@@ -1546,13 +1792,17 @@ unsafe extern "C" fn rx_callback_sta<
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
+    const AP_RX_SLOTS: usize,
+    const AP_RX_BYTES: usize,
 >(
     buffer: *mut core::ffi::c_void,
     len: u16,
     eb: *mut core::ffi::c_void,
 ) -> esp8266_wifi_sys::esp_err_t {
-    g_sta_rx_cb_calls.fetch_add(1, Ordering::AcqRel);
-    g_sta_rx_cb_last_len.store(len as u32, Ordering::Release);
+    rx_debug! {
+        g_sta_rx_cb_calls.fetch_add(1, Ordering::AcqRel);
+        g_sta_rx_cb_last_len.store(len as u32, Ordering::Release);
+    }
     let resources = unsafe {
         super::target_callback::active_resources::<
             EVENTS,
@@ -1561,10 +1811,12 @@ unsafe extern "C" fn rx_callback_sta<
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
         >()
     };
     if resources.is_null() {
-        g_sta_rx_cb_null_resources.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_sta_rx_cb_null_resources.fetch_add(1, Ordering::AcqRel); }
         unsafe { release_rx_ownership(buffer, eb) };
         return esp8266_wifi_sys::ESP_OK;
     }
@@ -1572,9 +1824,9 @@ unsafe extern "C" fn rx_callback_sta<
     let resources = unsafe { &*resources };
     let record = unsafe { RawRxRecord::from_raw(buffer, len, eb, Some(release_rx_ownership)) };
     if resources.enqueue_rx(record).is_ok() {
-        g_sta_rx_cb_enqueued.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_sta_rx_cb_enqueued.fetch_add(1, Ordering::AcqRel); }
     } else {
-        g_sta_rx_cb_rejected.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_sta_rx_cb_rejected.fetch_add(1, Ordering::AcqRel); }
     }
     esp8266_wifi_sys::ESP_OK
 }
@@ -1586,13 +1838,17 @@ unsafe extern "C" fn rx_callback_ap<
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
+    const AP_RX_SLOTS: usize,
+    const AP_RX_BYTES: usize,
 >(
     buffer: *mut core::ffi::c_void,
     len: u16,
     eb: *mut core::ffi::c_void,
 ) -> esp8266_wifi_sys::esp_err_t {
-    g_ap_rx_cb_calls.fetch_add(1, Ordering::AcqRel);
-    g_ap_rx_cb_last_len.store(len as u32, Ordering::Release);
+    rx_debug! {
+        g_ap_rx_cb_calls.fetch_add(1, Ordering::AcqRel);
+        g_ap_rx_cb_last_len.store(len as u32, Ordering::Release);
+    }
     let resources = unsafe {
         super::target_callback::active_resources::<
             EVENTS,
@@ -1601,10 +1857,12 @@ unsafe extern "C" fn rx_callback_ap<
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
         >()
     };
     if resources.is_null() {
-        g_ap_rx_cb_null_resources.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_ap_rx_cb_null_resources.fetch_add(1, Ordering::AcqRel); }
         unsafe { release_rx_ownership(buffer, eb) };
         return esp8266_wifi_sys::ESP_OK;
     }
@@ -1617,9 +1875,9 @@ unsafe extern "C" fn rx_callback_ap<
     };
     unsafe { release_rx_ownership(buffer, eb) };
     if enqueue.is_ok() {
-        g_ap_rx_cb_enqueued.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_ap_rx_cb_enqueued.fetch_add(1, Ordering::AcqRel); }
     } else {
-        g_ap_rx_cb_rejected.fetch_add(1, Ordering::AcqRel);
+        rx_debug! { g_ap_rx_cb_rejected.fetch_add(1, Ordering::AcqRel); }
     }
     esp8266_wifi_sys::ESP_OK
 }
@@ -1631,6 +1889,8 @@ unsafe extern "C" fn promiscuous_callback<
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
+    const AP_RX_SLOTS: usize,
+    const AP_RX_BYTES: usize,
 >(
     buffer: *mut core::ffi::c_void,
     packet_type: esp8266_wifi_sys::wifi_promiscuous_pkt_type_t,
@@ -1647,6 +1907,8 @@ unsafe extern "C" fn promiscuous_callback<
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
         >()
     };
     if resources.is_null() {
@@ -1673,10 +1935,19 @@ unsafe extern "C" fn promiscuous_callback<
     if active_filter.is_empty() || !active_filter.contains(packet_type) {
         return;
     }
+    let raw_channel = packet.rx_ctrl.channel();
+    let channel = if (1..=14).contains(&raw_channel) {
+        raw_channel
+    } else {
+        PROMISCUOUS_CHANNEL.load(Ordering::Acquire) as u8
+    };
+    if !(1..=14).contains(&channel) {
+        return;
+    }
 
     let info = PromiscuousFrameInfo {
         rssi: packet.rx_ctrl.rssi(),
-        channel: packet.rx_ctrl.channel(),
+        channel,
         packet_type,
     };
 
@@ -1692,6 +1963,8 @@ unsafe extern "C" fn esp_now_recv_callback<
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
+    const AP_RX_SLOTS: usize,
+    const AP_RX_BYTES: usize,
 >(
     peer_addr: *const u8,
     payload: *const u8,
@@ -1709,6 +1982,8 @@ unsafe extern "C" fn esp_now_recv_callback<
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
         >()
     };
     if resources.is_null() {
@@ -1733,6 +2008,8 @@ unsafe extern "C" fn esp_now_send_callback<
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
+    const AP_RX_SLOTS: usize,
+    const AP_RX_BYTES: usize,
 >(
     peer_addr: *const u8,
     status: esp8266_wifi_sys::esp_now_send_status_t,
@@ -1749,6 +2026,8 @@ unsafe extern "C" fn esp_now_send_callback<
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
         >()
     };
     if resources.is_null() {

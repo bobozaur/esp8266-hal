@@ -40,6 +40,9 @@ impl<const SLOTS: usize, const BYTES: usize> OwnedRxPool<SLOTS, BYTES> {
         src: *const u8,
         len: u16,
     ) -> Result<OwnedRxLease, DriverError> {
+        if SLOTS == 0 {
+            return Err(DriverError::PacketOverflow);
+        }
         if len as usize > BYTES {
             return Err(DriverError::PayloadTooLong);
         }
@@ -109,9 +112,20 @@ impl ReleaseToken {
     }
 
     pub fn release(self) {
-        if let Some(release_fn) = self.release_fn {
+        let mut token = self;
+        token.release_once();
+    }
+
+    fn release_once(&mut self) {
+        if let Some(release_fn) = self.release_fn.take() {
             unsafe { release_fn(self.buffer, self.eb) };
         }
+    }
+}
+
+impl Drop for ReleaseToken {
+    fn drop(&mut self) {
+        self.release_once();
     }
 }
 
@@ -313,6 +327,54 @@ mod tests {
 
         let mut dst = [0; 4];
         assert_eq!(ring.pop().unwrap().copy_into(&mut dst), 4);
+        assert_eq!(RELEASES.load(core::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dropped_record_releases_ownership_once() {
+        static RELEASES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+        unsafe fn count_release(_: *mut core::ffi::c_void, _: *mut core::ffi::c_void) {
+            RELEASES.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+
+        RELEASES.store(0, core::sync::atomic::Ordering::SeqCst);
+        {
+            let _record = unsafe {
+                RawRxRecord::from_raw(
+                    core::ptr::null_mut(),
+                    8,
+                    core::ptr::null_mut(),
+                    Some(count_release),
+                )
+            };
+        }
+
+        assert_eq!(RELEASES.load(core::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dropped_ring_releases_queued_records() {
+        static RELEASES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+        unsafe fn count_release(_: *mut core::ffi::c_void, _: *mut core::ffi::c_void) {
+            RELEASES.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+
+        RELEASES.store(0, core::sync::atomic::Ordering::SeqCst);
+        {
+            let mut ring = RxRing::<2>::new();
+            ring.try_push(unsafe {
+                RawRxRecord::from_raw(
+                    core::ptr::null_mut(),
+                    8,
+                    core::ptr::null_mut(),
+                    Some(count_release),
+                )
+            })
+            .unwrap();
+        }
+
         assert_eq!(RELEASES.load(core::sync::atomic::Ordering::SeqCst), 1);
     }
 

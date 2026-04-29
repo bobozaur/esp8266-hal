@@ -99,27 +99,20 @@ pub(super) fn map_scan_options(options: &ScanOptions) -> crate::wifi::scan::Scan
 }
 
 pub(super) fn map_promiscuous_filter(filter: PromiscuousFilter) -> u32 {
-    if filter.contains(PromiscuousPacketType::Control) {
-        return esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_MGMT
-            | esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_CTRL
-            | esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_DATA
-            | esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_MISC;
+    if filter.is_empty() {
+        return 0;
+    }
+    if filter == PromiscuousFilter::DATA {
+        return esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_DATA;
     }
 
-    let mut mask = 0;
-    if filter.contains(PromiscuousPacketType::Management) {
-        mask |= esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_MGMT;
-    }
-    if filter.contains(PromiscuousPacketType::Control) {
-        mask |= esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_CTRL;
-    }
-    if filter.contains(PromiscuousPacketType::Data) {
-        mask |= esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_DATA;
-    }
-    if filter.contains(PromiscuousPacketType::Misc) {
-        mask |= esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_MISC;
-    }
-    mask
+    // ESP8266 SDK packet-type masks are not reliable for every narrow subset.
+    // Data-only capture is stable with the hardware mask; other public filters
+    // use broad SDK capture and exact Rust-side filtering in the callback.
+    esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_MGMT
+        | esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_CTRL
+        | esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_DATA
+        | esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_MISC
 }
 
 pub(super) fn map_promiscuous_control_filter(filter: PromiscuousControlFilter) -> u32 {
@@ -274,6 +267,23 @@ mod tests {
         assert_eq!(
             map_promiscuous_filter(PromiscuousFilter::CONTROL),
             map_promiscuous_filter(PromiscuousFilter::all())
+        );
+    }
+
+    #[test]
+    fn promiscuous_narrow_filters_use_rust_side_filtering() {
+        let broad = map_promiscuous_filter(PromiscuousFilter::all());
+
+        assert_eq!(map_promiscuous_filter(PromiscuousFilter::MANAGEMENT), broad);
+        assert_eq!(map_promiscuous_filter(PromiscuousFilter::MISC), broad);
+        assert_eq!(map_promiscuous_filter(PromiscuousFilter::empty()), 0);
+    }
+
+    #[test]
+    fn promiscuous_data_only_uses_stable_sdk_data_mask() {
+        assert_eq!(
+            map_promiscuous_filter(PromiscuousFilter::DATA),
+            esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_DATA
         );
     }
 

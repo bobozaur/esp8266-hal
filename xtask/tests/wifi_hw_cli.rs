@@ -106,8 +106,8 @@ fn sta_connect_timeout_has_headroom_over_connect_wait() {
 #[test]
 fn matrix_retry_policy_allows_one_transient_failure() {
     assert!(
-        matrix_attempt_limit() >= 2,
-        "hardware matrix should retry once before reporting transient RF/setup failures"
+        matrix_attempt_limit() >= 3,
+        "hardware matrix should retry transient RF/setup failures before reporting them"
     );
 }
 

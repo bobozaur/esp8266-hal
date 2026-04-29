@@ -7,7 +7,6 @@ use super::{
     WpsConfig, ESP_NOW_MAX_PAYLOAD,
 };
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
 use core::task::{Poll, Waker};
 
 const PROMISCUOUS_SETTLE_SPINS: u8 = 2;
@@ -31,10 +30,20 @@ pub struct StaHandle<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
     pub(crate) backend: &'a mut B,
-    pub(crate) resources:
-        &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    pub(crate) resources: &'a WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     pub(crate) cursor: EventCursor,
 }
 
@@ -47,10 +56,20 @@ pub struct ApHandle<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
     pub(crate) backend: &'a mut B,
-    pub(crate) resources:
-        &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    pub(crate) resources: &'a WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     pub(crate) cursor: EventCursor,
 }
 
@@ -64,10 +83,20 @@ pub struct StaLink<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
-    pub(crate) backend: ManuallyDrop<B>,
-    pub(crate) resources:
-        &'d WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    pub(crate) backend: Option<B>,
+    pub(crate) resources: &'d WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     pub(crate) rx_attached: bool,
     pub(crate) _mode: PhantomData<M>,
 }
@@ -82,10 +111,20 @@ pub struct ApLink<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
-    pub(crate) backend: ManuallyDrop<B>,
-    pub(crate) resources:
-        &'d WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    pub(crate) backend: Option<B>,
+    pub(crate) resources: &'d WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     pub(crate) rx_attached: bool,
     pub(crate) _mode: PhantomData<M>,
 }
@@ -99,10 +138,20 @@ pub struct PromiscuousSession<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
     pub(crate) backend: &'a mut B,
-    pub(crate) resources:
-        &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    pub(crate) resources: &'a WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     active: bool,
     filter: PromiscuousFilter,
     control_filter: PromiscuousControlFilter,
@@ -118,10 +167,20 @@ pub struct EspNowSession<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
     pub(crate) backend: &'a mut B,
-    pub(crate) resources:
-        &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    pub(crate) resources: &'a WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     active: bool,
     _mode: PhantomData<M>,
 }
@@ -135,9 +194,20 @@ pub struct WpsSession<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
     backend: &'a mut B,
-    resources: &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    resources: &'a WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     cursor: EventCursor,
     active: bool,
 }
@@ -151,9 +221,20 @@ pub struct SmartConfigSession<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
     backend: &'a mut B,
-    resources: &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    resources: &'a WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     cursor: EventCursor,
     active: bool,
 }
@@ -167,7 +248,21 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > StaHandle<'a, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    StaHandle<
+        'a,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub fn connect(&mut self) -> Result<(), ConnectError> {
         self.backend.connect()
@@ -210,6 +305,11 @@ impl<
         }
     }
 
+    /// Starts station association and resolves when the SDK reports connected.
+    ///
+    /// Dropping this future does not cancel the SDK connection attempt or its
+    /// auto-retry state. Call [`disconnect`](Self::disconnect) when a timeout or
+    /// higher-level cancellation should stop the in-flight association.
     pub async fn connect_async(&mut self) -> Result<StaSession, ConnectError> {
         self.connect()?;
         let resources = self.resources;
@@ -254,7 +354,21 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > Drop for StaHandle<'_, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    > Drop
+    for StaHandle<
+        '_,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn drop(&mut self) {
         self.resources.release_event_cursor(&mut self.cursor);
@@ -270,7 +384,21 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > ApHandle<'a, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    ApHandle<
+        'a,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub fn connected_stations<const N: usize>(
         &mut self,
@@ -295,7 +423,21 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > Drop for ApHandle<'_, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    > Drop
+    for ApHandle<
+        '_,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn drop(&mut self) {
         self.resources.release_event_cursor(&mut self.cursor);
@@ -312,8 +454,31 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > StaLink<'d, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    StaLink<
+        'd,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
+    fn backend(&self) -> Result<&B, DriverError> {
+        self.backend.as_ref().ok_or(DriverError::BackendRejected)
+    }
+
+    fn backend_mut(&mut self) -> Result<&mut B, DriverError> {
+        self.backend.as_mut().ok_or(DriverError::BackendRejected)
+    }
+
     pub fn register_link_waker(&self, waker: &Waker) {
         self.resources.register_link_waker(waker);
     }
@@ -331,11 +496,11 @@ impl<
     }
 
     pub fn mac_address(&self) -> Result<[u8; 6], DriverError> {
-        self.backend.sta_mac_address()
+        self.backend()?.sta_mac_address()
     }
 
     pub fn refresh_sta_rx(&mut self) -> Result<(), DriverError> {
-        self.backend.refresh_sta_rx()
+        self.backend_mut()?.refresh_sta_rx()
     }
 
     pub fn has_rx_data(&self) -> bool {
@@ -357,27 +522,48 @@ impl<
     }
 
     pub fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-        self.backend.transmit(frame)
+        self.backend_mut()?.transmit(frame)
     }
 
     pub fn resources(
         &self,
-    ) -> &'d WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX> {
+    ) -> &'d WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    > {
         self.resources
     }
 
     pub fn into_driver(
         mut self,
-    ) -> WifiDriver<'d, Started<M>, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
-    {
-        self.backend.detach_sta_rx();
+    ) -> Result<
+        WifiDriver<
+            'd,
+            Started<M>,
+            B,
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
+        DriverError,
+    > {
+        self.backend_mut()?.detach_sta_rx();
         self.rx_attached = false;
         let resources = self.resources;
-        // SAFETY: `self` is immediately forgotten, so the backend is moved out
-        // exactly once and will not be dropped by `StaLink::drop`.
-        let backend = unsafe { ManuallyDrop::take(&mut self.backend) };
+        let backend = self.backend.take().ok_or(DriverError::BackendRejected)?;
         core::mem::forget(self);
-        WifiDriver::from_started_parts(resources, backend)
+        Ok(WifiDriver::from_started_parts(resources, backend))
     }
 }
 
@@ -390,17 +576,31 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > Drop for StaLink<'_, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    > Drop
+    for StaLink<
+        '_,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 where
     B: WifiBackend,
 {
     fn drop(&mut self) {
-        if self.rx_attached {
-            self.backend.detach_sta_rx();
+        if let Some(backend) = self.backend.as_mut() {
+            if self.rx_attached {
+                backend.detach_sta_rx();
+            }
         }
-        // SAFETY: `StaLink` owns the backend unless `into_driver` forgot `self`;
-        // this drop path runs only for the owned case.
-        unsafe { ManuallyDrop::drop(&mut self.backend) };
     }
 }
 
@@ -414,8 +614,31 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > ApLink<'d, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    ApLink<
+        'd,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
+    fn backend(&self) -> Result<&B, DriverError> {
+        self.backend.as_ref().ok_or(DriverError::BackendRejected)
+    }
+
+    fn backend_mut(&mut self) -> Result<&mut B, DriverError> {
+        self.backend.as_mut().ok_or(DriverError::BackendRejected)
+    }
+
     pub fn register_link_waker(&self, waker: &Waker) {
         self.resources.register_link_waker(waker);
     }
@@ -429,11 +652,11 @@ impl<
     }
 
     pub fn mac_address(&self) -> Result<[u8; 6], DriverError> {
-        self.backend.ap_mac_address()
+        self.backend()?.ap_mac_address()
     }
 
     pub fn refresh_ap_rx(&mut self) -> Result<(), DriverError> {
-        self.backend.refresh_ap_rx()
+        self.backend_mut()?.refresh_ap_rx()
     }
 
     pub fn has_rx_data(&self) -> bool {
@@ -455,27 +678,48 @@ impl<
     }
 
     pub fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
-        self.backend.transmit_ap(frame)
+        self.backend_mut()?.transmit_ap(frame)
     }
 
     pub fn resources(
         &self,
-    ) -> &'d WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX> {
+    ) -> &'d WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    > {
         self.resources
     }
 
     pub fn into_driver(
         mut self,
-    ) -> WifiDriver<'d, Started<M>, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
-    {
-        self.backend.detach_ap_rx();
+    ) -> Result<
+        WifiDriver<
+            'd,
+            Started<M>,
+            B,
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
+        DriverError,
+    > {
+        self.backend_mut()?.detach_ap_rx();
         self.rx_attached = false;
         let resources = self.resources;
-        // SAFETY: `self` is immediately forgotten, so the backend is moved out
-        // exactly once and will not be dropped by `ApLink::drop`.
-        let backend = unsafe { ManuallyDrop::take(&mut self.backend) };
+        let backend = self.backend.take().ok_or(DriverError::BackendRejected)?;
         core::mem::forget(self);
-        WifiDriver::from_started_parts(resources, backend)
+        Ok(WifiDriver::from_started_parts(resources, backend))
     }
 }
 
@@ -488,17 +732,31 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > Drop for ApLink<'_, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    > Drop
+    for ApLink<
+        '_,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 where
     B: WifiBackend,
 {
     fn drop(&mut self) {
-        if self.rx_attached {
-            self.backend.detach_ap_rx();
+        if let Some(backend) = self.backend.as_mut() {
+            if self.rx_attached {
+                backend.detach_ap_rx();
+            }
         }
-        // SAFETY: `ApLink` owns the backend unless `into_driver` forgot `self`;
-        // this drop path runs only for the owned case.
-        unsafe { ManuallyDrop::drop(&mut self.backend) };
     }
 }
 
@@ -511,8 +769,22 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > WifiDataLink
-    for StaLink<'_, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for StaLink<
+        '_,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn register_link_waker(&self, waker: &Waker) {
         StaLink::register_link_waker(self, waker);
@@ -564,8 +836,22 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > WifiDataLink
-    for ApLink<'_, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for ApLink<
+        '_,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn register_link_waker(&self, waker: &Waker) {
         ApLink::register_link_waker(self, waker);
@@ -617,11 +903,34 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > PromiscuousSession<'a, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    PromiscuousSession<
+        'a,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub(crate) fn new(
         backend: &'a mut B,
-        resources: &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+        resources: &'a WifiResources<
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
     ) -> Self {
         Self {
             backend,
@@ -715,8 +1024,21 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > Drop
-    for PromiscuousSession<'_, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for PromiscuousSession<
+        '_,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn drop(&mut self) {
         if self.active {
@@ -735,11 +1057,35 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > EspNowSession<'a, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    EspNowSession<
+        'a,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub(crate) fn new(
         backend: &'a mut B,
-        resources: &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+        resources: &'a WifiResources<
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
     ) -> Self {
         Self {
             backend,
@@ -867,7 +1213,22 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > EspNowSession<'a, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    EspNowSession<
+        'a,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub fn add_station_peer(&mut self, peer: EspNowStationPeerConfig) -> Result<bool, DriverError> {
         self.add_peer_inner(peer.inner())
@@ -891,7 +1252,22 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > EspNowSession<'a, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    EspNowSession<
+        'a,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub fn add_access_point_peer(
         &mut self,
@@ -917,8 +1293,22 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > Drop
-    for EspNowSession<'_, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for EspNowSession<
+        '_,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn drop(&mut self) {
         if self.active {
@@ -936,11 +1326,34 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > WpsSession<'a, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    WpsSession<
+        'a,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub(crate) fn new(
         backend: &'a mut B,
-        resources: &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+        resources: &'a WifiResources<
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
     ) -> Result<Self, DriverError> {
         let cursor = resources.claim_event_cursor()?;
         Ok(Self {
@@ -988,7 +1401,21 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > Drop for WpsSession<'_, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    > Drop
+    for WpsSession<
+        '_,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn drop(&mut self) {
         if self.active {
@@ -1007,11 +1434,34 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > SmartConfigSession<'a, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    SmartConfigSession<
+        'a,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub(crate) fn new(
         backend: &'a mut B,
-        resources: &'a WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+        resources: &'a WifiResources<
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
     ) -> Result<Self, DriverError> {
         let cursor = resources.claim_event_cursor()?;
         Ok(Self {
@@ -1112,8 +1562,21 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > Drop
-    for SmartConfigSession<'_, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for SmartConfigSession<
+        '_,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn drop(&mut self) {
         if self.active {

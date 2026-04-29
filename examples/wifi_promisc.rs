@@ -5,7 +5,7 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 
 use esp8266_hal::wifi::{
     Channel, Esp8266TargetBackend, InitConfig, PromiscuousControlFilter, PromiscuousFilter,
@@ -123,10 +123,6 @@ fn log_frame(frame: &PromiscuousRxFrame) {
     esp8266_hal::logger::write_newline();
 }
 
-fn now_us() -> u64 {
-    unsafe { esp8266_wifi_sys::esp_timer_get_time() as u64 }
-}
-
 #[esp8266_hal::main]
 async fn main(_spawner: Spawner) {
     log_line(b"wifi_promisc start");
@@ -237,12 +233,11 @@ async fn main(_spawner: Spawner) {
     }
     log_line(b"promisc started");
 
-    let deadline = now_us() + 10_000_000;
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut polls = 0_u32;
-    while now_us() < deadline {
+    while Instant::now() < deadline {
         if let Some(frame) = session.receive() {
             log_frame(&frame);
-            let _ = session.stop();
             if filter_name == b"management" {
                 log_line(b"promisc-management-ok");
             } else if filter_name == b"control" {
@@ -250,6 +245,7 @@ async fn main(_spawner: Spawner) {
             } else {
                 log_line(b"promisc-ok");
             }
+            let _ = session.stop();
             loop {
                 Timer::after(Duration::from_secs(60)).await;
             }

@@ -45,14 +45,27 @@ const NET_RX_PACKETS: usize = 1;
 const NET_TX_PACKETS: usize = 1;
 
 type MixedNetState = NetDriverState<NET_RX_PACKETS, NET_TX_PACKETS>;
-type MixedResources = WifiResources<8, 4, 2>;
+type MixedResources = WifiResources<8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type MixedBackend = Esp8266TargetBackend<'static, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
 type MixedDriver =
-    WifiDriver<'static, Started<MixedMode>, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
-type WifiNetRunner =
-    wifi_net::Runner<'static, 'static, MixedMode, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
+    WifiDriver<'static, Started<MixedMode>, MixedBackend, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type WifiNetRunner = wifi_net::Runner<
+    'static,
+    'static,
+    MixedMode,
+    MixedBackend,
+    8,
+    4,
+    2,
+    0,
+    0,
+    0,
+    2,
+    AP_RX_FRAME_BYTES,
+>;
 type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDevice<'static>>;
 type ApNetDevice =
-    ApWifiDevice<'static, MixedMode, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
+    ApWifiDevice<'static, MixedMode, MixedBackend, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
 
 static NET_STATE: StaticCell<MixedNetState> = StaticCell::new();
 static WIFI_RESOURCES: StaticCell<MixedResources> = StaticCell::new();
@@ -255,7 +268,15 @@ async fn serve_downstream_dhcp(driver: MixedDriver, timeout: Duration) -> (Mixed
         }
     }
 
-    let driver = device.into_link().into_driver();
+    let driver = match device.into_link().into_driver() {
+        Ok(driver) => driver,
+        Err(_error) => {
+            log_line(b"ap_sta err ap-driver");
+            loop {
+                Timer::after(Duration::from_secs(60)).await;
+            }
+        }
+    };
     (driver, got_ack)
 }
 

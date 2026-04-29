@@ -5,7 +5,7 @@ use esp8266_hal::wifi_core::{
 
 #[test]
 fn resources_report_all_declared_feature_capacities() {
-    let resources = WifiResources::<8, 4, 2, 3, 2, 5>::new();
+    let resources = WifiResources::<8, 4, 2, 3, 2, 5, 7, 1536>::new();
 
     assert_eq!(resources.event_capacity(), 8);
     assert_eq!(resources.rx_capacity(), 4);
@@ -13,6 +13,8 @@ fn resources_report_all_declared_feature_capacities() {
     assert_eq!(resources.esp_now_peer_capacity(), 3);
     assert_eq!(resources.esp_now_rx_capacity(), 2);
     assert_eq!(resources.promiscuous_rx_capacity(), 5);
+    assert_eq!(resources.ap_rx_copy_capacity(), 7);
+    assert_eq!(resources.ap_rx_copy_frame_bytes(), 1536);
 }
 
 #[test]
@@ -91,11 +93,23 @@ fn promiscuous_rx_queue_preserves_metadata_and_payload_prefix() {
 
 #[test]
 fn ap_rx_copy_rejects_non_empty_null_source() {
-    let resources = WifiResources::<4, 1, 1, 0, 0, 0>::new();
+    let resources = WifiResources::<4, 1, 1, 0, 0, 0, 1, 64>::new();
 
     assert_eq!(
         resources.enqueue_ap_rx_copy(core::ptr::null_mut(), 1),
         Err(DriverError::BackendRejected)
+    );
+    assert_eq!(resources.queued_ap_rx(), 0);
+}
+
+#[test]
+fn default_ap_rx_copy_storage_is_disabled() {
+    let resources = WifiResources::<4, 1, 1>::new();
+    let bytes = [1_u8; 8];
+
+    assert_eq!(
+        resources.enqueue_ap_rx_copy(bytes.as_ptr().cast_mut().cast(), bytes.len() as u16),
+        Err(DriverError::PacketOverflow)
     );
     assert_eq!(resources.queued_ap_rx(), 0);
 }

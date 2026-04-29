@@ -9,38 +9,6 @@ use super::packet::{release_owned_rx_slot, OwnedRxPool, RawRxRecord, RxPushError
 use super::waker::CallbackWaker;
 use super::{Deadline, DriverError, WifiEventKind};
 
-const fn parse_usize_ascii(value: &str) -> Option<usize> {
-    let bytes = value.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let mut acc = 0usize;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte < b'0' || byte > b'9' {
-            return None;
-        }
-        acc = acc * 10 + (byte - b'0') as usize;
-        index += 1;
-    }
-    Some(acc)
-}
-
-const fn ap_rx_frame_bytes() -> usize {
-    match option_env!("ESP8266_HAL_AP_RX_FRAME_BYTES") {
-        Some(value) => match parse_usize_ascii(value) {
-            Some(bytes) if bytes >= 256 => bytes,
-            _ => 1536,
-        },
-        None => 1536,
-    }
-}
-
-const AP_RX_FRAME_BYTES: usize = ap_rx_frame_bytes();
-const AP_RX_COPY_SLOTS: usize = 2;
-
 pub struct WifiResources<
     const EVENTS: usize,
     const RX: usize,
@@ -48,11 +16,13 @@ pub struct WifiResources<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
     pub(crate) events: Locked<EventBroker<EVENTS, SUBS>>,
     pub(crate) sta_rx: Locked<RxRing<RX>>,
     pub(crate) ap_rx: Locked<RxRing<RX>>,
-    pub(crate) ap_rx_owned: Locked<OwnedRxPool<AP_RX_COPY_SLOTS, AP_RX_FRAME_BYTES>>,
+    pub(crate) ap_rx_owned: Locked<OwnedRxPool<AP_RX_SLOTS, AP_RX_BYTES>>,
     esp_now_peers: Locked<EspNowPeerTable<ESP_NOW_PEERS>>,
     esp_now_rx: Locked<BoundedQueue<EspNowRxFrame, ESP_NOW_RX>>,
     esp_now_tx: Locked<BoundedQueue<EspNowTxStatus, ESP_NOW_RX>>,
@@ -69,7 +39,19 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    WifiResources<
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub const fn new() -> Self {
         Self {
@@ -109,6 +91,14 @@ impl<
 
     pub const fn promiscuous_rx_capacity(&self) -> usize {
         PROMISCUOUS_RX
+    }
+
+    pub const fn ap_rx_copy_capacity(&self) -> usize {
+        AP_RX_SLOTS
+    }
+
+    pub const fn ap_rx_copy_frame_bytes(&self) -> usize {
+        AP_RX_BYTES
     }
 
     pub fn queued_rx(&self) -> usize {
@@ -161,6 +151,10 @@ impl<
         self.events.with_ref(EventBroker::overflow_count)
     }
 
+    pub fn event_discards(&self) -> u32 {
+        self.events.with_ref(EventBroker::discard_count)
+    }
+
     pub fn enqueue_rx(&self, record: RawRxRecord) -> Result<(), DriverError> {
         match self.sta_rx.with(|rx| rx.try_push(record)) {
             Ok(()) => {
@@ -201,7 +195,7 @@ impl<
                 lease.buffer,
                 lease.len,
                 lease.slot,
-                Some(release_owned_rx_slot::<AP_RX_FRAME_BYTES>),
+                Some(release_owned_rx_slot::<AP_RX_BYTES>),
             )
         };
 

@@ -26,8 +26,22 @@ pub struct WifiStack<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
-    device: WifiDevice<'d, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+    device: WifiDevice<
+        'd,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
     iface: Interface,
     sockets: SocketSet<'a>,
     dhcp_handle: SocketHandle,
@@ -44,7 +58,23 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > WifiStack<'a, 'd, M, B, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    WifiStack<
+        'a,
+        'd,
+        M,
+        B,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub fn new(
         mut device: WifiDevice<
@@ -57,6 +87,8 @@ impl<
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
         >,
         socket_storage: &'a mut [SocketStorage<'a>],
     ) -> Result<Self, DriverError> {

@@ -817,6 +817,38 @@ static esp_err_t start_softap(const char *ssid, const char *pass, uint8_t channe
     return ESP_OK;
 }
 
+static bool softap_matches(const char *ssid, const char *pass, uint8_t channel) {
+    if (!s_wifi_started || ssid == NULL) {
+        return false;
+    }
+
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&mode) != ESP_OK || (mode != WIFI_MODE_AP && mode != WIFI_MODE_APSTA)) {
+        return false;
+    }
+
+    wifi_config_t config = {0};
+    if (esp_wifi_get_config(WIFI_IF_AP, &config) != ESP_OK || config.ap.channel != channel) {
+        return false;
+    }
+
+    size_t ssid_len = config.ap.ssid_len != 0 ? config.ap.ssid_len : strlen((const char *)config.ap.ssid);
+    if (ssid_len != strlen(ssid) || memcmp(config.ap.ssid, ssid, ssid_len) != 0) {
+        return false;
+    }
+
+    bool open = pass == NULL || strcmp(pass, "open") == 0 || pass[0] == '\0';
+    if (open) {
+        return config.ap.authmode == WIFI_AUTH_OPEN;
+    }
+
+    return config.ap.authmode != WIFI_AUTH_OPEN && strcmp((const char *)config.ap.password, pass) == 0;
+}
+
+static esp_err_t ensure_softap(const char *ssid, const char *pass, uint8_t channel) {
+    return softap_matches(ssid, pass, channel) ? ESP_OK : start_softap(ssid, pass, channel);
+}
+
 static esp_err_t wait_for_sta_ip(uint32_t timeout_ms) {
     EventBits_t bits = xEventGroupWaitBits(
         s_events,
@@ -1432,7 +1464,7 @@ static esp_err_t send_raw80211_frames(
         interface = WIFI_IF_STA;
         frame_len = build_raw80211_probe_request(frame, sizeof(frame), mac, channel);
     } else if (strcmp(kind, "beacon") == 0) {
-        esp_err_t err = start_softap("esp8266-hal-promisc", "open", channel);
+        esp_err_t err = ensure_softap("esp8266-hal-promisc", "open", channel);
         if (err != ESP_OK) {
             return err;
         }
@@ -1442,7 +1474,7 @@ static esp_err_t send_raw80211_frames(
         }
         frame_len = build_raw80211_beacon(frame, sizeof(frame), mac, channel);
     } else if (strcmp(kind, "data") == 0) {
-        esp_err_t err = start_softap("esp8266-hal-promisc", "open", channel);
+        esp_err_t err = ensure_softap("esp8266-hal-promisc", "open", channel);
         if (err != ESP_OK) {
             return err;
         }

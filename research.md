@@ -1272,3 +1272,36 @@
 - Matrix expectation for this follow-up:
   - automated green matrix should include the implemented, deterministic subset: STA connect/scan/DHCP/static/TCP server/client, AP start/client-list/DHCP/AP+STA, ESP-NOW, promiscuous capture/management/data, and the API-only control-filter check.
   - `wps`, `smartconfig`, and RF control-frame capture remain runnable diagnostics but are excluded from the green matrix by `ScenarioState::RigBlocked`.
+
+## 2026-04-29 WiFi Core Hardening and Matrix Requalification
+
+- Full redesign follow-up focused on making the current working Rust WiFi driver safer by default without adding compatibility shims:
+  - `ReleaseToken` now releases owned RX records in `Drop`, making forgotten AP/STA RX records safe and idempotent.
+  - `StaLink` and `ApLink` now own backends with `Option<B>` instead of `ManuallyDrop`; `Drop` detaches callbacks and `into_driver()` reports misuse instead of relying on unsafe extraction.
+  - AP copied-RX storage is explicit at the type level with `WifiResources<..., AP_RX_SLOTS, AP_RX_BYTES>` and defaults to zero bytes; AP examples opt in where they actually need copied downstream frames.
+  - Event publishing now counts discarded events when no cursor is claimed, so intentional no-subscriber operation is observable.
+  - Target RX debug counters are compiled only with `wifi-debug-trace` to keep default firmware smaller.
+  - `connect_async` documents that dropping the future does not cancel the SDK association/retry state; callers that implement timeout/cancel should call `disconnect()`.
+- Promiscuous-mode fixes from hardware evidence:
+  - ESP8266 SDK narrow management masks can drop valid management traffic before Rust sees it, while data-only masks remain stable; the target now uses SDK data-only for `DATA` and a broad SDK mask plus exact Rust-side filtering for the other public filters.
+  - Promiscuous callbacks reject invalid RF channels unless a configured promiscuous channel is available, which handles SDK frames that report channel `0` after `set_channel()`.
+  - `wifi_promisc` logs the success marker before optional stop cleanup and uses Embassy `Instant` for timeout paths.
+  - The ESP32 companion keeps an existing SoftAP for raw beacon/data TX instead of resetting WiFi for every burst.
+  - Management RF tests now use a stable companion SoftAP beacon source; raw probe-request injection from an unassociated ESP32 STA was not deterministic.
+- Harness robustness fixes:
+  - AP+STA downstream companion commands are capped by the remaining scenario budget instead of allowing repeated 30-40s joins to exceed the DUT-side timeout.
+  - `ap_station_list` treats the DUT's `ap-station-list-ok` as authoritative after draining UART, because the ESP32 STA can report a late join error even when the DUT observed and deauthed the station successfully.
+  - Hardware matrix retries were raised from 2 to 3 to absorb observed RF/setup transients while still surfacing persistent failures.
+- Focused hardware evidence from this pass:
+  - `ap_dhcp_companion`: `/tmp/esp8266-hal-wifi-hw/ap_dhcp_companion-1777449900` reached DUT `ap-dhcp-ok` and companion `OK STA_JOIN ip=192.168.4.2 ch=6`.
+  - `ap_sta_downstream_companion`: `/tmp/esp8266-hal-wifi-hw/ap_sta_downstream_companion-1777449944` reached DUT `ap-sta-downstream-ok` and companion `OK STA_JOIN_KEEP_AP ip=192.168.4.2 ch=6`.
+  - `promisc_capture` and `promisc_filters` passed after stable AP-beacon stimulus; `promisc_data_companion`: `/tmp/esp8266-hal-wifi-hw/promisc_data_companion-1777453416` reached `promisc frame type=data ch=6 len=32` and `promisc-ok`.
+  - `promisc_control_filter_api`: `/tmp/esp8266-hal-wifi-hw/promisc_control_filter_api-1777452307` reached `promisc ctrl filter ack ok`, `promisc ctrl filter none ok`, `promisc stop ok`, and `promisc-control-api-ok`.
+  - `ap_station_list`: focused rerun after harness hardening passed with `wifi-hw run ap_station_list`.
+- Final verification for this pass:
+  - Host core tests passed: `cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`.
+  - Xtask tests passed: `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`.
+  - Xtensa checks passed for the all-WiFi feature library plus `wifi_ap`, `wifi_ap_sta`, `tcp_server`, and `wifi_promisc` examples using `RUSTC_BOOTSTRAP=1 CARGO_INCREMENTAL=0 -Zbuild-std=core`.
+  - ESP32 companion was rebuilt and flashed successfully with `wifi-hw companion build` and `wifi-hw companion flash`.
+  - Full hardware matrix passed with three-attempt RF retry policy: `source .envrc && CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix` -> `wifi-hw matrix: pass`.
+  - Still rig-blocked, not claimed green in this rig: WPS registrar reliability, SmartConfig phone/STA-through-AP provisioning, and deterministic RF control-frame injection for `promisc_control_filters`.

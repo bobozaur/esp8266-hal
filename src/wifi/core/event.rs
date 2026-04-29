@@ -87,6 +87,7 @@ pub struct EventBroker<const EVENTS: usize, const SUBS: usize> {
     ap_link_state: LinkState,
     last_disconnect_reason: Option<u8>,
     overflow_count: u32,
+    discard_count: u32,
 }
 
 impl<const EVENTS: usize, const SUBS: usize> EventBroker<EVENTS, SUBS> {
@@ -101,6 +102,7 @@ impl<const EVENTS: usize, const SUBS: usize> EventBroker<EVENTS, SUBS> {
             ap_link_state: LinkState::Down,
             last_disconnect_reason: None,
             overflow_count: 0,
+            discard_count: 0,
         }
     }
 
@@ -151,6 +153,7 @@ impl<const EVENTS: usize, const SUBS: usize> EventBroker<EVENTS, SUBS> {
 
         if !self.has_claimed_cursors() {
             self.clear();
+            self.discard_count = self.discard_count.wrapping_add(1);
             return Ok(());
         }
 
@@ -216,6 +219,10 @@ impl<const EVENTS: usize, const SUBS: usize> EventBroker<EVENTS, SUBS> {
 
     pub const fn overflow_count(&self) -> u32 {
         self.overflow_count
+    }
+
+    pub const fn discard_count(&self) -> u32 {
+        self.discard_count
     }
 
     fn has_claimed_cursors(&self) -> bool {
@@ -393,6 +400,17 @@ mod tests {
 
         assert_eq!(broker.link_state(), LinkState::Up);
         assert_eq!(broker.overflow_count(), 1);
+    }
+
+    #[test]
+    fn no_subscriber_publish_updates_state_and_counts_discard() {
+        let mut broker = EventBroker::<2, 1>::new();
+
+        broker.publish(WifiEvent::StaConnected).unwrap();
+
+        assert_eq!(broker.link_state(), LinkState::Up);
+        assert_eq!(broker.discard_count(), 1);
+        assert_eq!(broker.overflow_count(), 0);
     }
 
     #[test]

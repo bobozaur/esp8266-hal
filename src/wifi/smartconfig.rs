@@ -1,7 +1,7 @@
 //! SmartConfig provisioning.
 //!
 //! SmartConfig allows a station to receive WiFi credentials from a phone app
-//! over the air without a pre-existing connection. Requires the `smartconfig`
+//! over the air without a pre-existing connection. Requires the `wifi-smartconfig`
 //! feature flag.
 //!
 //! # Supported protocols
@@ -19,6 +19,10 @@
 //! 4. Handle `SC_EVENT_GOT_SSID_PSWD` via the event system to retrieve
 //!    credentials, then connect.
 //! 5. Call [`stop`] to release resources.
+//!
+//! Hardware validation also needs a real SmartConfig sender, such as a phone app
+//! or injection-capable WiFi setup. The ESP32 companion diagnostic is not a
+//! reliability gate for credential provisioning.
 
 use esp8266_wifi_sys as sys;
 

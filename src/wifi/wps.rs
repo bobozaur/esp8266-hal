@@ -1,7 +1,7 @@
 //! WiFi Protected Setup (WPS) enrollment.
 //!
 //! WPS allows a station to join a network by pressing a button on the router
-//! (PBC mode) or entering a PIN. Requires the `wps` feature flag.
+//! (PBC mode) or entering a PIN. Requires the `wifi-wps` feature flag.
 //!
 //! # Requirements
 //!
@@ -16,6 +16,10 @@
 //! - `StaWpsFailed` — enrollment failed.
 //! - `StaWpsTimeout` — the enrollment window expired.
 //! - `StaWpsPin { pin }` — a PIN was generated (PIN mode only).
+//!
+//! Hardware validation also needs a known-good external WPS registrar. The
+//! ESP32 companion rig is kept as a diagnostic path, but is not a reliability
+//! gate for WPS enrollment.
 
 use esp8266_wifi_sys as sys;
 

@@ -139,7 +139,7 @@ fn ap_link_uses_ap_rx_queue_and_ap_tx_interface() {
     assert_eq!(link.receive(&mut frame), Some(42));
     link.transmit(&[1, 2, 3, 4]).unwrap();
 
-    let mut driver = link.into_driver();
+    let mut driver = link.into_driver().unwrap();
     let mut ap = driver.ap().unwrap();
     ap.deauth_all().unwrap();
 }

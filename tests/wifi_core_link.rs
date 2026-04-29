@@ -114,6 +114,17 @@ fn event_overflow_is_counted() {
 }
 
 #[test]
+fn no_subscriber_event_discard_is_counted() {
+    let resources = WifiResources::<1, 1, 1>::new();
+
+    resources.publish_event(WifiEvent::StaConnected).unwrap();
+
+    assert_eq!(resources.link_state(), LinkState::Up);
+    assert_eq!(resources.event_discards(), 1);
+    assert_eq!(resources.event_overflows(), 0);
+}
+
+#[test]
 fn zero_capacity_sta_rx_releases_rejected_frame_without_wake() {
     RX_WAKES.store(0, Ordering::SeqCst);
     RELEASES.store(0, Ordering::SeqCst);

@@ -14,9 +14,20 @@ pub(crate) struct CallbackRegistration<
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
 > {
     _marker: core::marker::PhantomData<
-        &'d WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+        &'d WifiResources<
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
     >,
 }
 
@@ -28,10 +39,32 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
-    > CallbackRegistration<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    CallbackRegistration<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     pub fn install(
-        resources: &'d WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>,
+        resources: &'d WifiResources<
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
     ) -> Result<Self, InitError> {
         ACTIVE_WIFI_RESOURCES
             .compare_exchange(
@@ -55,8 +88,20 @@ impl<
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
     > Drop
-    for CallbackRegistration<'d, EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+    for CallbackRegistration<
+        'd,
+        EVENTS,
+        RX,
+        SUBS,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
 {
     fn drop(&mut self) {
         ACTIVE_WIFI_RESOURCES.store(ptr::null_mut(), Ordering::Release);
@@ -79,7 +124,27 @@ pub(crate) unsafe fn active_resources<
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
->() -> *const WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX> {
+    const AP_RX_SLOTS: usize,
+    const AP_RX_BYTES: usize,
+>() -> *const WifiResources<
+    EVENTS,
+    RX,
+    SUBS,
+    ESP_NOW_PEERS,
+    ESP_NOW_RX,
+    PROMISCUOUS_RX,
+    AP_RX_SLOTS,
+    AP_RX_BYTES,
+> {
     ACTIVE_WIFI_RESOURCES.load(Ordering::Acquire)
-        as *const WifiResources<EVENTS, RX, SUBS, ESP_NOW_PEERS, ESP_NOW_RX, PROMISCUOUS_RX>
+        as *const WifiResources<
+            EVENTS,
+            RX,
+            SUBS,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >
 }
