@@ -28,13 +28,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p xtask --target x86_64-unknown-linux-gnu
 
-  test-vendored-smoltcp:
-    name: Vendored smoltcp tests
+  check-published-smoltcp:
+    name: Published smoltcp dependency
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --manifest-path vendor/smoltcp/Cargo.toml --target x86_64-unknown-linux-gnu --no-default-features --features alloc,medium-ethernet,proto-ipv4,socket-tcp,socket-udp,socket-dhcpv4
+      - run: |
+          test ! -d vendor/smoltcp
+          ! grep -R "smoltcp = .*path" Cargo.toml .cargo
+          ! grep -R "manifest-path vendor/[s]moltcp" .github
+          cargo tree -i smoltcp --no-default-features --features wifi-embassy-net,wifi-sta
 
   check-wifi-examples:
     name: Check WiFi example (${{ matrix.example }})

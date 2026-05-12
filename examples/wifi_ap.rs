@@ -9,10 +9,11 @@ use core::task::Poll;
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_time::{Duration, Instant, Timer};
+use esp8266_hal::wifi::smoltcp::ApWifiDevice;
 use esp8266_hal::wifi::{
-    AccessPointConfig, ApClientLimit, ApMode, ApWifiDevice, BeaconInterval, Channel, Credential,
-    DhcpMessageType, DhcpServer, DhcpServerConfig, DriverError, Esp8266TargetBackend, InitConfig,
-    Ipv4Addr, Ssid, Started, WifiDriver, WifiResources,
+    AccessPointConfig, ApClientLimit, ApMode, BeaconInterval, Channel, Credential, DhcpMessageType,
+    DhcpServer, DhcpServerConfig, DriverError, Esp8266TargetBackend, InitConfig, Ipv4Addr, Ssid,
+    Started, WifiDriver, WifiResources,
 };
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{
@@ -340,7 +341,7 @@ fn start_ap_network(driver: ApDriver) -> Result<&'static mut ApNetRuntime, &'sta
 async fn main(_spawner: Spawner) {
     log_line(b"wifi_ap start");
 
-    let resources = WIFI_RESOURCES.init(WifiResources::new());
+    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
     let backend = Esp8266TargetBackend::new(resources);
     log_stage(b"wifi-init");
     let driver =

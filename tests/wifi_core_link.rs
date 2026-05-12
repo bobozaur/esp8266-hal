@@ -9,6 +9,7 @@ use esp8266_hal::wifi_core::{
 static LINK_WAKES: AtomicUsize = AtomicUsize::new(0);
 static RX_WAKES: AtomicUsize = AtomicUsize::new(0);
 static RELEASES: AtomicUsize = AtomicUsize::new(0);
+static FAKE_RX_BYTES: [u8; 8] = [0xa5; 8];
 
 unsafe fn clone_counter(data: *const ()) -> RawWaker {
     RawWaker::new(data, &VTABLE)
@@ -73,6 +74,11 @@ fn publishing_link_events_updates_state_and_wakes_waiters() {
     assert_eq!(resources.link_state(), LinkState::Down);
     assert_eq!(resources.last_disconnect_reason(), Some(7));
     assert_eq!(LINK_WAKES.load(Ordering::SeqCst), 2);
+
+    resources
+        .publish_event(WifiEvent::StaDisconnected { reason: Some(255) })
+        .unwrap();
+    assert_eq!(resources.last_disconnect_reason(), Some(255));
 }
 
 #[test]
@@ -97,6 +103,8 @@ fn rx_enqueue_wakes_waiters_and_overflow_releases_immediately() {
 
     let mut frame = [0; 32];
     assert_eq!(resources.dequeue_rx().unwrap().copy_into(&mut frame), 32);
+    assert_eq!(resources.queued_rx(), 0);
+    assert_eq!(resources.rx_drops(), 1);
     assert_eq!(RELEASES.load(Ordering::SeqCst), 2);
 }
 
@@ -179,10 +187,16 @@ impl WifiDataLink for FakeDataLink {
         0
     }
 
-    fn receive(&mut self, dst: &mut [u8]) -> Option<usize> {
+    fn receive_raw(&mut self) -> Option<RawRxRecord> {
         let len = self.rx_len.take()?;
-        dst[..len].fill(0xa5);
-        Some(len)
+        Some(unsafe {
+            RawRxRecord::from_raw(
+                FAKE_RX_BYTES.as_ptr().cast_mut().cast(),
+                len as u16,
+                core::ptr::null_mut(),
+                None,
+            )
+        })
     }
 
     fn transmit(&mut self, _frame: &[u8]) -> Result<(), DriverError> {

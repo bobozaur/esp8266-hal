@@ -8,11 +8,11 @@ use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
 
 use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverState};
+use esp8266_hal::wifi::smoltcp::ApWifiDevice;
 use esp8266_hal::wifi::{
-    AccessPointConfig, ApClientLimit, ApWifiDevice, BeaconInterval, Channel, ClientConfig,
-    Credential, DhcpMessageType, DhcpServer, DhcpServerConfig, DriverError, Esp8266TargetBackend,
-    InitConfig, Ipv4Addr, MixedConfig, MixedMode, Passphrase, Ssid, Started, WifiDriver,
-    WifiResources,
+    AccessPointConfig, ApClientLimit, BeaconInterval, Channel, ClientConfig, Credential,
+    DhcpMessageType, DhcpServer, DhcpServerConfig, DriverError, Esp8266TargetBackend, InitConfig,
+    Ipv4Addr, MixedConfig, MixedMode, Passphrase, Ssid, Started, WifiDriver, WifiResources,
 };
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{
@@ -103,7 +103,7 @@ fn wait_for_downstream_client_enabled() -> bool {
 }
 
 fn init_wifi() -> MixedDriver {
-    let resources = WIFI_RESOURCES.init(WifiResources::new());
+    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
     let backend = Esp8266TargetBackend::new(resources);
     let driver = WifiDriver::with_backend(resources, backend)
         .initialize(InitConfig::new(14, 4, 4).expect("init config"))

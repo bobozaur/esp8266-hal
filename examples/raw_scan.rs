@@ -22,7 +22,7 @@ fn log_line(message: &[u8]) {
 fn main() -> ! {
     log_line(b"wifi_core_scan start");
 
-    let resources = RESOURCES.init(WifiResources::new());
+    let resources = RESOURCES.init_with(WifiResources::new);
     let backend = Esp8266TargetBackend::new(resources);
     let driver =
         match WifiDriver::with_backend(resources, backend).initialize(InitConfig::default()) {

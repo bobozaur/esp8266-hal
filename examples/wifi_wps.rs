@@ -42,7 +42,7 @@ const fn should_retry_wps_disconnect(reason: Option<u8>) -> bool {
 async fn main(_spawner: Spawner) {
     log_line(b"wifi_wps start");
 
-    let resources = WIFI_RESOURCES.init(WifiResources::new());
+    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
     let backend = Esp8266TargetBackend::new(resources);
     let init_config = InitConfig::new(14, 4, 4).expect("init config");
     let driver = WifiDriver::with_backend(resources, backend)

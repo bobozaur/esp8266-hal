@@ -81,7 +81,7 @@ fn encrypted_peer_enabled() -> bool {
 async fn main(_spawner: Spawner) {
     log_line(b"wifi_esp_now_rx start");
 
-    let resources = WIFI_RESOURCES.init(WifiResources::new());
+    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
     let backend = Esp8266TargetBackend::new(resources);
     let driver = WifiDriver::with_backend(resources, backend)
         .initialize(InitConfig::new(14, 4, 4).expect("init config"))

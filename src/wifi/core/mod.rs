@@ -12,6 +12,8 @@ mod feature;
 mod interface;
 mod link;
 mod locked;
+#[cfg(any(feature = "wifi", test))]
+mod neighbor;
 mod packet;
 mod resources;
 mod session;
@@ -74,3 +76,7 @@ pub use target::{deliver_data_debug_snapshot, sta_rx_callback_debug_snapshot, tx
 
 #[cfg(all(feature = "wifi-embassy-net", feature = "wifi-debug-trace"))]
 pub(crate) use diag::RunnerDebug;
+#[cfg(feature = "wifi")]
+pub(crate) use neighbor::{
+    EthernetNeighborHint, EthernetNeighborHints, ETHERNET_ARP_IPV4_FRAME_LEN,
+};

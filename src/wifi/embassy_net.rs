@@ -8,7 +8,8 @@ use embassy_net_driver_channel as ch;
 use embassy_time::{Duration, Timer};
 
 use crate::wifi_core::{
-    ApLink, DriverError, HasAp, HasSta, LinkState, StaLink, WifiBackend, WifiDataLink,
+    ApLink, DriverError, EthernetNeighborHints, HasAp, HasSta, LinkState, StaLink, WifiBackend,
+    WifiDataLink,
 };
 #[cfg(feature = "wifi-debug-trace")]
 use crate::wifi_core::{RunnerDebug, RunnerDebugSnapshot};
@@ -315,6 +316,7 @@ where
             tx_runner,
             link,
             last_link: LinkState::Down,
+            neighbor_hints: EthernetNeighborHints::new(Some(mac)),
         },
         net_device,
     ))
@@ -452,6 +454,7 @@ pub struct LinkRunner<'s, L, const MTU: usize = DEFAULT_MTU> {
     tx_runner: ch::TxRunner<'s, MTU>,
     link: L,
     last_link: LinkState,
+    neighbor_hints: EthernetNeighborHints,
 }
 
 struct RxPollResult {
@@ -521,7 +524,7 @@ where
         let mut made_progress = false;
 
         loop {
-            if !self.link.has_rx_data() {
+            if !self.neighbor_hints.has_pending() && !self.link.has_rx_data() {
                 break;
             }
 
@@ -529,7 +532,7 @@ where
                 break;
             };
 
-            if let Some(len) = self.link.receive(buf) {
+            if let Some(len) = self.neighbor_hints.receive_into(&mut self.link, buf) {
                 made_progress = true;
                 #[cfg(feature = "wifi-debug-trace")]
                 RUNNER_DEBUG.note_rx_frame();
@@ -541,7 +544,7 @@ where
 
         RxPollResult {
             made_progress,
-            pending_rx: self.link.has_rx_data(),
+            pending_rx: self.neighbor_hints.has_pending() || self.link.has_rx_data(),
         }
     }
 
@@ -590,6 +593,7 @@ where
 
     async fn wait_for_work(&mut self, pending_rx: bool) {
         let link = &mut self.link;
+        let neighbor_hints = &mut self.neighbor_hints;
         let rx_runner = &mut self.rx_runner;
         let tx_runner = &mut self.tx_runner;
 
@@ -597,7 +601,7 @@ where
             match embassy_futures::select::select(
                 async {
                     let buf = rx_runner.rx_buf().await;
-                    link.receive(buf)
+                    neighbor_hints.receive_into(link, buf)
                 },
                 tx_runner.tx_buf(),
             )

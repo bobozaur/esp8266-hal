@@ -147,7 +147,7 @@ fn driver_error_name(error: esp8266_hal::wifi::DriverError) -> &'static [u8] {
 
 #[inline(never)]
 fn init_wifi() -> (WifiStaDriver, &'static WifiDriverResources) {
-    let resources = WIFI_RESOURCES.init(WifiResources::new());
+    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
     let backend = Esp8266TargetBackend::new(resources);
     let driver = WifiDriver::with_backend(resources, backend)
         .initialize(InitConfig::new(14, 4, 4).expect("init config"))

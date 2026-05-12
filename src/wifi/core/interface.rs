@@ -2,7 +2,7 @@ use super::{
     ApStationInfo, Channel, ClientConfig, ConnectError, Deadline, DisconnectError, DriverError,
     EspNowAccessPointPeerConfig, EspNowPeerConfig, EspNowRxFrame, EspNowStationPeerConfig,
     EspNowTxStatus, EventCursor, HasAp, HasSta, LinkState, PromiscuousControlFilter,
-    PromiscuousFilter, PromiscuousRxFrame, SmartConfigStartConfig, SmartConfigTimeout,
+    PromiscuousFilter, PromiscuousRxFrame, RawRxRecord, SmartConfigStartConfig, SmartConfigTimeout,
     SmartConfigType, Started, WifiBackend, WifiDataLink, WifiDriver, WifiEvent, WifiResources,
     WpsConfig, ESP_NOW_MAX_PAYLOAD,
 };
@@ -515,10 +515,12 @@ impl<
         self.resources.rx_drops()
     }
 
+    pub fn receive_raw(&mut self) -> Option<RawRxRecord> {
+        self.resources.dequeue_rx()
+    }
+
     pub fn receive(&mut self, dst: &mut [u8]) -> Option<usize> {
-        self.resources
-            .dequeue_rx()
-            .map(|record| record.copy_into(dst))
+        self.receive_raw().map(|record| record.copy_into(dst))
     }
 
     pub fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -671,10 +673,12 @@ impl<
         self.resources.ap_rx_drops()
     }
 
+    pub fn receive_raw(&mut self) -> Option<RawRxRecord> {
+        self.resources.dequeue_ap_rx()
+    }
+
     pub fn receive(&mut self, dst: &mut [u8]) -> Option<usize> {
-        self.resources
-            .dequeue_ap_rx()
-            .map(|record| record.copy_into(dst))
+        self.receive_raw().map(|record| record.copy_into(dst))
     }
 
     pub fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -818,8 +822,8 @@ impl<
         StaLink::rx_drops(self)
     }
 
-    fn receive(&mut self, dst: &mut [u8]) -> Option<usize> {
-        StaLink::receive(self, dst)
+    fn receive_raw(&mut self) -> Option<RawRxRecord> {
+        StaLink::receive_raw(self)
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -885,8 +889,8 @@ impl<
         ApLink::rx_drops(self)
     }
 
-    fn receive(&mut self, dst: &mut [u8]) -> Option<usize> {
-        ApLink::receive(self, dst)
+    fn receive_raw(&mut self) -> Option<RawRxRecord> {
+        ApLink::receive_raw(self)
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {

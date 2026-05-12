@@ -203,6 +203,3 @@ lto = "thin"
 # codegen-units > 1 remains necessary on this toolchain, and the resulting
 # .bss overhead is acceptable given the 80 KB DRAM budget.
 codegen-units = 8
-
-[patch.crates-io]
-smoltcp = { path = "vendor/smoltcp" }

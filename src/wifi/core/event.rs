@@ -78,6 +78,8 @@ pub struct EventCursor {
 }
 
 pub struct EventBroker<const EVENTS: usize, const SUBS: usize> {
+    // Hardware note: an `Option<WifiEvent>` ring rewrite deadlocked
+    // `esp_wifi_init_internal` on ESP8266 before any event was published.
     events: Vec<WifiEvent, EVENTS>,
     claimed: [bool; SUBS],
     positions: [u64; SUBS],

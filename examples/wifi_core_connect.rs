@@ -26,7 +26,7 @@ fn main() -> ! {
     esp8266_hal::logger::write_bytes(b"wifi_core_connect start");
     esp8266_hal::logger::write_newline();
 
-    let resources = RESOURCES.init(WifiResources::new());
+    let resources = RESOURCES.init_with(WifiResources::new);
     let backend = Esp8266TargetBackend::new(resources);
     let driver = WifiDriver::with_backend(resources, backend);
     let driver = driver.initialize(InitConfig::default()).expect("init");

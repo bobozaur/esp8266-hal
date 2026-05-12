@@ -137,6 +137,7 @@ fn ap_link_uses_ap_rx_queue_and_ap_tx_interface() {
 
     let mut frame = [0u8; 64];
     assert_eq!(link.receive(&mut frame), Some(42));
+    assert_eq!(link.queued_rx(), 0);
     link.transmit(&[1, 2, 3, 4]).unwrap();
 
     let mut driver = link.into_driver().unwrap();

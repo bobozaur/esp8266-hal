@@ -4,14 +4,16 @@
 //! typestate link (`StaLink` or `ApLink`) and exposes it as a
 //! [`smoltcp::phy::Device`] without introducing an extra channel layer.
 
-use core::marker::PhantomData;
 use core::task::Waker;
 
 use portable_atomic::{AtomicBool, Ordering};
 use smoltcp::phy::{self, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
 
-use crate::wifi_core::{ApLink, DriverError, StaLink, WifiDataLink};
+use crate::wifi_core::{
+    ApLink, DriverError, EthernetNeighborHint, EthernetNeighborHints, RawRxRecord, StaLink,
+    WifiDataLink, ETHERNET_ARP_IPV4_FRAME_LEN,
+};
 
 /// Maximum Ethernet frame size (MTU 1500 + 14-byte header).
 const MAX_FRAME_SIZE: usize = 1514;
@@ -22,6 +24,7 @@ const TX_RETRY_LIMIT: usize = 8;
 pub struct LinkDevice<L> {
     link: L,
     tx_backoff: AtomicBool,
+    neighbor_hints: EthernetNeighborHints,
 }
 
 /// A station-backed `smoltcp` device.
@@ -84,9 +87,11 @@ pub type ApWifiDevice<
 
 impl<L: WifiDataLink> LinkDevice<L> {
     pub fn new(link: L) -> Self {
+        let local_mac = link.mac_address().ok();
         Self {
             link,
             tx_backoff: AtomicBool::new(false),
+            neighbor_hints: EthernetNeighborHints::new(local_mac),
         }
     }
 
@@ -121,7 +126,7 @@ impl<L: WifiDataLink> LinkDevice<L> {
 
 impl<L: WifiDataLink> phy::Device for LinkDevice<L> {
     type RxToken<'a>
-        = WifiRxToken<'a, L>
+        = WifiRxToken
     where
         Self: 'a;
 
@@ -131,20 +136,20 @@ impl<L: WifiDataLink> phy::Device for LinkDevice<L> {
         Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if !self.link.has_rx_data() {
-            return None;
-        }
+        let frame = if let Some(hint) = self.neighbor_hints.take_pending() {
+            WifiRxFrame::NeighborHint(hint)
+        } else {
+            let record = self.link.receive_raw()?;
+            self.neighbor_hints.observe(record_frame(&record));
+            WifiRxFrame::Record(record)
+        };
 
-        let link = &mut self.link as *mut L;
+        let link = &mut self.link;
         Some((
-            WifiRxToken {
-                link,
-                _lifetime: PhantomData,
-            },
+            WifiRxToken { frame },
             WifiTxToken {
                 link,
                 tx_backoff: &self.tx_backoff,
-                _lifetime: PhantomData,
             },
         ))
     }
@@ -155,9 +160,8 @@ impl<L: WifiDataLink> phy::Device for LinkDevice<L> {
         }
 
         Some(WifiTxToken {
-            link: &mut self.link as *mut L,
+            link: &mut self.link,
             tx_backoff: &self.tx_backoff,
-            _lifetime: PhantomData,
         })
     }
 
@@ -171,29 +175,35 @@ impl<L: WifiDataLink> phy::Device for LinkDevice<L> {
 }
 
 /// Token for receiving a single frame.
-pub struct WifiRxToken<'a, L> {
-    link: *mut L,
-    _lifetime: PhantomData<&'a mut L>,
+pub struct WifiRxToken {
+    frame: WifiRxFrame,
 }
 
-impl<L: WifiDataLink> phy::RxToken for WifiRxToken<'_, L> {
+enum WifiRxFrame {
+    Record(RawRxRecord),
+    NeighborHint(EthernetNeighborHint),
+}
+
+impl phy::RxToken for WifiRxToken {
     fn consume<R, F>(self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
     {
-        let mut buf = [0u8; MAX_FRAME_SIZE];
-        let len = unsafe { (&mut *self.link).receive(&mut buf) }
-            .expect("RxToken created but RX queue empty");
-
-        f(&buf[..len])
+        match self.frame {
+            WifiRxFrame::Record(record) => f(record_frame(&record)),
+            WifiRxFrame::NeighborHint(hint) => {
+                let mut frame = [0u8; ETHERNET_ARP_IPV4_FRAME_LEN];
+                let len = hint.emit_arp_reply(&mut frame).unwrap_or(0);
+                f(&frame[..len])
+            }
+        }
     }
 }
 
 /// Token for transmitting a single frame.
 pub struct WifiTxToken<'a, L> {
-    link: *mut L,
+    link: &'a mut L,
     tx_backoff: &'a AtomicBool,
-    _lifetime: PhantomData<&'a mut L>,
 }
 
 impl<L: WifiDataLink> phy::TxToken for WifiTxToken<'_, L> {
@@ -205,7 +215,7 @@ impl<L: WifiDataLink> phy::TxToken for WifiTxToken<'_, L> {
         let frame = &mut buf[..len.min(MAX_FRAME_SIZE)];
         let result = f(frame);
 
-        match transmit_with_retry(unsafe { &mut *self.link }, frame) {
+        match transmit_with_retry(self.link, frame) {
             Ok(()) => {}
             Err(DriverError::WouldBlock) => {
                 self.tx_backoff.store(true, Ordering::Relaxed);
@@ -216,8 +226,6 @@ impl<L: WifiDataLink> phy::TxToken for WifiTxToken<'_, L> {
         result
     }
 }
-
-pub(crate) unsafe fn debug_reset_sta_rx_cb_trace() {}
 
 fn transmit_with_retry<L: WifiDataLink>(link: &mut L, frame: &[u8]) -> Result<(), DriverError> {
     let mut last = DriverError::WouldBlock;
@@ -234,6 +242,16 @@ fn transmit_with_retry<L: WifiDataLink>(link: &mut L, frame: &[u8]) -> Result<()
     }
 
     Err(last)
+}
+
+fn record_frame(record: &RawRxRecord) -> &[u8] {
+    debug_assert!(record.len as usize <= MAX_FRAME_SIZE);
+    let len = (record.len as usize).min(MAX_FRAME_SIZE);
+    if len == 0 || record.buffer.is_null() {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(record.buffer as *const u8, len) }
+    }
 }
 
 #[inline(always)]

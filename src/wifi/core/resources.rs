@@ -1,5 +1,7 @@
 use core::task::Waker;
 
+use portable_atomic::{AtomicU32, Ordering};
+
 use super::event::{EventBroker, EventCursor, LinkState, WifiEvent};
 use super::feature::{
     BoundedQueue, EspNowPeer, EspNowPeerTable, EspNowRxFrame, EspNowTxStatus, PromiscuousRxFrame,
@@ -8,6 +10,14 @@ use super::locked::Locked;
 use super::packet::{release_owned_rx_slot, OwnedRxPool, RawRxRecord, RxPushError, RxRing};
 use super::waker::CallbackWaker;
 use super::{Deadline, DriverError, WifiEventKind};
+
+const STA_LINK_UP: u32 = 1 << 0;
+const AP_LINK_UP: u32 = 1 << 1;
+const DISCONNECT_REASON_SHIFT: u32 = 16;
+const DISCONNECT_REASON_MASK: u32 = 0x1ff << DISCONNECT_REASON_SHIFT;
+const STA_RX_LEN_MASK: u32 = 0xffff;
+const AP_RX_LEN_SHIFT: u32 = 16;
+const AP_RX_LEN_MASK: u32 = 0xffff << AP_RX_LEN_SHIFT;
 
 pub struct WifiResources<
     const EVENTS: usize,
@@ -27,6 +37,10 @@ pub struct WifiResources<
     esp_now_rx: Locked<BoundedQueue<EspNowRxFrame, ESP_NOW_RX>>,
     esp_now_tx: Locked<BoundedQueue<EspNowTxStatus, ESP_NOW_RX>>,
     promiscuous_rx: Locked<BoundedQueue<PromiscuousRxFrame, PROMISCUOUS_RX>>,
+    // Mirrors are updated in the same critical section as the canonical
+    // EventBroker/RxRing state.
+    event_mirror: AtomicU32,
+    rx_len_mirror: AtomicU32,
     link_waker: CallbackWaker,
     sta_rx_waker: CallbackWaker,
     ap_rx_waker: CallbackWaker,
@@ -63,6 +77,8 @@ impl<
             esp_now_rx: Locked::new(BoundedQueue::new()),
             esp_now_tx: Locked::new(BoundedQueue::new()),
             promiscuous_rx: Locked::new(BoundedQueue::new()),
+            event_mirror: AtomicU32::new(0),
+            rx_len_mirror: AtomicU32::new(0),
             link_waker: CallbackWaker::new(),
             sta_rx_waker: CallbackWaker::new(),
             ap_rx_waker: CallbackWaker::new(),
@@ -102,7 +118,7 @@ impl<
     }
 
     pub fn queued_rx(&self) -> usize {
-        self.sta_rx.with_ref(RxRing::len)
+        decode_sta_rx_len(self.rx_len_mirror.load(Ordering::Relaxed))
     }
 
     pub fn rx_drops(&self) -> u32 {
@@ -110,7 +126,7 @@ impl<
     }
 
     pub fn queued_ap_rx(&self) -> usize {
-        self.ap_rx.with_ref(RxRing::len)
+        decode_ap_rx_len(self.rx_len_mirror.load(Ordering::Relaxed))
     }
 
     pub fn ap_rx_drops(&self) -> u32 {
@@ -126,7 +142,11 @@ impl<
     }
 
     pub fn publish_event(&self, event: WifiEvent) -> Result<(), DriverError> {
-        let result = self.events.with(|events| events.publish(event));
+        let result = self.events.with(|events| {
+            let result = events.publish(event);
+            self.update_event_mirrors(event);
+            result
+        });
         self.link_waker.wake();
         result
     }
@@ -136,15 +156,15 @@ impl<
     }
 
     pub fn link_state(&self) -> LinkState {
-        self.events.with_ref(EventBroker::link_state)
+        decode_sta_link_state(self.event_mirror.load(Ordering::Relaxed))
     }
 
     pub fn ap_link_state(&self) -> LinkState {
-        self.events.with_ref(EventBroker::ap_link_state)
+        decode_ap_link_state(self.event_mirror.load(Ordering::Relaxed))
     }
 
     pub fn last_disconnect_reason(&self) -> Option<u8> {
-        self.events.with_ref(EventBroker::last_disconnect_reason)
+        decode_disconnect_reason(self.event_mirror.load(Ordering::Relaxed))
     }
 
     pub fn event_overflows(&self) -> u32 {
@@ -156,7 +176,13 @@ impl<
     }
 
     pub fn enqueue_rx(&self, record: RawRxRecord) -> Result<(), DriverError> {
-        match self.sta_rx.with(|rx| rx.try_push(record)) {
+        let result = self.sta_rx.with(|rx| {
+            let result = rx.try_push(record);
+            self.update_sta_rx_mirror(rx.len());
+            result
+        });
+
+        match result {
             Ok(()) => {
                 self.sta_rx_waker.wake();
                 Ok(())
@@ -169,7 +195,13 @@ impl<
     }
 
     pub fn enqueue_ap_rx(&self, record: RawRxRecord) -> Result<(), DriverError> {
-        match self.ap_rx.with(|rx| rx.try_push(record)) {
+        let result = self.ap_rx.with(|rx| {
+            let result = rx.try_push(record);
+            self.update_ap_rx_mirror(rx.len());
+            result
+        });
+
+        match result {
             Ok(()) => {
                 self.ap_rx_waker.wake();
                 Ok(())
@@ -199,7 +231,13 @@ impl<
             )
         };
 
-        match self.ap_rx.with(|rx| rx.try_push(record)) {
+        let result = self.ap_rx.with(|rx| {
+            let result = rx.try_push(record);
+            self.update_ap_rx_mirror(rx.len());
+            result
+        });
+
+        match result {
             Ok(()) => {
                 self.ap_rx_waker.wake();
                 Ok(())
@@ -220,11 +258,19 @@ impl<
     }
 
     pub fn dequeue_rx(&self) -> Option<RawRxRecord> {
-        self.sta_rx.with(RxRing::pop)
+        self.sta_rx.with(|rx| {
+            let record = rx.pop();
+            self.update_sta_rx_mirror(rx.len());
+            record
+        })
     }
 
     pub fn dequeue_ap_rx(&self) -> Option<RawRxRecord> {
-        self.ap_rx.with(RxRing::pop)
+        self.ap_rx.with(|rx| {
+            let record = rx.pop();
+            self.update_ap_rx_mirror(rx.len());
+            record
+        })
     }
 
     pub fn register_esp_now_peer(&self, peer: EspNowPeer) -> Result<bool, DriverError> {
@@ -373,10 +419,92 @@ impl<
         })
         .await
     }
+
+    fn update_event_mirrors(&self, event: WifiEvent) {
+        let mut mirror = self.event_mirror.load(Ordering::Relaxed);
+        match event {
+            WifiEvent::StaConnected => {
+                mirror |= STA_LINK_UP;
+            }
+            WifiEvent::StaDisconnected { reason } => {
+                mirror &= !STA_LINK_UP;
+                mirror = encode_disconnect_reason(mirror, reason);
+            }
+            WifiEvent::StaStopped => {
+                mirror &= !STA_LINK_UP;
+            }
+            WifiEvent::ApStarted => {
+                mirror |= AP_LINK_UP;
+            }
+            WifiEvent::ApStopped => {
+                mirror &= !AP_LINK_UP;
+            }
+            _ => return,
+        }
+
+        self.event_mirror.store(mirror, Ordering::Relaxed);
+    }
+
+    fn update_sta_rx_mirror(&self, len: usize) {
+        debug_assert!(len <= STA_RX_LEN_MASK as usize);
+        let mut mirror = self.rx_len_mirror.load(Ordering::Relaxed);
+        mirror &= !STA_RX_LEN_MASK;
+        mirror |= (len as u32) & STA_RX_LEN_MASK;
+        self.rx_len_mirror.store(mirror, Ordering::Relaxed);
+    }
+
+    fn update_ap_rx_mirror(&self, len: usize) {
+        debug_assert!(len <= STA_RX_LEN_MASK as usize);
+        let mut mirror = self.rx_len_mirror.load(Ordering::Relaxed);
+        mirror &= !AP_RX_LEN_MASK;
+        mirror |= ((len as u32) << AP_RX_LEN_SHIFT) & AP_RX_LEN_MASK;
+        self.rx_len_mirror.store(mirror, Ordering::Relaxed);
+    }
 }
 
 fn release_rejected_rx(rejected: RxPushError) -> DriverError {
     let error = rejected.error();
     rejected.release();
     error
+}
+
+const fn decode_sta_link_state(mirror: u32) -> LinkState {
+    decode_link_bit(mirror & STA_LINK_UP)
+}
+
+const fn decode_ap_link_state(mirror: u32) -> LinkState {
+    decode_link_bit(mirror & AP_LINK_UP)
+}
+
+const fn decode_link_bit(bit: u32) -> LinkState {
+    if bit == 0 {
+        LinkState::Down
+    } else {
+        LinkState::Up
+    }
+}
+
+const fn encode_disconnect_reason(mirror: u32, reason: Option<u8>) -> u32 {
+    let encoded = match reason {
+        Some(reason) => reason as u32 + 1,
+        None => 0,
+    };
+    (mirror & !DISCONNECT_REASON_MASK) | (encoded << DISCONNECT_REASON_SHIFT)
+}
+
+const fn decode_disconnect_reason(mirror: u32) -> Option<u8> {
+    let reason = (mirror & DISCONNECT_REASON_MASK) >> DISCONNECT_REASON_SHIFT;
+    if reason == 0 {
+        None
+    } else {
+        Some((reason - 1) as u8)
+    }
+}
+
+const fn decode_sta_rx_len(mirror: u32) -> usize {
+    (mirror & STA_RX_LEN_MASK) as usize
+}
+
+const fn decode_ap_rx_len(mirror: u32) -> usize {
+    ((mirror & AP_RX_LEN_MASK) >> AP_RX_LEN_SHIFT) as usize
 }

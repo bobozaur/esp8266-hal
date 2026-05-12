@@ -84,10 +84,14 @@ pub(crate) mod sdk;
 #[cfg(feature = "wifi-embassy-net")]
 pub mod embassy_net;
 
+/// `smoltcp` adapter types over owned [`wifi_core`](crate::wifi_core) links.
+pub mod smoltcp {
+    pub use super::device::{ApWifiDevice, LinkDevice, WifiDevice};
+}
+
 pub use crate::wifi_core::*;
 pub(crate) use config::{ApConfig, StaConfig};
 pub(crate) use controller::WifiController;
-pub use device::{ApWifiDevice, LinkDevice, WifiDevice};
 pub(crate) use error::{EspError, WifiError};
 
 /// Initialize the FreeRTOS compat scheduler in background mode.

@@ -68,7 +68,7 @@ fn log_dhcp_timeout(stack: &embassy_net::Stack<'static>, resources: &'static Pro
 }
 
 fn init_wifi() -> (ProbeDriver, &'static ProbeResources) {
-    let resources = WIFI_RESOURCES.init(ProbeResources::new());
+    let resources = WIFI_RESOURCES.init_with(ProbeResources::new);
     let backend = Esp8266TargetBackend::new(resources);
     let driver = WifiDriver::with_backend(resources, backend)
         .initialize(InitConfig::new(14, 4, 4).expect("init config"))

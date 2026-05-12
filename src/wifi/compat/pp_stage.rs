@@ -840,7 +840,6 @@ pub unsafe extern "C" fn __wrap_sta_input(
         reset_pm_bcn_trace();
         core::ptr::write_volatile(&raw mut g_pp_stage_hits, 0);
         mark_stage_hit(1 << 18);
-        crate::wifi::device::debug_reset_sta_rx_cb_trace();
         set_stage(b's');
         let ret = __real_sta_input(param_1, param_2, param_3);
         mark_stage_hit(1 << 27);

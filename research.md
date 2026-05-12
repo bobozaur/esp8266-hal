@@ -64,16 +64,16 @@
   - Task 2 public-shape cleanup chose `esp8266_hal::wifi` as the target-facing typed facade while retaining `esp8266_hal::wifi_core` as the host-testable core:
     - `cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`
     - `source .envrc && cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features wifi-core`
-- Current best verified runtime state is the `wifi_core` + split-runner + targeted-neighbor-learn build validated in:
+- Historical best verified runtime state was the `wifi_core` + split-runner + vendored targeted-neighbor-learn build validated in:
   - `/tmp/tcp_server_step501`
 - Result:
   - `2/2` completed short-timeout `tcp_server` reset-to-echo runs in `step501`
 - Final validated build command:
   - `source .envrc && CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_OPT_LEVEL=s cargo build --release --example tcp_server --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-embassy-net,wifi-sta`
-- Final validated runtime properties:
+- Historical runtime properties:
   - uses the typestated `wifi_core` station + owned `StaLink` handoff
   - uses the split state/RX/TX `embassy-net-driver-channel` runner
-  - uses vendored `smoltcp` with targeted same-subnet inbound IPv4 neighbor learning
+  - used vendored `smoltcp` with targeted same-subnet inbound IPv4 neighbor learning
   - keeps the repo’s SDK-style station auto-connect flow
   - stays within the `10s` runtime capture budget
 - Last fully passing pre-`wifi_core` runtime state remains useful as a historical control:
@@ -186,9 +186,11 @@
   - DHCP belongs at `stack.wait_config_up().await`, not inside `connect_blocking()`.
 - The final robust result does not require:
   - vendored `embassy-net`
-- The final robust result does currently require:
+- The final robust no-fork result does not require:
   - vendored `smoltcp`
-  - targeted same-subnet inbound IPv4 neighbor learning
+- The current no-fork result keeps first-response robustness through:
+  - published crates.io `smoltcp`
+  - local-MAC-gated, checksum-validated, one-shot Rust RX hints that feed smoltcp's normal ARP path
 
 ## Final Outcome Of The Latest Investigation
 
@@ -313,9 +315,9 @@
 - Do not reopen speculative `connect_blocking()` redesigns without new evidence.
 - Do not move DHCP wait into `connect_blocking()` on the embassy path.
 - Do not keep the old blanket `smoltcp` trust-IP/MAC variant.
-- Do keep the current targeted same-subnet inbound neighbor-learning patch validated in `/tmp/tcp_server_step501`.
+- Superseded on 2026-05-12: do not keep a vendored `smoltcp` neighbor-learning patch; use crates.io `smoltcp` plus the local-MAC-gated Rust RX hint shim until an upstream change exists.
 - Do not rely on intrusive sampler tasks for final runtime validation.
-- Do not use synthetic ARP-trust shims as permanent behavior.
+- Do not use blanket synthetic ARP-trust shims; the current no-fork compromise is a local-MAC-gated, checksum-validated, one-shot RX hint documented for future removal if smoltcp accepts the upstream patch in `contributions.md`.
 - Do not hard-code private SDK RAM addresses into shipping logic.
 - Do not use generic ISR queue masking as a production fix.
 
@@ -869,10 +871,10 @@
   - `sta_connect` and `ap_sta` UART watch budgets now exceed their in-example connect/DHCP waits.
   - `ap_sta` now waits until `Stack::config_v4()` is actually populated instead of treating the first `wait_config_up()` wake as final IPv4 DHCP success.
   - `xtask wifi-hw matrix` retries each implemented scenario once after a short backoff, which avoids declaring a transient RF/setup hiccup as a driver regression without a second cold run.
-- Added CI coverage:
+- Added CI coverage at the time:
   - host `wifi-core` tests;
   - `xtask` tests;
-  - vendored `smoltcp` regression tests with the feature set used by the WiFi path;
+  - historical vendored `smoltcp` regression tests with the feature set used by the WiFi path; these are superseded by the 2026-05-12 no-fork change and the local RX-hint tests;
   - Xtensa compile checks for the maintained typestate WiFi examples (`wifi_core_connect`, `raw_scan`, DHCP/static/TCP, AP/AP+STA, WPS, SmartConfig, ESP-NOW, and promiscuous).
   - CI sets `CARGO_INCREMENTAL=0` because the Xtensa toolchain produced an incremental dep-graph ICE while checking repeated WiFi examples; the same failing example passed with incremental disabled.
 - Final verification note:
@@ -1305,3 +1307,57 @@
   - ESP32 companion was rebuilt and flashed successfully with `wifi-hw companion build` and `wifi-hw companion flash`.
   - Full hardware matrix passed with three-attempt RF retry policy: `source .envrc && CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix` -> `wifi-hw matrix: pass`.
   - Still rig-blocked, not claimed green in this rig: WPS registrar reliability, SmartConfig phone/STA-through-AP provisioning, and deterministic RF control-frame injection for `promisc_control_filters`.
+
+## 2026-05-12 Rust-Side RX and Hot-Path Refactor
+
+- Refactor scope:
+  - `WifiDataLink` now exposes `receive_raw()` so smoltcp can consume a queued `RawRxRecord` without re-entering the link or copying into an intermediate RX stack buffer.
+  - `WifiRxToken` owns the `RawRxRecord`, borrows the SDK buffer only for the synchronous `RxToken::consume()` callback, and releases the SDK buffer when the record drops.
+  - `WifiTxToken` now holds a normal `&mut L` instead of a raw pointer plus phantom lifetime.
+  - `WifiResources` keeps zero-initialized `AtomicU32` mirrors for STA/AP link state, disconnect reason, and STA/AP RX queue lengths; canonical `EventBroker`/`RxRing` state remains authoritative, and mirrors are updated in the same critical sections as canonical mutation.
+  - WiFi examples now initialize large `WifiResources` statics with `StaticCell::init_with(WifiResources::new)` to avoid stack construction of the full resource object.
+  - smoltcp adapters moved under `wifi::smoltcp::{LinkDevice, WifiDevice, ApWifiDevice}` to keep the top-level WiFi API centered on the driver/core API.
+- Hardware-sensitive event queue note:
+  - An attempted `EventBroker` rewrite from `heapless::Vec` to an `[Option<WifiEvent>; N]` ring passed host tests but repeatedly stalled inside `esp_wifi_init_internal` before any Rust event was published.
+  - One-file hardware isolation showed `event.rs` alone caused the `tcp_server` init stall; restoring the original `heapless::Vec` event queue made `tcp_server` pass again, so the ring rewrite was dropped and documented in `event.rs`.
+- Validation:
+  - `cargo fmt`, `git diff --check`, and targeted host WiFi-core tests passed.
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q` passed.
+  - Xtensa feature/example matrix passed with `CARGO_INCREMENTAL=0 -Zbuild-std=core` for `wifi-core`, STA/AP/embassy-net/WPS/SmartConfig/promiscuous/ESP-NOW feature sets, and all modified WiFi examples.
+  - Full hardware matrix passed after RF retries with `source .envrc && CARGO_INCREMENTAL=0 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix` -> `wifi-hw matrix: pass`.
+  - Representative final artifacts:
+    - `tcp_server`: `/tmp/esp8266-hal-wifi-hw/tcp_server-1778600890`
+    - `tcp_client`: `/tmp/esp8266-hal-wifi-hw/tcp_client-1778601132`
+    - `ap_dhcp`: `/tmp/esp8266-hal-wifi-hw/ap_dhcp-1778601337`
+    - `promisc_filters`: `/tmp/esp8266-hal-wifi-hw/promisc_filters-1778601615`
+    - `promisc_control_filter_api`: `/tmp/esp8266-hal-wifi-hw/promisc_control_filter_api-1778601628`
+  - Still rig-blocked and not claimed green: WPS registrar reliability, SmartConfig phone/STA-through-AP provisioning, and deterministic RF control-frame injection for `promisc_control_filters`.
+
+## 2026-05-12 — Removed vendored smoltcp patch
+
+- Removed the workspace `[patch.crates-io]` override for `smoltcp`; the crate now resolves `smoltcp 0.12.0` from crates.io.
+- Deleted `vendor/smoltcp` from the workspace to avoid carrying a custom fork.
+- Replaced the fork's inbound IPv4 neighbor-cache behavior with a Rust-side shim:
+  - `wifi_core::EthernetNeighborHint` validates inbound Ethernet/IPv4 frames addressed to the adapter's local MAC with unicast source/destination, distinct source/destination MAC/IP pairs, no fragmentation, no loopback source, and a valid IPv4 header checksum.
+  - The smoltcp `LinkDevice` and the `embassy-net-driver-channel` runner queue a 42-byte synthetic ARP reply after such a frame.
+  - Upstream smoltcp/embassy-net then learn the neighbor through their normal ARP handling, so no private smoltcp internals are needed.
+- Added `contributions.md` with the exact upstreamable smoltcp patch and regression test that would remove the local ARP hint workaround if accepted upstream.
+
+### 2026-05-12 no-fork smoltcp validation
+
+- Local gates after replacing the fork:
+  - `cargo fmt --all`
+  - `git diff --check`
+  - `test ! -d vendor/smoltcp && ! grep -R "smoltcp = .*path" Cargo.toml .cargo && ! grep -R "manifest-path vendor/[s]moltcp" .github && cargo tree -i smoltcp --no-default-features --features wifi-embassy-net,wifi-sta`
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib -q` (`43` passed)
+  - `CARGO_INCREMENTAL=0 cargo test -p xtask --target x86_64-unknown-linux-gnu -q`
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features wifi-core -q`
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example tcp_server --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-embassy-net,wifi-sta -q`
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example tcp_client --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-embassy-net,wifi-sta -q`
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_ap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-ap -q`
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_ap_sta --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-ap,wifi-sta,wifi-embassy-net -q`
+- Hardware gates after replacing the fork:
+  - `tcp_server`: `/tmp/esp8266-hal-wifi-hw/tcp_server-1778608355`, with companion `OK TCP_CONNECT recv=70696e67`.
+  - `ap_dhcp`: `/tmp/esp8266-hal-wifi-hw/ap_dhcp-1778609040`, with DUT `ap-dhcp-offer`, `ap-dhcp-ack`, `ap-dhcp-ok`, and companion `OK STA_JOIN ip=192.168.4.2 ch=6`.
+- Full matrix was attempted after clearing `/tmp`; it reached the STA/TCP paths but hit the existing companion AP join RF flake on `ap_dhcp` (`reason=201`/`reason=2`). Focused `ap_dhcp` passed immediately afterward, so this is not treated as a no-fork smoltcp regression.
+- Claude Code final review agreed there are no remaining blockers after the CI vendored-smoltcp job was replaced by `check-published-smoltcp`.
