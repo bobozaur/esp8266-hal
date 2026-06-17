@@ -144,6 +144,10 @@ required-features = ["wifi-wps", "wifi-sta", "rt", "interrupt"]
 name = "wifi_smartconfig"
 required-features = ["wifi-smartconfig", "wifi-sta", "rt", "interrupt"]
 
+[[example]]
+name = "wifi_eap"
+required-features = ["wifi-enterprise", "wifi-sta", "rt", "interrupt"]
+
 [features]
 default = ["interrupt", "rt"]
 interrupt = ["paste"]
@@ -177,6 +181,7 @@ wifi-embassy-net = [
 ]
 wifi-wps = ["wifi"]
 wifi-smartconfig = ["wifi", "esp8266-wifi-sys/smartconfig"]
+wifi-enterprise = ["wifi"]
 wifi-promiscuous = ["wifi"]
 wifi-esp-now = ["wifi", "esp8266-wifi-sys/esp-now"]
 wifi-debug-log = []

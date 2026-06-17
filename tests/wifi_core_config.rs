@@ -1,6 +1,7 @@
 use esp8266_hal::wifi_core::{
     AccessPointConfig, ApClientLimit, BeaconInterval, Channel, ClientConfig, ConfigError,
-    Credential, InitConfig, Passphrase, SmartConfigTimeout, Ssid, StationPowerSave, WpsPin,
+    Credential, EnterpriseIdentity, EnterprisePassword, EnterpriseUsername, InitConfig, Passphrase,
+    SmartConfigTimeout, Ssid, StationPowerSave, Wpa2EnterpriseCredentials, WpsPin,
 };
 
 #[test]
@@ -39,6 +40,50 @@ fn wpa2_passphrase_accepts_exactly_64_bytes_and_binary_values() {
             .as_bytes(),
         &[0xff, b'1', b'2', b'3', b'4', b'5', b'6', b'7']
     );
+}
+
+#[test]
+fn enterprise_credentials_validate_documented_identity_limits() {
+    assert_eq!(
+        EnterpriseIdentity::new(""),
+        Err(ConfigError::EnterpriseIdentityEmpty)
+    );
+    assert_eq!(
+        EnterpriseIdentity::from_bytes(&[b'a'; EnterpriseIdentity::MAX_LEN + 1]),
+        Err(ConfigError::EnterpriseIdentityTooLong)
+    );
+    assert_eq!(
+        EnterpriseIdentity::from_bytes(&[b'a'; EnterpriseIdentity::MAX_LEN])
+            .unwrap()
+            .as_bytes()
+            .len(),
+        EnterpriseIdentity::MAX_LEN
+    );
+}
+
+#[test]
+fn enterprise_credentials_preserve_username_password_and_defaults() {
+    let credentials = Wpa2EnterpriseCredentials::new(
+        EnterpriseIdentity::new("anonymous").unwrap(),
+        EnterpriseUsername::new("esp8266-user").unwrap(),
+        EnterprisePassword::new("esp8266-password").unwrap(),
+    )
+    .with_disable_time_check(false);
+
+    assert_eq!(credentials.identity().as_bytes(), b"anonymous");
+    assert_eq!(credentials.username().as_bytes(), b"esp8266-user");
+    assert_eq!(credentials.password().as_bytes(), b"esp8266-password");
+    assert!(!credentials.disable_time_check());
+
+    let config = ClientConfig::new(
+        Ssid::try_from("enterprise-net").unwrap(),
+        Credential::Wpa2Enterprise(credentials),
+    );
+    assert!(matches!(
+        config.credential(),
+        Credential::Wpa2Enterprise(credentials)
+            if credentials.username().as_bytes() == b"esp8266-user"
+    ));
 }
 
 #[test]

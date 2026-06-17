@@ -36,6 +36,9 @@
 /* WPS (WiFi Protected Setup) */
 #include "esp_supplicant/esp_wps.h"
 
+/* WPA2 Enterprise station supplicant */
+#include "esp_supplicant/esp_wpa2.h"
+
 /* ESP-NOW peer-to-peer protocol */
 #include "esp_now.h"
 

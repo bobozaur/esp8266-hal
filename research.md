@@ -1361,3 +1361,402 @@
   - `ap_dhcp`: `/tmp/esp8266-hal-wifi-hw/ap_dhcp-1778609040`, with DUT `ap-dhcp-offer`, `ap-dhcp-ack`, `ap-dhcp-ok`, and companion `OK STA_JOIN ip=192.168.4.2 ch=6`.
 - Full matrix was attempted after clearing `/tmp`; it reached the STA/TCP paths but hit the existing companion AP join RF flake on `ap_dhcp` (`reason=201`/`reason=2`). Focused `ap_dhcp` passed immediately afterward, so this is not treated as a no-fork smoltcp regression.
 - Claude Code final review agreed there are no remaining blockers after the CI vendored-smoltcp job was replaced by `check-published-smoltcp`.
+
+## 2026-06-17 Repository Pivot Back To `esp8266-hal`
+
+- Active implementation target is now this repository only:
+  - `/home/bogdan/Coding/Personal/esp8266-hal`
+  - sibling `esp-hal`, `esp-wifi-sys`, and other esp-rs worktrees are reference/evidence sources, not implementation targets for this track.
+- User goal for this track:
+  - make this HAL as functional, correct, performant, idiomatic, and up-to-date as practical;
+  - continue validating WiFi, networking, ESP-NOW, WPS, SmartConfig, promiscuous/sniffer, AP, STA, and AP+STA behavior with hardware evidence;
+  - record commands, outcomes, code changes, rejected experiments, and remaining fixture gaps here.
+- Live safety checks before the pivot baseline:
+  - interrupted sibling `esp-hal` EAP flash/test left no `hw_suite.py`, `native_suite.py`, `esptool`, `cargo +esp`, serial, or `eap_sta_assoc` process running;
+  - `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no active `fuser` owners.
+- Current repository state at pivot:
+  - branch: `main`;
+  - untracked files present before new work: `serial-reference-wifi-core-connect-raw.log` and `serial-reference-wifi-core-connect-text.log`;
+  - latest in-file validation before this pivot was the 2026-05-12 no-fork smoltcp pass plus a full-matrix attempt with known companion AP join RF flake.
+- Immediate rebaseline plan:
+  - inspect `xtask wifi-hw` scenarios and current feature surface;
+  - run host/unit gates first;
+  - run `wifi-hw doctor` against the live devices and OpenWrt/companion fixture;
+  - rerun deterministic hardware scenarios before claiming current functionality;
+  - keep WPS, SmartConfig, WPA2 Enterprise/EAP, and deterministic control-frame capture separate until each has fixture-backed evidence.
+
+### 2026-06-17 Rebaseline Notes
+
+- Scenario inventory:
+  - `xtask wifi-hw list` currently marks STA connect/scan/DHCP/static/TCP, ESP-NOW, AP start/station-list/DHCP/AP+STA, promiscuous capture/data/filter/API cases as implemented;
+  - companion AP scenarios are still manual;
+  - `wps`, `smartconfig`, and RF `promisc_control_filters` remain rig-blocked with explicit reasons in the scenario list.
+- Host/tooling gates:
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q` passed;
+  - `cargo fmt --all -- --check` passed;
+  - `git diff --check` passed;
+  - `cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q` hit a stale incremental rustc ICE in `wifi_core::resources::WifiResources`;
+  - rerunning the same host WiFi-core gate with `CARGO_INCREMENTAL=0` passed all tests.
+- Live fixture checks:
+  - `wifi-hw doctor`: ok, default serial `/dev/ttyUSB0`, artifact root `/tmp/esp8266-hal-wifi-hw`;
+  - `wifi-hw companion doctor`: ok, DUT `/dev/ttyUSB0` ESP8266EX MAC `48:3f:da:68:e3:04`, companion `/dev/ttyACM0` ESP32-PICO-D4 MAC `4c:c3:82:82:32:80`;
+  - FreeRADIUS is listening on UDP `1812`/`1813`;
+  - `enp3s0` is up at `10.42.0.1/24`, `wlp4s0` remains up at `192.168.0.221/24`;
+  - OpenWrt router at `10.42.0.131` replied to ping.
+- Xtensa compile rebaseline:
+  - `CARGO_INCREMENTAL=0` compile gates passed for:
+    - `wifi-core` library;
+    - all-WiFi feature library;
+    - `wifi_core_connect`, `raw_scan`, `wifi_core_dhcp_probe`, `tcp_server`, `tcp_client`, `sta_static_ip`, `wifi_ap`, `wifi_ap_sta`, `wifi_promisc`, `wifi_esp_now_rx`, `wifi_esp_now_tx`, `wifi_wps`, and `wifi_smartconfig`.
+  - Warning cleanup candidates seen during the check:
+    - redundant `#[inline(never)]` next to `#[ram]` in WiFi compat code is a future-compatibility warning;
+    - several legacy/feature-specific unused imports, variables, helper functions, and private-interface warnings remain non-fatal.
+- Hardware matrix attempt before refreshing companion firmware:
+  - command: `source .envrc && CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: failed before DUT scenarios were meaningful because `/dev/ttyACM0` was running the sibling `esp-hal` SmartConfig sender firmware (`Project name: esp32_idf_esptouch_sender`, app version `esp-radio-v1.0.0-beta.0-14-gb41`);
+  - every implemented scenario failure reported `companion did not answer PING; flash the companion firmware first`;
+  - do not treat this as ESP8266 HAL driver evidence.
+- Companion firmware refresh:
+  - `wifi-hw companion build`: passed;
+  - `wifi-hw companion flash --serial-port /dev/ttyACM0`: passed;
+  - `wifi-hw companion command --serial-port /dev/ttyACM0 PING`: returned `READY companion esp32-pico-d4 mac=4c:c3:82:82:32:80` and `OK PONG`.
+- Hardware matrix attempt after companion refresh:
+  - started successfully with the refreshed companion;
+  - valid scenario evidence before the storage failure included:
+    - `sta_connect`: `/tmp/esp8266-hal-wifi-hw/sta_connect-1781687483` with `wifi core connected`;
+    - `sta_scan`: `/tmp/esp8266-hal-wifi-hw/sta_scan-1781687500` with `scan-ok` and AP list including `esp8266-hal-sta` plus the OpenWrt EAP SSID;
+    - `sta_dhcp`: `/tmp/esp8266-hal-wifi-hw/sta_dhcp-1781687516` reached DHCP up;
+    - `tcp_server`: `/tmp/esp8266-hal-wifi-hw/tcp_server-1781687552` reached `listen 1234` and companion `OK TCP_CONNECT recv=70696e67`;
+    - `tcp_client`: `/tmp/esp8266-hal-wifi-hw/tcp_client-1781687570` reached `tcp client connected`, `recv:32`, and `done`;
+    - `esp_now_unicast_companion`: `/tmp/esp8266-hal-wifi-hw/esp_now_unicast_companion-1781687589` reached `esp-now-rx-ok` with companion `OK ESPNOW_TX status=success`.
+  - later scenarios failed with `No space left on device` while creating run directories, so the full matrix was not completed;
+  - the next run uses `ESP8266_HAL_WIFI_HW_ROOT=target/wifi-hw-artifacts-20260617` to avoid relying on `/tmp` for the full artifact set.
+- Full hardware matrix after moving artifacts under `target/`:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617 CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - artifact root: `target/wifi-hw-artifacts-20260617` (`20` scenario directories, about `8.9 MB`).
+- Representative artifact evidence from the passing matrix:
+  - `sta_connect-1781687876`: UART `wifi core connected`;
+  - `sta_scan-1781687889`: UART `scan-ok`, including `esp8266-hal-sta` on channel `6` and `esp8266-router-eap` on channel `11`;
+  - `sta_dhcp-1781687906`: UART reached DHCP up;
+  - `sta_static_ip-1781687921`: UART `static ip up`;
+  - `tcp_server-1781687935`: UART `listen 1234`, companion `OK TCP_CONNECT recv=70696e67`;
+  - `tcp_client-1781687953`: UART `tcp client connected`, `recv:32`, and `done`;
+  - `ap_dhcp-1781688076`: UART `ap-dhcp-offer`, `ap-dhcp-ack`, and `ap-dhcp-ok`; companion eventually joined with `OK STA_JOIN ip=192.168.4.2 ch=6` after transient ESP32 join reasons `2` and `39`;
+  - `ap_sta-1781688117`: UART `ap-sta-downstream-ok`, companion `OK STA_JOIN_KEEP_AP ip=192.168.4.2 ch=6`;
+  - `esp_now_unicast_companion-1781687977`, `esp_now_encrypted_companion-1781687992`, and `esp_now_bad_key_companion-1781688007`: companion ESP-NOW command paths completed;
+  - `esp_now_broadcast-1781688158`: UART `esp-now-tx-ok`;
+  - `promisc_capture-1781688184`: UART captured a management frame and printed `promisc-ok`;
+  - `promisc_data_companion-1781688028` and `promisc_filters-1781688198`: included in the passing matrix under companion/AP stimulus;
+  - `promisc_control_filter_api-1781688213`: UART `promisc ctrl filter ack ok`, `promisc ctrl filter none ok`, `promisc stop ok`, and `promisc-control-api-ok`.
+- Still rig-blocked, not claimed green:
+  - `wps`: ESP-IDF AP registrar PBC/PIN attempts fail without sniffer evidence to identify the failing side;
+  - `smartconfig`: current ESP32 companion cannot emulate ESPTouch phone/STA-through-AP provisioning;
+  - `promisc_control_filters`: ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames.
+
+### 2026-06-17 Warning Hygiene And Smoke Revalidation
+
+- Scoped cleanup applied after the pivot rebaseline:
+  - gated the `flash::cache_enable` re-export on `feature = "rt"` so host-only `wifi-core` builds do not warn while the target reset path still uses it;
+  - gated the `xtensa_lx_rt::interrupt` attribute import on `not(feature = "wifi")`;
+  - removed an unused `c_void` import from the non-debug `pp_stage` stub;
+  - renamed debug-only init return variables in `wifi::compat::entry` to `_ret`;
+  - removed redundant `#[inline(never)]` attributes that sat next to `#[ram]` on compat context-switch helpers;
+  - removed the unreachable return after the divergent `compat_enter_first_task()` scheduler jump;
+  - removed a nested `unsafe` inside an already-unsafe WiFi task-create error path;
+  - discarded the unused return value from `register_chipv6_phy`;
+  - made internal FFI helper wrapper types `pub(crate)` to match the exported shim item visibility;
+  - wired the existing WPS enrollee M8 trace patch behind `ESP8266_HAL_WPS_ENROLLEE_TRACE`, with normal builds continuing to compile the unpatched source.
+- Post-cleanup static gates:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now -q`: passed;
+  - `CARGO_INCREMENTAL=0 cargo check --example tcp_server --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-embassy-net,wifi-sta -q`: passed.
+- Remaining compile warnings are now the pre-existing broad dead-code/non-snake-case warnings from legacy or feature-specific WiFi modules, not the future-compat/private-interface/nested-unsafe warnings cleaned above.
+- Live fixture recheck before flashing:
+  - no `fuser` owner on `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS still listening on UDP `1812`/`1813`;
+  - `enp3s0` up at `10.42.0.1/24`, `wlp4s0` up at `192.168.0.221/24`;
+  - OpenWrt router `10.42.0.131` replied to ping;
+  - `wifi-hw doctor`: ok;
+  - `wifi-hw companion doctor`: ok, DUT MAC `48:3f:da:68:e3:04`, companion MAC `4c:c3:82:82:32:80`.
+- Post-cleanup focused hardware smoke:
+  - artifact root: `target/wifi-hw-artifacts-20260617-cleanup`;
+  - `sta_connect-1781688807`: UART reached `wifi core initialized`, `wifi core started`, `wifi core associated`, and `wifi core connected`;
+  - `tcp_server-1781688850`: UART reached `wifi init ok`, `wifi started`, `wifi connected`, DHCP up as `192.168.4.2/24`, and `listen 1234`;
+  - `tcp_server-1781688850`: companion log returned `OK TCP_CONNECT recv=70696e67`.
+
+### 2026-06-17 WPA2 Enterprise Bring-Up In Active HAL
+
+- Session safety and fixture checks before EAP work:
+  - `git status --short`: pre-existing modified files from the prior cleanup remained, plus untracked `rustc-ice-2026-06-17T08_55_52-510242.txt`, `serial-reference-wifi-core-connect-raw.log`, and `serial-reference-wifi-core-connect-text.log`;
+  - serial/process safety checks found no owner for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS was still listening on UDP `1812`/`1813`;
+  - `enp3s0` was up at `10.42.0.1/24`, `wlp4s0` remained up at `192.168.0.221/24`;
+  - OpenWrt router `10.42.0.131` replied to ping;
+  - `wifi-hw doctor` and `wifi-hw companion doctor` were ok with DUT MAC `48:3f:da:68:e3:04` and companion MAC `4c:c3:82:82:32:80`.
+- Source assessment:
+  - active `esp8266-hal` built the WPA supplicant/EAP sources in `esp8266-wifi-sys/build.rs`, including `esp_supplicant/esp_wpa2.c`, but did not include `esp_supplicant/esp_wpa2.h` in bindgen or expose the station Enterprise setters;
+  - SDK `esp_wpa2.h` exposes `esp_wifi_sta_wpa2_ent_enable/disable`, identity/username/password setters, optional CA/client cert setters, and disable-time-check control;
+  - SDK source copies identity, username, and password into its own allocations, but stores CA/client certificate pointers directly, so Rust config owns identity/username/password and requires static certificate slices;
+  - native EAP baseline configured the station SSID first, then set Enterprise credentials, disabled certificate time check, enabled Enterprise, and started WiFi; it did not require a PSK passphrase in `wifi_sta_config_t`.
+- Implemented first-pass WPA2 Enterprise support:
+  - added `EnterpriseIdentity`, `EnterpriseUsername`, `EnterprisePassword`, `Wpa2EnterpriseCredentials`, and `Wpa2EnterpriseClientCertificate` to `wifi_core`;
+  - added `Credential::Wpa2Enterprise`;
+  - mapped station Enterprise config to an empty passphrase plus open auth threshold, leaving Enterprise profile selection to the SDK after `esp_wifi_sta_wpa2_ent_enable()`;
+  - added target backend Enterprise enable/disable wiring and rejected Enterprise credentials for AP-side config;
+  - included `esp_supplicant/esp_wpa2.h` in bindgen and allowlisted `esp_wifi_sta_wpa2_ent_.*`;
+  - added feature `wifi-enterprise`, example `wifi_eap`, and hardware scenario `eap_sta_assoc` targeting `esp8266-router-eap` on channel `11` with `esp8266-user` / `esp8266-password`.
+- EAP compile/debug plumbing:
+  - `source .envrc && ESP8266_HAL_EAP_TRACE=1 CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed;
+  - `cargo clean -p esp8266-wifi-sys --target xtensa-esp8266-none-elf` plus the same focused check: passed;
+  - added `cargo:rerun-if-changed=build.rs` to `esp8266-wifi-sys/build.rs` after finding that release hardware builds could keep stale patched C output when only the build script changed;
+  - added diagnostics-only `wifi::last_alloc_failure()` and `AllocFailureDebug`, and made `wifi_eap` print an error-detail line before the normal failure marker so the hardware harness captures allocator context;
+  - reduced the `wifi_eap` resource queues to `WifiResources<4, 1, 1>` for this narrow example.
+- EAP TLS/heap hardware evidence:
+  - earlier EAP trace decoded `0xffffd780` / `-0x2880` as `MBEDTLS_ERR_X509_ALLOC_FAILED`, from the SDK mbedTLS `x509.h`;
+  - after lowering mbedTLS content buffers with `CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=1`, `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=1024`, and `CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=1024`, the full `0x3b3` server TLS flight reached mbedTLS instead of failing during X.509 allocation;
+  - `target/wifi-hw-artifacts-20260617-eap-allocdiag/eap_sta_assoc-1781700321`: failed with `wifi eap connect err`, but showed heap after init improved to `20248` bytes and the X.509 alloc failure was gone; TLS reached state `6` and then produced no client output;
+  - patched the EAP trace build of `tls_mbedtls.c` to drive the client flight when mbedTLS is in `MBEDTLS_SSL_SERVER_HELLO_DONE` as well as `MBEDTLS_SSL_CLIENT_CERTIFICATE`;
+  - cleared stale release sys build output with `rm -rf target/xtensa-esp8266-none-elf/release/build/esp8266-wifi-sys-*` and verified generated `tls_mbedtls_eap_trace.c` contained the `SERVER_HELLO_DONE` condition.
+- Current EAP blocker:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-drivehello CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`;
+  - result: failed with `wifi eap connect err`;
+  - artifact: `target/wifi-hw-artifacts-20260617-eap-drivehello/eap_sta_assoc-1781700700/uart.log`;
+  - evidence: TLS progressed through states `3`, `4`, `5`, `6`, `7`, and `8`, then returned `0xffffbd70` at state `8`;
+  - error detail: `error=timeout disconnect=205 alloc_kind=C alloc_size=0x00000100 alloc_free=0x0000013c alloc_task=? alloc_count=26`;
+  - decode: `0xffffbd70` is `-0x4290`, consistent with `MBEDTLS_ERR_RSA_PUBLIC_FAILED + MBEDTLS_ERR_MPI_ALLOC_FAILED` in the RSA client-key-exchange path;
+  - fixture evidence from the active RADIUS log showed `cipher_list = "AES128-SHA:@SECLEVEL=0"` and ServerHello cipher suite `0x002f` (`TLS_RSA_WITH_AES_128_CBC_SHA`), so this fixture currently forces the memory-heavy RSA key-exchange path;
+  - EAP is therefore not green yet: the active HAL now reaches TLS client key exchange, but the forced-RSA path still runs out of suitable heap for MPI work.
+- Rejected/reverted EAP experiments:
+  - `target/wifi-hw-artifacts-20260617-eap-out512/eap_sta_assoc-1781701141`: reducing `CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN` to `512` still repeated `0xffffbd70` at TLS state `8`; reverted to `1024`;
+  - `target/wifi-hw-artifacts-20260617-eap-heaporder/eap_sta_assoc-1781701507`: trying high-heap-first allocation after boot-stack reclaim still failed at state `8` with `0xffffbd70`; the experiment was reverted because it affected global allocator behavior without fixing EAP;
+  - `target/wifi-hw-artifacts-20260617-eap-mpiwin1/eap_sta_assoc-1781701838`: defining `MBEDTLS_MPI_WINDOW_SIZE=1` still failed at state `8` with `0xffffbd70`; reverted;
+  - `rg -n "MBEDTLS_MPI_WINDOW_SIZE|SSL_OUT_CONTENT_LEN|SERVER_HELLO_DONE|rerun-if-changed=build.rs" esp8266-wifi-sys/build.rs` confirmed no MPI window define remains, output content length is back to `1024`, and the `SERVER_HELLO_DONE` trace patch plus build-script rerun trigger remain.
+- TCP smoke regression found during post-EAP validation:
+  - `sta_connect-1781702308`: passed with `wifi core initialized`, `wifi core started`, `wifi core associated`, and `wifi core connected`;
+  - `sta_dhcp-1781702624`: passed with `wifi connected`, `wait dhcp`, and `dhcp up Cidr`, proving the embassy-net station/DHCP path was not globally broken;
+  - `tcp_server-1781702359` and `tcp_server-1781702465`: failed before association with `tcp server wifi err` while the companion AP had started;
+  - adding ordered TCP failure diagnostics showed `tcp_server-1781702768` associated but had only `0x588` bytes free after WiFi init and timed out DHCP;
+  - switching `tcp_server` to `NetDriverStateWithMtu` recovered DRAM, but MTU `576` produced RX/TX activity without DHCP config, consistent with too-small channel buffers for the ESP32 DHCP offer;
+  - MTU `1024` and `768` left less runtime heap and stalled after `waiting dhcp` without reaching the timeout marker;
+  - MTU `640` preserved enough runtime heap while accepting the fixture DHCP frames.
+- TCP smoke final fix:
+  - `examples/tcp_server.rs` now uses `NetDriverStateWithMtu<640, 1, 1>` and `RunnerWithMtu` for the example-only bridge state; the HAL default MTU remains unchanged;
+  - the TCP accept loop now runs as a separate embassy task after DHCP, keeping the main task focused on WiFi/DHCP bring-up;
+  - failure paths now print detail before the hardware harness failure markers: connect failures include error kind, disconnect reason, free heap, and first allocation failure; DHCP timeout prints link/config/RX queue/drop state;
+  - fixed the `wifi-debug-trace`-only `rx_debug!` macro to discard counter return values, after a traced TCP build exposed debug-feature compile errors;
+  - `target/wifi-hw-artifacts-20260617-eap-regression/tcp_server-1781704232`: passed after removing success-path heap logs; UART reached `wifi connected`, `dhcp up Cidr { address: 192.168.4.2, prefix_len: 24 }`, and `listen 1234`; companion returned `OK TCP_CONNECT recv=70696e67`.
+- Final validation after EAP/TCP work:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q`: passed with the known broad warning set;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example tcp_server --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-embassy-net,wifi-sta,wifi-debug-trace -q`: passed, covering the debug-trace macro fix;
+  - live fixture recheck before final smoke: serial ports were free, `enp3s0` remained `10.42.0.1/24`, `wlp4s0` remained `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+  - `target/wifi-hw-artifacts-20260617-eap-final/sta_connect-1781704383`: passed with `wifi core initialized`, `wifi core started`, `wifi core associated`, and `wifi core connected`.
+
+### 2026-06-17 EAP Continuation
+
+- Session continuation safety/status checks:
+  - `git status --short`: dirty tree from the prior cleanup/EAP/TCP work remains; untracked `rustc-ice-2026-06-17T08_55_52-510242.txt`, `serial-reference-wifi-core-connect-raw.log`, and `serial-reference-wifi-core-connect-text.log` remain untouched;
+  - process/serial safety check found no active hardware runner or serial owner for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS is listening on UDP `1812`/`1813`;
+  - `enp3s0` is up at `10.42.0.1/24`, `wlp4s0` remains up at `192.168.0.221/24`;
+  - OpenWrt router `10.42.0.131` replied to ping.
+- RADIUS/AP fixture facts checked while narrowing the EAP failure:
+  - FreeRADIUS is still the detached fixture process using the `radius-fixture/raddb` tree from the earlier reference checkout, with active logs under `target/wifi-hw-artifacts-20260617-eap-radius/freeradius.log`;
+  - the active EAP profile forces TLS 1.0 and `AES128-SHA:@SECLEVEL=0`, which selects `TLS_RSA_WITH_AES_128_CBC_SHA` (`0x002f`);
+  - the server certificate/key are RSA 2048-bit and the CA certificate is RSA 1024-bit;
+  - therefore the current EAP test exercises the memory-heavy RSA client-key-exchange path.
+- Lean EAP example resource experiment:
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed after changing the example resources to `WifiResources<0, 0, 0>`;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-lean-resources CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed by timeout because the zero-subscriber resource set caused the example to halt before `connect_blocking`;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-lean-resources/eap_sta_assoc-1781705190` reached `wifi eap started` but not the later `wifi eap connecting` marker; size was `text 484834 data 39236 bss 15020`;
+  - the zero-subscriber variant was rejected because `driver.sta().expect("sta")` requires a subscriber/event cursor.
+- Corrected lean EAP resource experiment:
+  - `examples/wifi_eap.rs` now uses `WifiResources<0, 0, 1>` and logs `wifi eap connecting` before creating the STA handle;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-lean-subscriber CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed deterministically with `wifi eap connect err`;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-lean-subscriber/eap_sta_assoc-1781705498` reached `wifi eap connecting`, then failed at TLS state `8` with `rFFFFBD7000000008`;
+  - UART error detail was `error=timeout disconnect=23 alloc_kind=C alloc_size=0x00000108 alloc_free=0x0000026c alloc_task=? alloc_count=24`;
+  - size was `text 488178 data 39556 bss 15036`, saving about `496` bytes of BSS compared with the earlier full-queue EAP example while preserving the same RSA/MPI allocation failure.
+- Rejected TX fallback BSS experiment:
+  - changed `TX_FALLBACK_PAYLOAD_BYTES` from `256` to `0` as a local experiment to reclaim the static emergency TX fallback payload buffer;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-tx-fallback0 CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed with `wifi eap connect err`;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-tx-fallback0/eap_sta_assoc-1781705803` still repeated TLS state `8` / `0xffffbd70`;
+  - the ELF section sizes from `readelf -S --wide target/xtensa-esp8266-none-elf/release/examples/wifi_eap` were equivalent to `text 488178 data 39556 bss 14780`, proving the experiment reclaimed exactly `256` bytes of BSS;
+  - UART heap after init rose from the previous `20824` to `21080`, but the allocator failure changed to `alloc_kind=C alloc_size=0x00000210 alloc_free=0x0000025c`;
+  - conclusion: reclaiming this BSS alone is insufficient for the current 2048-bit RSA PEAP path, and disabling the emergency TX fallback is not worth keeping without a passing EAP result; `TX_FALLBACK_PAYLOAD_BYTES` was restored to `256`.
+- Repo-local RADIUS fixture experiments:
+  - prepared `target/eap-radius-1024` by copying the old fixture `raddb` into the active repo artifact tree and generating repo-local test certificates;
+  - first attempt to sign a 1024-bit server certificate with the copied reference CA failed because the copied `ca.key` and `ca.pem` did not match, so the 1024-bit fixture was regenerated with a fresh repo-local CA;
+  - FreeRADIUS/OpenSSL rejected the 1024-bit server key until a fixture-local OpenSSL config set `CipherString = DEFAULT:@SECLEVEL=0` and `MinProtocol = TLSv1`;
+  - stopped the old FreeRADIUS process on UDP `1812`/`1813` and started the 1024-bit fixture as PID `1499415` using the active repo log `target/eap-radius-1024/freeradius.log`;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-radius1024 CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed with `wifi eap connect err`;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-radius1024/eap_sta_assoc-1781706165` still failed at TLS state `8` with `0xffffbd70`;
+  - the 1024-bit RADIUS log showed a smaller PEAP server flight (`0x2ae` instead of the 2048-bit fixture's `0x3b3`), but the DUT still reported `alloc_kind=C alloc_size=0x0000010c alloc_free=0x00000244`;
+  - conclusion: reducing the server RSA modulus to 1024 bits and shortening the server certificate flight did not make the Rust EAP path green.
+- Extra-small EAP isolation fixture:
+  - prepared `target/eap-radius-512` with a fresh repo-local 512-bit CA/server certificate pair and the same low-security OpenSSL runtime config;
+  - started the 512-bit fixture as PID `1504462`;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-radius512 CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed by harness timeout;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-radius512/eap_sta_assoc-1781706338` only reached `wifi eap connecting`;
+  - RADIUS log showed only the initial EAP Identity and a server EAP-TLS request, with no PEAP NAK from the DUT; this was treated as an EAP method-negotiation stall, not an EAP success.
+- Extra-small PEAP-default isolation fixture:
+  - changed only the generated `target/eap-radius-512/raddb/mods-available/eap` outer `default_eap_type` from `tls` to `peap`, validated it with `freeradius -XC`, and restarted it as PID `1509526`;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-radius512-peap CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed by harness timeout;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-radius512-peap/eap_sta_assoc-1781706584` reached repeated post-handshake trace output but never printed `eap-ok` or `wifi eap connect err`;
+  - RADIUS log proved the TLS part of PEAP completed with `ClientKeyExchange`, client `Finished`, server `ChangeCipherSpec`, server `Finished`, `TLS-Session-Cipher-Suite = "AES128-SHA"`, and `TLS-Session-Version = "TLS 1.0"`;
+  - the DUT trace then showed `rFFFF8F0000000010`; `~/.espressif/ESP8266_RTOS_SDK/components/mbedtls/mbedtls/include/mbedtls/ssl.h` defines `-0x7100` as `MBEDTLS_ERR_SSL_BAD_INPUT_DATA`, so this test moved past RSA key exchange but failed later in PEAP/record processing;
+  - RADIUS also saw an inner EAP Identity problem (`EAP-Identity Unknown`) and then rejected the session, so the 512-bit fixture is useful evidence but is not a valid green Enterprise scenario.
+- Bench restoration:
+  - stopped the generated 512-bit RADIUS fixture and restarted the normal 2048-bit RADIUS fixture from the original `radius-fixture/raddb` as PID `1514514`;
+  - the restored process uses the low-security OpenSSL runtime policy needed for the old SHA-1/TLS 1.0 fixture and is listening on UDP `1812`/`1813`;
+  - no OpenWrt flash was required for these RADIUS variants because the router AP continued to point at laptop RADIUS host `10.42.0.1` with the same shared secret.
+- Validation after the EAP fixture experiments:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with the known broad warning set;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q`: passed with the known broad warning set;
+  - live post-restore fixture check found serial ports free, FreeRADIUS PID `1514514` listening on UDP `1812`/`1813`, `enp3s0` still `10.42.0.1/24`, `wlp4s0` still `192.168.0.221/24`, and router `10.42.0.131` reachable by ping;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-after-radius ESP8266_HAL_AP_RX_FRAME_BYTES=256 CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run sta_connect`: passed;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-after-radius/sta_connect-1781707059` reached `wifi core initialized`, `wifi core started`, `wifi core associated`, and `wifi core connected`.
+
+### 2026-06-17 EAP TLS Input Ownership and Cipher Fixture Follow-up
+
+- Session continuation safety/status checks:
+  - `git status --short`: dirty tree remains from the active ESP8266 HAL/Wi-Fi work; existing untracked `rustc-ice-2026-06-17T08_55_52-510242.txt`, `serial-reference-wifi-core-connect-raw.log`, and `serial-reference-wifi-core-connect-text.log` remain untouched;
+  - process check found no active `wifi-hw`, `esptool`, or serial runner; `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no `fuser` owners;
+  - FreeRADIUS was listening on UDP `1812`/`1813`;
+  - `enp3s0` remained `10.42.0.1/24`, `wlp4s0` remained `192.168.0.221/24`, and router `10.42.0.131` replied to ping.
+- Added trace-only instrumentation around `eap_peer_tls_reassemble_fragment()`:
+  - `source .envrc && cargo clean -p esp8266-wifi-sys --target xtensa-esp8266-none-elf && ESP8266_HAL_EAP_TRACE=1 CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with the known warning set;
+  - `source .envrc && ESP8266_HAL_EAP_TRACE=1 ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-normal-radius-trace CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed with `wifi eap connect err`;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-normal-radius-trace/eap_sta_assoc-1781709366` showed the two PEAP fragments reassembled successfully into `0x3b3` bytes before mbedTLS advanced through states `3`, `4`, `5`, `6`, `7` and failed at state `8` with `rFFFFBD7000000008`;
+  - UART error detail was `error=timeout disconnect=23 alloc_kind=C alloc_size=0x00000108 alloc_free=0x0000023c alloc_task=? alloc_count=22`;
+  - conclusion: the 2048-bit RSA failure is not caused by the WPA TLS reassembly allocation; it happens after the complete server flight reaches mbedTLS, in or just before the client key exchange path.
+- Repo-local ECDHE-RSA RADIUS fixture:
+  - prepared `target/eap-radius-ecdhe` by copying the reference `raddb` into the active repo artifact tree and pointing it at repo-local cert/key copies;
+  - changed the PEAP TLS cipher list to `ECDHE-RSA-AES128-SHA:AES128-SHA:@SECLEVEL=0` and set `ecdh_curve = "prime256v1"`;
+  - `env LD_LIBRARY_PATH=... OPENSSL_CONF=/home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-1024/openssl-lowsec.cnf freeradius -XC -D ... -d target/eap-radius-ecdhe/raddb`: passed;
+  - stopped the previous FreeRADIUS process and started the ECDHE-RSA fixture; it listened on UDP `1812`/`1813` as PID `1752433`;
+  - `source .envrc && cargo clean -p esp8266-wifi-sys --target xtensa-esp8266-none-elf && env -u ESP8266_HAL_EAP_TRACE ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-ecdhe-radius CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed with `wifi eap connect err`;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-ecdhe-radius/eap_sta_assoc-1781709618` reported `error=timeout disconnect=23 alloc_kind=C alloc_size=0x00000100 alloc_free=0x00000158 alloc_task=? alloc_count=26`;
+  - FreeRADIUS confirmed the ECDHE path by sending `ServerKeyExchange`, then received a TLS fatal `decrypt_error` from the peer.
+- Implemented an input-owner transfer patch for the SDK WPA/mbedTLS bridge:
+  - patched `eap_tls_common.c` so `data->tls_in` is detached before `tls_connection_handshake()` when that exact buffer is passed down to the TLS shim;
+  - patched `tls_mbedtls.c` so the external input cursor owns and frees that `wpabuf` as soon as mbedTLS has consumed it, avoiding a copy and shrinking peak live heap during handshake processing;
+  - `source .envrc && cargo clean -p esp8266-wifi-sys --target xtensa-esp8266-none-elf && env -u ESP8266_HAL_EAP_TRACE CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with the known warning set.
+- Retested the normal 2048-bit RSA PEAP fixture after the input-owner patch:
+  - stopped the ECDHE-RSA fixture and restarted the normal 2048-bit RSA fixture; it listened as PID `1814073`;
+  - `source .envrc && env -u ESP8266_HAL_EAP_TRACE ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-input-owner-rsa CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed with `wifi eap connect err`;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-input-owner-rsa/eap_sta_assoc-1781710036` reported `error=timeout disconnect=205 alloc_kind=C alloc_size=0x0000020c alloc_free=0x0000035c alloc_task=? alloc_count=26`;
+  - conclusion: freeing the reassembled input earlier improves the allocation context, but not enough for the default 2048-bit RSA PEAP path.
+- Repo-local ECDHE-ECDSA RADIUS fixture:
+  - prepared `target/eap-radius-ecdsa` with fresh P-256 CA/server certificates; the server certificate uses `ecdsa-with-SHA256` and `id-ecPublicKey` with a 256-bit key;
+  - changed the PEAP TLS cipher list to `ECDHE-ECDSA-AES128-SHA:@SECLEVEL=0` and set `ecdh_curve = "prime256v1"`;
+  - `freeradius -XC` validation passed for the generated ECDSA fixture;
+  - stopped the normal RSA fixture and started the ECDSA fixture; it is currently listening as PID `1819502` on UDP `1812`/`1813`;
+  - `source .envrc && env -u ESP8266_HAL_EAP_TRACE ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-ecdsa-radius CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: failed with `wifi eap connect err`;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-ecdsa-radius/eap_sta_assoc-1781710225` reported `error=timeout disconnect=23 alloc_kind=C alloc_size=0x00000020 alloc_free=0x00000068 alloc_task=? alloc_count=18`;
+  - FreeRADIUS confirmed the ECDSA/ECDHE path by sending `ServerKeyExchange`, then received a TLS fatal `decrypt_error` from the peer;
+  - conclusion: ECDSA/ECDHE avoids the RSA client-key-exchange allocation shape but still fails under even tighter ECP/handshake heap pressure.
+- Current next target:
+  - constrain the generated mbedTLS config for the ESP8266 target instead of adding more fixture churn: reduce RSA/MPI maximums to the 2048-bit fixture requirement and reduce ECP maximum/window settings to P-256-only behavior, then retest EAP on real hardware.
+
+### 2026-06-17 EAP ECDSA Validation and RSA2048 Workspace Experiments
+
+- Narrowed the Enterprise/RADIUS result after the P-256 mbedTLS tuning:
+  - the retained mbedTLS config uses asymmetric TLS buffers with `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=896`, `CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=512`, `MBEDTLS_MPI_MAX_SIZE=256`, P-256-only ECP, and small MPI/ECP windows;
+  - the SDK mbedTLS patch frees peer certificate raw DER after verification and tolerates rawless peer certificate session copies;
+  - `_realloc_r` now reads the Rust allocator's 8-byte allocation header rather than the old 4-byte assumption.
+- Confirmed the positive WPA2 Enterprise fixture path:
+  - started the repo-local ECDSA/P-256 FreeRADIUS fixture from `target/eap-radius-ecdsa/raddb` as PID `1909223`, logging to `target/wifi-hw-artifacts-20260617-eap-ecdsa-regression-no-pool/freeradius.log`;
+  - `source .envrc && env -u ESP8266_HAL_EAP_TRACE ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-eap-ecdsa-regression-no-pool CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: passed;
+  - artifact `target/wifi-hw-artifacts-20260617-eap-ecdsa-regression-no-pool/eap_sta_assoc-1781716806` reached `wifi eap associated` and `eap-ok`;
+  - UART heap markers were `heap before init=38308`, `heap after init=21152`, and `heap progress=19564`;
+  - FreeRADIUS sent `Access-Accept` for `esp8266-user` / `48-3F-DA-68-E3-04`, with `TLS-Session-Cipher-Suite = "ECDHE-ECDSA-AES128-SHA"`, `TLS-Session-Version = "TLS 1.0"`, and inner MS-CHAPv2 key derivation.
+- Rejected RSA2048 heap-reserve and static-pool experiments:
+  - heap-reserved JIT RSA workspaces around `mbedtls_pk_encrypt()` repeatedly moved the RSA failure forward but did not complete the 2048-bit RSA client-key-exchange; the largest run used seven reserved blocks and still failed another `0x20c` allocation at TLS state `8`;
+  - `target/wifi-hw-artifacts-20260617-eap-rsa2048-static-pool16/eap_sta_assoc-1781716289`: a 16-slot static workspace added about 8.5 KiB BSS, reduced `heap after init` to `12312`, and failed before the RSA hook with `MBEDTLS_ERR_SSL_ALLOC_FAILED`;
+  - `target/wifi-hw-artifacts-20260617-eap-rsa2048-static-pool8/eap_sta_assoc-1781716547`: an 8-slot static workspace restored TLS setup but still regressed earlier than the no-pool build, with `heap after init=16664`, no RSA hook attempts, and timeout after a `0x1f8` allocation failure during the server flight;
+  - the static workspace was removed because it regressed the EAP handshake before reaching RSA and would penalize all Enterprise builds.
+- Validation after removing the static workspace:
+  - `cargo fmt --all -- --check && git diff --check`: passed;
+  - `source .envrc && env -u ESP8266_HAL_EAP_TRACE CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with the known broad warning set;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo build --release --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed; `xtensa-lx106-elf-size -A target/xtensa-esp8266-none-elf/release/examples/wifi_eap` reported `.text=477080`, `.rodata=37292`, `.data=1924`, `.bss=15044`, `Total=538197`.
+- Current Enterprise status:
+  - WPA2 Enterprise PEAP/MSCHAPv2 is hardware-validated with the repo-local ECDSA/P-256 OpenWrt/RADIUS fixture;
+  - 2048-bit RSA PEAP remains not green: it fails under ESP8266 RAM/fragmentation pressure before or during client key exchange depending on workspace strategy, and no unvalidated RSA workaround is retained.
+
+### 2026-06-17 ESP-NOW AES IROM Fix and TCP Client Heap Regression
+
+- Session continuation safety/status checks:
+  - `git status --short`: dirty tree remained expected from active ESP8266 HAL/Wi-Fi work; existing untracked ICE/reference serial logs remained untouched;
+  - process safety check found only the benign systemd `--deserialize` match from the broad `serial` pattern; no active `wifi-hw`, `esptool`, or serial runner was present;
+  - `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no `fuser` owners;
+  - FreeRADIUS PID `1909223` was listening on UDP `1812`/`1813`;
+  - `enp3s0` remained `10.42.0.1/24`, `wlp4s0` remained `192.168.0.221/24`, and router `10.42.0.131` replied to ping.
+- ESP-NOW encrypted companion crash diagnosis:
+  - added detailed exception logging to `examples/wifi_esp_now_rx.rs` and `examples/wifi_esp_now_tx.rs`;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_esp_now_rx --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-sta,wifi-esp-now -q`: passed with the known warning set;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_esp_now_tx --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-sta,wifi-esp-now -q`: passed with the known warning set;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-espnow-exception CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run esp_now_encrypted_companion`: failed by DUT exception;
+  - artifact `target/wifi-hw-artifacts-20260617-espnow-exception/esp_now_encrypted_companion-1781718265` reported `exception cause=3 pc=0x40244a0c a0=0x402448d7 a1=0x3fff38e0 vaddr=0x4026365d`;
+  - `addr2line`/`nm`/`objdump` resolved the PC to `rijndaelKeySetupEnc()` from WPA supplicant AES setup and the faulting `vaddr` into the `Te0` table in flash-mapped IROM;
+  - conclusion: ESP-NOW encrypted peer add used the SDK WPA AES helper, whose `AES_SMALL_TABLES` path emitted byte loads from an IROM table; aligned 32-bit flash loads are tolerated, but these byte loads fault on ESP8266.
+- Rejected DRAM AES table experiment:
+  - changed the build locally to put `Te0`/`Td0`/`rcon` into DRAM and collected `.dram0 .dram0.*` in the linker script;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-espnow-dram-aes CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run esp_now_encrypted_companion`: passed, reaching `esp-now-rx-ok`;
+  - same DRAM-table build also passed `esp_now_bad_key_companion` and `esp_now_encrypted`;
+  - the fix was rejected because it added about `1024` bytes of `.data` and regressed `tcp_client` Wi-Fi init with `wifi alloc fail kind=M size=0x00000400 free=0x000000dc ... hi_free=64 lo_free=156`.
+- Retained aligned-IROM AES fix:
+  - patched the copied SDK `aes_i.h`, `aes-internal.c`, `aes-internal-enc.c`, and `aes-internal-dec.c` build inputs so `AES_SMALL_TABLES` is disabled and table macros force volatile aligned 32-bit loads;
+  - kept `.rodata.Te*` and `.rodata.Td*` in the `.text`/IROM output section, alongside the existing large crypto table placement;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo build --release --example wifi_esp_now_rx --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-sta,wifi-esp-now -q`: passed;
+  - patched output `target/.../out/aes_i.h` contained the `AES_TABLE_LOAD` macros and disabled `AES_SMALL_TABLES`;
+  - `xtensa-lx106-elf-nm target/xtensa-esp8266-none-elf/release/examples/wifi_esp_now_rx | rg 'rijndaelKeySetupEnc|aes_encrypt_init|Te[0-4]|Td[0-4]|rcon'`: showed `Te0..Te4` at `0x40263504..0x40264504` in IROM and `rijndaelKeySetupEnc` at `0x402449f4`;
+  - `xtensa-lx106-elf-objdump -d --start-address=0x402449f4 --stop-address=0x40244b20 target/xtensa-esp8266-none-elf/release/examples/wifi_esp_now_rx`: table accesses in `rijndaelKeySetupEnc` used `memw` + `l32i`, while remaining `l8ui` instructions read the caller's 16-byte key input;
+  - `xtensa-lx106-elf-size -A target/xtensa-esp8266-none-elf/release/examples/wifi_esp_now_rx`: `.data=1788`, `.bss=17440`, `Total=408321`;
+  - `xtensa-lx106-elf-size -A target/xtensa-esp8266-none-elf/release/examples/wifi_esp_now_tx`: `.data=1788`, `.bss=17440`, `Total=407245`.
+- Retained aligned-IROM AES hardware evidence:
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-espnow-aligned-irom-aes CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run esp_now_encrypted_companion`: passed in artifact `esp_now_encrypted_companion-1781719119`, with DUT `esp-now rx ready`, `esp-now rx peer=4c:c3:82:82:32:80`, `esp-now rx len=19`, `esp-now-rx-ok`, and companion `OK ESPNOW_TX status=success`;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-espnow-aligned-irom-aes CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run esp_now_bad_key_companion`: passed in artifact `esp_now_bad_key_companion-1781719644`; DUT stayed at `esp-now rx ready` without receiving the wrong-key payload, and companion returned `OK ESPNOW_TX status=success`;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-espnow-aligned-irom-aes CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run esp_now_encrypted`: passed in artifact `esp_now_encrypted-1781719669`, with DUT `esp-now-rx-ok` and companion `OK ESPNOW_TX status=success`.
+- TCP client heap regression and fix:
+  - after the aligned-IROM AES fix, `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-tcp-client-aligned-irom CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run tcp_client`: failed by harness timeout;
+  - artifact `target/wifi-hw-artifacts-20260617-tcp-client-aligned-irom/tcp_client-1781719140` showed the DUT failed during Wi-Fi init with `wifi alloc fail kind=M size=0x00000400 free=0x0000047c task=U count=1 ... hi_free=992 lo_free=156`;
+  - size inspection showed `tcp_client` used default `NetDriverState` MTU `1514`, making `NET_STATE` `0x0c4c` bytes; `tcp_server` already constrained the bridge MTU to `640`, making its comparable `NET_STATE` `0x0574` bytes;
+  - changed `examples/tcp_client.rs` to use `NetDriverStateWithMtu<640, 1, 1>`, `RunnerWithMtu`, `NetDeviceWithMtu`, and `wifi_net::new_with_mtu()`;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example tcp_client --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-embassy-net,wifi-sta -q`: passed with the known warning set;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo build --release --example tcp_client --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-embassy-net,wifi-sta -q && xtensa-lx106-elf-size -A target/xtensa-esp8266-none-elf/release/examples/tcp_client`: passed; release `.bss` dropped from `21772` to about `20004` bytes, and the final inspected image was `.text=549904`, `.rodata=50628`, `.data=1940`, `.bss=20020`, `Total=629373`;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-tcp-client-mtu640 CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run tcp_client`: passed in artifact `tcp_client-1781719614`, with DUT `wifi init ok`, `wifi connected`, `static ip up Cidr { address: 192.168.4.2, prefix_len: 24 }`, `tcp client connected`, `recv:32`, `done`, and companion `OK TCP_SERVE_ONCE port=4321`.
+- Focused post-fix hardware smoke:
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-focused-after-aes-mtu CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run sta_connect`: passed in artifact `sta_connect-1781719723`, reaching `wifi core initialized`, `wifi core started`, `wifi core associated`, and `wifi core connected`;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-focused-after-aes-mtu CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run tcp_server`: passed in artifact `tcp_server-1781719746`, reaching `wifi init ok`, `wifi connected`, `dhcp up Cidr { address: 192.168.4.2, prefix_len: 24 }`, `listen 1234`, and companion `OK TCP_CONNECT recv=70696e67`;
+  - `source .envrc && env -u ESP8266_HAL_EAP_TRACE ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-focused-after-aes-mtu CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: passed in artifact `eap_sta_assoc-1781719768`, with `wifi eap heap before init heap=38212`, `wifi eap heap after init heap=21056`, `wifi eap associated`, and `eap-ok`.
+- Static validation after retained fixes:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed all host Wi-Fi core test binaries, including the reported groups of `43`, `2`, `11`, `17`, `9`, `6`, `2`, `6`, `3`, `8`, `3`, `2`, `2`, and `3` tests;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed all xtask tests, reported as `7`, `5`, and `22` tests across the non-empty test binaries;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q`: passed with the known broad warning set.
+- Full hardware matrix after retained fixes:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-full-after-aes-mtu CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - artifact root: `target/wifi-hw-artifacts-20260617-full-after-aes-mtu`;
+  - scenario directories included `sta_connect-1781719946`, `sta_scan-1781719962`, `sta_dhcp-1781719978`, `sta_static_ip-1781719996`, `tcp_server-1781720014`, `tcp_client-1781720031`, `eap_sta_assoc-1781720051`, `esp_now_unicast_companion-1781720080`, `esp_now_encrypted_companion-1781720095`, `esp_now_bad_key_companion-1781720111`, `promisc_data_companion-1781720130`, `promisc_data_companion-1781720190`, `promisc_data_companion-1781720249`, `ap_start-1781720261`, `ap_station_list-1781720274`, `ap_dhcp-1781720290`, `ap_sta-1781720315`, `esp_now_unicast-1781720338`, `esp_now_broadcast-1781720352`, `esp_now_encrypted-1781720363`, `promisc_capture-1781720378`, `promisc_filters-1781720392`, and `promisc_control_filter_api-1781720405`;
+  - matrix reported the known rig-blocked entries separately: WPS (`ESP-IDF AP registrar PBC/PIN attempts fail without sniffer evidence`), SmartConfig (`current ESP32 companion cannot emulate ESPTouch phone/STA-through-AP provisioning`), and deterministic promiscuous control-frame injection (`ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames`);
+  - `promisc_data_companion` needed retries: attempts `1781720130` and `1781720190` did not reach a captured frame, while attempt `1781720249` reached `promisc frame type=data ch=6 len=0` and `promisc-ok`, so the matrix treated this as a recovered RF/capture transient rather than a final failure;
+  - representative full-matrix markers:
+    - `tcp_client-1781720031`: `wifi init ok`, `wifi connected`, `static ip up Cidr { address: 192.168.4.2, prefix_len: 24 }`, `tcp client connected`, `recv:32`, `done`;
+    - `eap_sta_assoc-1781720051`: `wifi eap associated`, `eap-ok`;
+    - `tcp_server-1781720014`: companion `OK TCP_CONNECT recv=70696e67`;
+    - `esp_now_encrypted_companion-1781720095` and `esp_now_encrypted-1781720363`: encrypted ESP-NOW paths passed without the prior AES table exception.

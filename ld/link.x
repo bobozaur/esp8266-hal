@@ -51,6 +51,25 @@ SECTIONS {
     *(.literal .literal.* .text .text.*)
     /* SDK WiFi blob sections that upstream xtensa-lx-rt does not collect */
     *(.literal2 .literal2.* .text2 .text2.*)
+
+    /* Large read-only SDK crypto tables are safe to fetch from mapped flash and
+       otherwise consume a disproportionate amount of ESP8266 DRAM in EAP builds.
+       Keep them in the .text output section so esptool sees one IROM section.
+       The wpa_supplicant internal AES tables are kept full-sized so the
+       generated code uses aligned 32-bit IROM loads instead of byte loads. */
+    *(.rodata.Te*)
+    *(.rodata.Td*)
+    *(.rodata.s_aes_*)
+    *(.rodata.SB*)
+    *(.rodata.SP*)
+    *(.rodata.FSb*)
+    *(.rodata.K)
+    *(.rodata.S)
+    *(.rodata.P)
+    *(.rodata.small_prime)
+    *(.rodata.ciphersuite_definitions)
+    *(.rodata.ciphersuite_preference)
+    *(.rodata.mbedtls_cipher_definitions)
     _text_end = ABSOLUTE(.);
     _etext = .;
   } > ROTEXT
@@ -77,6 +96,7 @@ SECTIONS {
   {
     _data_start = ABSOLUTE(.);
     . = ALIGN (4);
+    *(.dram0 .dram0.*)
     *(.data .data.*)
     _data_end = ABSOLUTE(.);
   } > RWDATA

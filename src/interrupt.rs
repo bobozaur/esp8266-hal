@@ -2,6 +2,7 @@
 use core::arch::asm;
 
 use xtensa_lx_rt::exception::Context;
+#[cfg(not(feature = "wifi"))]
 use xtensa_lx_rt::interrupt;
 
 use crate::ram;

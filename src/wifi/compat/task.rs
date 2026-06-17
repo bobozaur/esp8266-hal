@@ -444,7 +444,6 @@ unsafe fn stack_high_water_bytes(idx: usize) -> u32 {
     }
 }
 
-#[inline(never)]
 #[ram]
 unsafe fn report_stack_canary_once(idx: usize) {
     unsafe {
@@ -736,7 +735,6 @@ pub(crate) unsafe fn init_task_stack(
 }
 
 /// Copy the ISR frame into the current task's per-task save buffer.
-#[inline(never)]
 #[ram]
 pub(crate) unsafe fn save_current_frame(frame: *mut u8) {
     unsafe {
@@ -781,7 +779,6 @@ pub(crate) unsafe fn save_current_frame(frame: *mut u8) {
 
 /// Copy the selected task's saved frame into the current live interrupt frame
 /// so the outer `xtensa-lx-rt` restore returns into the chosen task.
-#[inline(never)]
 #[ram]
 pub(crate) unsafe fn restore_current_frame_into(frame: *mut u8) {
     unsafe {
@@ -834,7 +831,6 @@ pub unsafe extern "C" fn commit_current_task_post_restore_stack_top(frame: *mut 
 
 /// Prepare the selected task's own saved frame for restore and return its
 /// frame pointer for the level-1 exit path.
-#[inline(never)]
 #[ram]
 pub(crate) unsafe fn prepare_current_frame_for_restore() -> *mut u8 {
     unsafe {

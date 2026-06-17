@@ -467,7 +467,7 @@ pub unsafe extern "C" fn __wifi_task_create(
         if ret == 1 {
             handle
         } else {
-            let free = unsafe { super::memory::esp_get_free_heap_size() };
+            let free = super::memory::esp_get_free_heap_size();
             log_task_create_failed(&name_buf, stack_depth, prio, free);
             core::ptr::null_mut()
         }

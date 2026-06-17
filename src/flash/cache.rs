@@ -3,6 +3,7 @@ use core::ops::{Deref, DerefMut};
 use esp8266::{DPORT, SPI0};
 
 #[ram]
+#[allow(dead_code)]
 pub(crate) fn cache_enable(spi0: &mut SPI0, mb: u8) {
     assert!(mb < 8, "only up to8mb can be mapped");
 

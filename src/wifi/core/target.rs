@@ -4,12 +4,12 @@ use super::target_callback::CallbackRegistration;
 use super::target_map::*;
 use super::{
     AccessPointConfig, AccessPointRecord, ApStationInfo, Channel, ClientConfig, ConnectError,
-    Deadline, DisconnectError, DriverError, EspNowPeerConfig, EspNowRxFrame, EspNowSendStatus,
-    EspNowTxStatus, InitConfig, InitError, PromiscuousControlFilter, PromiscuousFilter,
-    PromiscuousFrameInfo, PromiscuousRxFrame, RawMode, RawRxRecord, ScanOptions, StationPowerSave,
-    WifiApBackend, WifiEvent, WifiFeatureBackend, WifiLifecycleBackend, WifiPacketBackend,
-    WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend, WpsConfig, WpsPin,
-    PROMISCUOUS_MAX_PAYLOAD_PREFIX,
+    Credential, Deadline, DisconnectError, DriverError, EspNowPeerConfig, EspNowRxFrame,
+    EspNowSendStatus, EspNowTxStatus, InitConfig, InitError, PromiscuousControlFilter,
+    PromiscuousFilter, PromiscuousFrameInfo, PromiscuousRxFrame, RawMode, RawRxRecord, ScanOptions,
+    StationPowerSave, WifiApBackend, WifiEvent, WifiFeatureBackend, WifiLifecycleBackend,
+    WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
+    Wpa2EnterpriseCredentials, WpsConfig, WpsPin, PROMISCUOUS_MAX_PAYLOAD_PREFIX,
 };
 #[cfg(feature = "wifi-debug-trace")]
 use super::{DeliverDataDebugSnapshot, RxCallbackDebugSnapshot};
@@ -107,14 +107,14 @@ static CORE_STA_START_SEQ: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(feature = "wifi-debug-trace")]
 macro_rules! rx_debug {
-    ($($statement:stmt)*) => {
-        $($statement)*
+    ($($statement:expr);* $(;)?) => {
+        $(let _ = $statement;)*
     };
 }
 
 #[cfg(not(feature = "wifi-debug-trace"))]
 macro_rules! rx_debug {
-    ($($statement:stmt)*) => {};
+    ($($statement:expr);* $(;)?) => {};
 }
 
 // STA_START normally arrives on the first scheduler turn after
@@ -168,6 +168,7 @@ pub struct Esp8266TargetBackend<
     sta_rx_registered: bool,
     ap_rx_registered: bool,
     ap_netif_started: bool,
+    wpa2_enterprise_enabled: bool,
     station_power_save: StationPowerSave,
 }
 
@@ -216,6 +217,7 @@ impl<
             sta_rx_registered: false,
             ap_rx_registered: false,
             ap_netif_started: false,
+            wpa2_enterprise_enabled: false,
             station_power_save: StationPowerSave::None,
         }
     }
@@ -243,6 +245,129 @@ impl<
                 .map_err(map_wifi_driver_error)?;
         }
         Ok(())
+    }
+
+    fn configure_wpa2_enterprise_for_station(
+        &mut self,
+        config: &ClientConfig,
+    ) -> Result<(), DriverError> {
+        match config.credential() {
+            Credential::Wpa2Enterprise(credentials) => self.enable_wpa2_enterprise(credentials),
+            Credential::Open | Credential::Wpa2(_) => self.disable_wpa2_enterprise_if_enabled(),
+        }
+    }
+
+    fn enable_wpa2_enterprise(
+        &mut self,
+        credentials: &Wpa2EnterpriseCredentials,
+    ) -> Result<(), DriverError> {
+        self.clear_wpa2_enterprise_credentials();
+        let result = self.enable_wpa2_enterprise_inner(credentials);
+        if result.is_err() {
+            self.clear_wpa2_enterprise_credentials();
+            self.wpa2_enterprise_enabled = false;
+        }
+        result
+    }
+
+    fn enable_wpa2_enterprise_inner(
+        &mut self,
+        credentials: &Wpa2EnterpriseCredentials,
+    ) -> Result<(), DriverError> {
+        let identity = credentials.identity().as_bytes();
+        crate::wifi::EspError::check(unsafe {
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_set_identity(
+                identity.as_ptr(),
+                identity.len() as i32,
+            )
+        })
+        .map_err(map_enterprise_esp_error)?;
+
+        let username = credentials.username().as_bytes();
+        crate::wifi::EspError::check(unsafe {
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_set_username(
+                username.as_ptr(),
+                username.len() as i32,
+            )
+        })
+        .map_err(map_enterprise_esp_error)?;
+
+        let password = credentials.password().as_bytes();
+        crate::wifi::EspError::check(unsafe {
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_set_password(
+                password.as_ptr(),
+                password.len() as i32,
+            )
+        })
+        .map_err(map_enterprise_esp_error)?;
+
+        if let Some(ca_cert) = credentials.ca_cert() {
+            crate::wifi::EspError::check(unsafe {
+                esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_set_ca_cert(
+                    ca_cert.as_ptr(),
+                    ca_cert.len() as i32,
+                )
+            })
+            .map_err(map_enterprise_esp_error)?;
+        }
+
+        if let Some(certificate) = credentials.client_certificate() {
+            let password = certificate.private_key_password();
+            let password_ptr = password.map_or(core::ptr::null(), <[u8]>::as_ptr);
+            let password_len = password.map_or(0, |password| password.len() as i32);
+            crate::wifi::EspError::check(unsafe {
+                esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_set_cert_key(
+                    certificate.client_cert().as_ptr(),
+                    certificate.client_cert().len() as i32,
+                    certificate.private_key().as_ptr(),
+                    certificate.private_key().len() as i32,
+                    password_ptr,
+                    password_len,
+                )
+            })
+            .map_err(map_enterprise_esp_error)?;
+        }
+
+        crate::wifi::EspError::check(unsafe {
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_set_disable_time_check(
+                credentials.disable_time_check(),
+            )
+        })
+        .map_err(map_enterprise_esp_error)?;
+
+        crate::wifi::EspError::check(unsafe { esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_enable() })
+            .map_err(map_enterprise_esp_error)?;
+
+        self.wpa2_enterprise_enabled = true;
+        Ok(())
+    }
+
+    fn disable_wpa2_enterprise_if_enabled(&mut self) -> Result<(), DriverError> {
+        if !self.wpa2_enterprise_enabled {
+            return Ok(());
+        }
+
+        let result = crate::wifi::EspError::check(unsafe {
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_disable()
+        })
+        .map_err(map_enterprise_esp_error);
+        self.clear_wpa2_enterprise_credentials();
+        if result.is_ok() {
+            self.wpa2_enterprise_enabled = false;
+            crate::wifi::compat::memory::release_eap_rsa_workspace();
+        }
+        result
+    }
+
+    fn clear_wpa2_enterprise_credentials(&self) {
+        unsafe {
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_clear_identity();
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_clear_username();
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_clear_password();
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_clear_new_password();
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_clear_ca_cert();
+            esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_clear_cert_key();
+        }
     }
 
     fn connect_blocking_inner(&mut self, timeout_ms: u32) -> Result<(), DriverError> {
@@ -771,9 +896,10 @@ impl<
         self.detach_ap_rx();
         self.detach_sta_rx();
         self.stop_ap_netif();
+        let enterprise_result = self.disable_wpa2_enterprise_if_enabled();
         let result = self.controller_mut()?.stop().map_err(map_wifi_driver_error);
         self.unregister_event_handler();
-        result
+        enterprise_result.and(result)
     }
 }
 
@@ -809,21 +935,29 @@ impl<
         controller
             .set_sta_config(&map_client_config(config))
             .map_err(map_wifi_driver_error)?;
+        self.configure_wpa2_enterprise_for_station(config)?;
         Ok(())
     }
 
     fn connect(&mut self) -> Result<(), ConnectError> {
-        self.controller_mut()
+        let result = self
+            .controller_mut()
             .map_err(|_| ConnectError::BackendRejected)?
             .connect()
-            .map_err(map_wifi_connect_error)
+            .map_err(map_wifi_connect_error);
+        result
     }
 
     fn disconnect(&mut self) -> Result<(), DisconnectError> {
-        self.controller_mut()
+        let result = self
+            .controller_mut()
             .map_err(|_| DisconnectError::BackendRejected)?
             .disconnect()
-            .map_err(map_wifi_disconnect_error)
+            .map_err(map_wifi_disconnect_error);
+        if result.is_ok() && self.wpa2_enterprise_enabled {
+            crate::wifi::compat::memory::release_eap_rsa_workspace();
+        }
+        result
     }
 
     fn sta_mac_address(&self) -> Result<[u8; 6], DriverError> {
@@ -861,6 +995,10 @@ impl<
     >
 {
     fn configure_ap(&mut self, config: &AccessPointConfig) -> Result<(), DriverError> {
+        if matches!(config.credential(), Credential::Wpa2Enterprise(_)) {
+            return Err(DriverError::BackendRejected);
+        }
+        self.disable_wpa2_enterprise_if_enabled()?;
         let controller = self.controller_mut()?;
         controller
             .set_mode(crate::wifi::WifiMode::Ap)
@@ -875,6 +1013,9 @@ impl<
         client: &ClientConfig,
         access_point: &AccessPointConfig,
     ) -> Result<(), DriverError> {
+        if matches!(access_point.credential(), Credential::Wpa2Enterprise(_)) {
+            return Err(DriverError::BackendRejected);
+        }
         self.station_power_save = client.power_save();
         let controller = self.controller_mut()?;
         controller
@@ -886,6 +1027,7 @@ impl<
         controller
             .set_ap_config(&map_ap_config(access_point))
             .map_err(map_wifi_driver_error)?;
+        self.configure_wpa2_enterprise_for_station(client)?;
         Ok(())
     }
 
@@ -2069,6 +2211,14 @@ fn map_wifi_driver_error(error: crate::wifi::WifiError) -> DriverError {
     match error {
         crate::wifi::WifiError::Timeout => DriverError::Timeout,
         _ => DriverError::BackendRejected,
+    }
+}
+
+fn map_enterprise_esp_error(error: crate::wifi::EspError) -> DriverError {
+    if error.code() == esp8266_wifi_sys::ESP_ERR_NO_MEM {
+        DriverError::OutOfMemory
+    } else {
+        DriverError::BackendError(error.code())
     }
 }
 

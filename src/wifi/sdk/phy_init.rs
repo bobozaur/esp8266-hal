@@ -170,7 +170,7 @@ pub unsafe extern "C" fn esp_phy_rf_init(
         uart_tx_wait_idle(1);
         crate::logger::debug_byte(b'h');
 
-        let ret = register_chipv6_phy(local_init_data);
+        let _ = register_chipv6_phy(local_init_data);
         crate::logger::debug_byte(b'j');
 
         phy_disable_agc();

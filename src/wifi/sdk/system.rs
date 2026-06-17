@@ -375,7 +375,7 @@ pub unsafe extern "C" fn esp_get_idf_version() -> *const u8 {
 
 /// esp_chip_info_t equivalent (the SDK struct may not be in bindgen output).
 #[repr(C)]
-struct ChipInfo {
+pub(crate) struct ChipInfo {
     model: u32,
     features: u32,
     cores: u8,

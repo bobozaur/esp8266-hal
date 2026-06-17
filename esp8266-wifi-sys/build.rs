@@ -20,6 +20,9 @@ use embuild::git;
 /// important bug fixes and updated pre-built WiFi blob libraries post-v3.4.
 const SDK_COMMIT: &str = "da7ce37be424d71874241ca9f17cf8da0e3cdb70";
 const SDK_REPO_URL: &str = "https://github.com/espressif/ESP8266_RTOS_SDK.git";
+const WPS_ENROLLEE_TRACE_ENV: &str = "ESP8266_HAL_WPS_ENROLLEE_TRACE";
+const EAP_TRACE_ENV: &str = "ESP8266_HAL_EAP_TRACE";
+const MBEDTLS_SOFTWARE_AES_ENV: &str = "ESP8266_HAL_MBEDTLS_SOFTWARE_AES";
 
 fn main() {
     let sdk_path = discover_sdk_path();
@@ -70,6 +73,10 @@ fn main() {
 
     // Rebuild triggers
     println!("cargo:rerun-if-env-changed=ESP8266_RTOS_SDK");
+    println!("cargo:rerun-if-env-changed={WPS_ENROLLEE_TRACE_ENV}");
+    println!("cargo:rerun-if-env-changed={EAP_TRACE_ENV}");
+    println!("cargo:rerun-if-env-changed={MBEDTLS_SOFTWARE_AES_ENV}");
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=ap_netif_bridge.c");
     // sdk_overrides/ fully ported to Rust (src/wifi/sdk/).
@@ -227,9 +234,14 @@ fn generate_sdkconfig(path: &Path) {
 #define CONFIG_WPA_MBEDTLS_CRYPTO 1
 
 /* ---------- mbedTLS ---------- */
-#define CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN 16384
-/* CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN intentionally left undefined
-   so that esp_config.h uses the symmetric MBEDTLS_SSL_MAX_CONTENT_LEN. */
+#define CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN 1
+#define CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN 896
+#define CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN 512
+#define MBEDTLS_MPI_MAX_SIZE 256
+#define MBEDTLS_MPI_WINDOW_SIZE 2
+#define MBEDTLS_ECP_MAX_BITS 256
+#define MBEDTLS_ECP_WINDOW_SIZE 2
+#define MBEDTLS_ECP_FIXED_POINT_OPTIM 0
 #define CONFIG_MBEDTLS_TLS_ENABLED 1
 #define CONFIG_MBEDTLS_TLS_CLIENT 1
 #define CONFIG_MBEDTLS_TLS_SERVER 1
@@ -250,7 +262,6 @@ fn generate_sdkconfig(path: &Path) {
 #define CONFIG_MBEDTLS_BIGNUM_C 1
 #define CONFIG_MBEDTLS_PK_C 1
 #define CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED 1
-#define CONFIG_MBEDTLS_ECP_DP_SECP384R1_ENABLED 1
 #define CONFIG_MBEDTLS_ECP_NIST_OPTIM 1
 /* Key exchange */
 #define CONFIG_MBEDTLS_KEY_EXCHANGE_RSA 1
@@ -466,6 +477,9 @@ fn run_bindgen(manifest_dir: &Path, include_paths: &[PathBuf], out_dir: &Path) {
 
     // WPS functions
     builder = builder.allowlist_function("esp_wifi_wps_.*");
+
+    // WPA2 Enterprise station functions
+    builder = builder.allowlist_function("esp_wifi_sta_wpa2_ent_.*");
 
     // ESP-NOW functions
     builder = builder.allowlist_function("esp_now_.*");
@@ -1736,15 +1750,12 @@ void *_realloc_r(struct _reent *reent, void *ptr, size_t size) {
     (void)reent;
     if (!ptr) return pvPortMalloc(size);
     if (!size) { vPortFree(ptr); return (void *)0; }
-    /* Simple realloc: alloc new, copy, free old.
-       We don't know old size so copy `size` bytes (safe because the new
-       block is at least that big, and reading past old alloc into our
-       heap is harmless on single-core ESP8266). */
+    /* Simple realloc: alloc new, copy the tracked old size, free old. */
     void *new_ptr = pvPortMalloc(size);
     if (new_ptr) {
-        /* Use pvPortMalloc's 4-byte header to get old size */
-        unsigned int old_total = *(unsigned int *)((char *)ptr - 4);
-        unsigned int old_usable = old_total - 4;
+        /* Use pvPortMalloc's 8-byte header to get old size. */
+        unsigned int old_total = *(unsigned int *)((char *)ptr - 8);
+        unsigned int old_usable = old_total - 8;
         unsigned int copy_len = old_usable < size ? old_usable : size;
         __builtin_memcpy(new_ptr, ptr, copy_len);
         vPortFree(ptr);
@@ -1830,6 +1841,7 @@ void __atomic_store_4(volatile void *p, uint32_t v, int mo) {
     // different defines.
     let mut wpa_build = cc::Build::new();
     init_cc_build(&mut wpa_build, gcc, include_paths);
+    wpa_build.include(comp("components/wpa_supplicant/src/crypto"));
     wpa_build
         .define("MBEDTLS_CONFIG_FILE", "\"mbedtls/esp_config.h\"")
         .define("CONFIG_SSL_USING_MBEDTLS", None);
@@ -1925,6 +1937,46 @@ void __atomic_store_4(volatile void *p, uint32_t v, int mo) {
     ];
     for src in &wpa_srcs {
         match *src {
+            "components/wpa_supplicant/src/eap_peer/eap.c"
+                if env::var_os(EAP_TRACE_ENV).is_some() =>
+            {
+                wpa_build.file(patch_eap_core_trace_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/eap_peer/eap_peap.c"
+                if env::var_os(EAP_TRACE_ENV).is_some() =>
+            {
+                wpa_build.file(patch_eap_peap_trace_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/eap_peer/eap_tls_common.c"
+                if env::var_os(EAP_TRACE_ENV).is_some() =>
+            {
+                wpa_build.file(patch_eap_tls_common_trace_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/eap_peer/eap_tls_common.c" => {
+                wpa_build.file(patch_eap_tls_common_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/crypto/tls_mbedtls.c"
+                if env::var_os(EAP_TRACE_ENV).is_some() =>
+            {
+                wpa_build.file(patch_tls_mbedtls_eap_trace_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/crypto/tls_mbedtls.c" => {
+                wpa_build.file(patch_tls_mbedtls_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/crypto/aes-internal-enc.c" => {
+                wpa_build.file(patch_aes_internal_user_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/crypto/aes-internal-dec.c" => {
+                wpa_build.file(patch_aes_internal_user_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/crypto/aes-internal.c" => {
+                wpa_build.file(patch_aes_internal_source(&comp(src), out_dir));
+            }
+            "components/wpa_supplicant/src/esp_supplicant/esp_wpa2.c"
+                if env::var_os(EAP_TRACE_ENV).is_some() =>
+            {
+                wpa_build.file(patch_esp_wpa2_eap_trace_source(&comp(src), out_dir));
+            }
             "components/wpa_supplicant/src/esp_supplicant/esp_wps.c" => {
                 wpa_build.file(patch_esp_wps_source(&comp(src), out_dir));
             }
@@ -1932,7 +1984,11 @@ void __atomic_store_4(volatile void *p, uint32_t v, int mo) {
                 wpa_build.file(patch_wps_attr_build_source(&comp(src), out_dir));
             }
             "components/wpa_supplicant/src/wps/wps_enrollee.c" => {
-                wpa_build.file(comp(src));
+                if env::var_os(WPS_ENROLLEE_TRACE_ENV).is_some() {
+                    wpa_build.file(patch_wps_enrollee_source(&comp(src), out_dir));
+                } else {
+                    wpa_build.file(comp(src));
+                }
             }
             _ => {
                 wpa_build.file(comp(src));
@@ -1948,6 +2004,701 @@ void __atomic_store_4(volatile void *p, uint32_t v, int mo) {
 
     // --- mbedTLS (compile separately with its own config) ---
     compile_mbedtls(sdk, include_paths, out_dir, gcc);
+}
+
+fn eap_trace_hook() -> &'static str {
+    r#"
+static void esp8266_hal_eap_trace_char(char c) {
+    volatile unsigned int *status = (volatile unsigned int *)(0x60000000 + 0x1c);
+    volatile unsigned int *fifo = (volatile unsigned int *)0x60000000;
+    if ((((*status) >> 16) & 0xffu) < 126u) {
+        *fifo = (unsigned int)c;
+    }
+}
+static void esp8266_hal_eap_trace_nibble(unsigned int value) {
+    value &= 0xFu;
+    esp8266_hal_eap_trace_char((char)(value < 10u ? ('0' + value) : ('A' + (value - 10u))));
+}
+static void esp8266_hal_eap_trace_hex8(unsigned int value) {
+    esp8266_hal_eap_trace_nibble(value >> 4);
+    esp8266_hal_eap_trace_nibble(value);
+}
+static void esp8266_hal_eap_trace_hex32(unsigned int value) {
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        esp8266_hal_eap_trace_nibble(value >> (unsigned int)shift);
+    }
+}
+static void esp8266_hal_eap_trace_code(char code) {
+    esp8266_hal_eap_trace_char('~');
+    esp8266_hal_eap_trace_char(code);
+}
+"#
+}
+
+fn patch_eap_core_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("eap_core_trace.c");
+    let source_text = fs::read_to_string(source).expect("failed to read eap.c");
+    let patched_text = replace_required(
+        &source_text,
+        "#include \"supplicant_opt.h\"",
+        &format!("#include \"supplicant_opt.h\"\n{}", eap_trace_hook()),
+        "eap.c EAP trace hook",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (sm->m && sm->m->get_identity) {\n\t\tidentity = sm->m->get_identity(sm,\n\t\t\t\t\tsm->eap_method_priv,\n\t\t\t\t\t&identity_len);\n\t} else if (!encrypted && config->anonymous_identity) {",
+        "\tif (sm->m && sm->m->get_identity) {\n\t\tidentity = sm->m->get_identity(sm,\n\t\t\t\t\tsm->eap_method_priv,\n\t\t\t\t\t&identity_len);\n\t\tesp8266_hal_eap_trace_code('j');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)identity_len);\n\t} else if (!encrypted && config->anonymous_identity) {",
+        "eap.c identity method trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t} else if (!encrypted && config->anonymous_identity) {\n\t\tidentity = config->anonymous_identity;\n\t\tidentity_len = config->anonymous_identity_len;\n\t} else {\n\t\tidentity = config->identity;\n\t\tidentity_len = config->identity_len;\n\t}",
+        "\t} else if (!encrypted && config->anonymous_identity) {\n\t\tidentity = config->anonymous_identity;\n\t\tidentity_len = config->anonymous_identity_len;\n\t\tesp8266_hal_eap_trace_code('k');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)identity_len);\n\t} else {\n\t\tidentity = config->identity;\n\t\tidentity_len = config->identity_len;\n\t\tesp8266_hal_eap_trace_code('K');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)identity_len);\n\t}",
+        "eap.c identity source trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (identity == NULL) {\n        wpa_printf(MSG_ERROR, \"EAP: Build Identity Resp-> identity was not available\\n\");\n\t\treturn NULL;\n\t}",
+        "\tif (identity == NULL) {\n\t\tesp8266_hal_eap_trace_code('J');\n        wpa_printf(MSG_ERROR, \"EAP: Build Identity Resp-> identity was not available\\n\");\n\t\treturn NULL;\n\t}\n\tesp8266_hal_eap_trace_code('E');\n\tesp8266_hal_eap_trace_hex32((unsigned int)encrypted);\n\tesp8266_hal_eap_trace_hex32((unsigned int)identity_len);",
+        "eap.c identity response length trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t/* anonymous identity */\n\tif (g_wpa_anonymous_identity && g_wpa_anonymous_identity_len > 0) {",
+        "\tesp8266_hal_eap_trace_code('c');\n\tesp8266_hal_eap_trace_hex32((unsigned int)g_wpa_anonymous_identity_len);\n\tesp8266_hal_eap_trace_hex32((unsigned int)g_wpa_username_len);\n\tesp8266_hal_eap_trace_hex32((unsigned int)g_wpa_password_len);\n\t/* anonymous identity */\n\tif (g_wpa_anonymous_identity && g_wpa_anonymous_identity_len > 0) {",
+        "eap.c config globals trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (g_wpa_password && g_wpa_password_len) {\n\t\tsm->config.password_len = g_wpa_password_len;\n\t\tsm->config.password = (u8 *)os_zalloc(sm->config.password_len);\n\t\tif (sm->config.password == NULL)\n\t\t\treturn -2;\n\t\tos_memcpy(sm->config.password, g_wpa_password, sm->config.password_len);\n\t}\n\n\tif (g_wpa_new_password && g_wpa_new_password_len) {",
+        "\tif (g_wpa_password && g_wpa_password_len) {\n\t\tsm->config.password_len = g_wpa_password_len;\n\t\tsm->config.password = (u8 *)os_zalloc(sm->config.password_len);\n\t\tif (sm->config.password == NULL)\n\t\t\treturn -2;\n\t\tos_memcpy(sm->config.password, g_wpa_password, sm->config.password_len);\n\t}\n\tesp8266_hal_eap_trace_code('C');\n\tesp8266_hal_eap_trace_hex32((unsigned int)sm->config.anonymous_identity_len);\n\tesp8266_hal_eap_trace_hex32((unsigned int)sm->config.identity_len);\n\tesp8266_hal_eap_trace_hex32((unsigned int)sm->config.password_len);\n\n\tif (g_wpa_new_password && g_wpa_new_password_len) {",
+        "eap.c config copied trace",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched eap.c");
+    patched
+}
+
+fn patch_esp_wpa2_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("esp_wpa2_eap_trace.c");
+    let source_text = fs::read_to_string(source).expect("failed to read esp_wpa2.c");
+    let patched_text = replace_required(
+        &source_text,
+        "#include \"esp_wifi_driver.h\"",
+        &format!("#include \"esp_wifi_driver.h\"\n{}", eap_trace_hook()),
+        "esp_wpa2.c EAP trace hook",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    type = *pos++;\n    if (type == EAP_TYPE_IDENTITY) {",
+        "    type = *pos++;\n    esp8266_hal_eap_trace_code('R');\n    esp8266_hal_eap_trace_hex8(type);\n    if (type == EAP_TYPE_IDENTITY) {",
+        "esp_wpa2.c request type trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        resp = sm->m->process(sm, sm->eap_method_priv,\n                              &m_res, reqData);",
+        "        esp8266_hal_eap_trace_code('p');\n        resp = sm->m->process(sm, sm->eap_method_priv,\n                              &m_res, reqData);",
+        "esp_wpa2.c existing method process trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        if (m == NULL) {\n            goto build_nak;\n        }",
+        "        if (m == NULL) {\n            esp8266_hal_eap_trace_code('N');\n            goto build_nak;\n        }",
+        "esp_wpa2.c method lookup failure trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        sm->eap_method_priv = sm->m->init(sm);\n        if (sm->eap_method_priv == NULL) {",
+        "        sm->eap_method_priv = sm->m->init(sm);\n        if (sm->eap_method_priv == NULL) {\n            esp8266_hal_eap_trace_code('I');",
+        "esp_wpa2.c method init failure trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        if (sm->m->process) {\n            resp = sm->m->process(sm, sm->eap_method_priv, &m_res, reqData);\n        }\n    }\n\n    if (sm->m->isKeyAvailable",
+        "        if (sm->m->process) {\n            esp8266_hal_eap_trace_code('P');\n            resp = sm->m->process(sm, sm->eap_method_priv, &m_res, reqData);\n        }\n    }\n    esp8266_hal_eap_trace_code(resp ? '1' : '0');\n\n    if (sm->m->isKeyAvailable",
+        "esp_wpa2.c response pointer trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "build_nak:\n    resp = (struct wpabuf *)eap_sm_build_nak(sm, type, ehdr->identifier);",
+        "build_nak:\n    esp8266_hal_eap_trace_code('n');\n    resp = (struct wpabuf *)eap_sm_build_nak(sm, type, ehdr->identifier);",
+        "esp_wpa2.c NAK trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    if (resp == NULL) {\n        wpa_printf(MSG_ERROR, \"Response build fail, return.\");\n        return ESP_FAIL;\n    }\n    ret = eap_sm_send_eapol(sm, resp);",
+        "    if (resp == NULL) {\n        esp8266_hal_eap_trace_code('Z');\n        wpa_printf(MSG_ERROR, \"Response build fail, return.\");\n        return ESP_FAIL;\n    }\n    esp8266_hal_eap_trace_code('S');\n    ret = eap_sm_send_eapol(sm, resp);\n    esp8266_hal_eap_trace_code(ret == ESP_OK ? 's' : 'F');",
+        "esp_wpa2.c send trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static void wpa2_sendto_wrapper(void *buffer, uint16_t len)\n{\n    esp_wifi_internal_tx(WIFI_IF_STA, buffer, len);\n}",
+        "static void wpa2_sendto_wrapper(void *buffer, uint16_t len)\n{\n    int ret;\n    esp8266_hal_eap_trace_code('W');\n    esp8266_hal_eap_trace_hex32((unsigned int)len);\n    ret = esp_wifi_internal_tx(WIFI_IF_STA, buffer, len);\n    esp8266_hal_eap_trace_code(ret == ESP_OK ? 'w' : 'X');\n    esp8266_hal_eap_trace_hex32((unsigned int)ret);\n}",
+        "esp_wpa2.c raw EAPOL tx trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "int eap_sm_send_eapol(struct eap_sm *sm, struct wpabuf *resp)\n{\n    size_t outlen;\n    int ret;\n    u8 *outbuf = NULL;",
+        "int eap_sm_send_eapol(struct eap_sm *sm, struct wpabuf *resp)\n{\n    size_t outlen;\n    int ret;\n    u8 *outbuf = NULL;\n    int stack_backed = 0;\n    u8 stack_eapol[sizeof(struct l2_ethhdr) + sizeof(struct ieee802_1x_hdr) + 256];",
+        "esp_wpa2.c EAPOL send stack fallback locals",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    outbuf = wpa2_sm_alloc_eapol(sm, IEEE802_1X_TYPE_EAP_PACKET,\n                                 wpabuf_head_u8(resp), wpabuf_len(resp),\n                                 &outlen, NULL);\n    if (!outbuf) {\n        return ESP_ERR_NO_MEM;\n    }\n\n    ret = wpa2_sm_ether_send(sm, bssid, ETH_P_EAPOL, outbuf, outlen);\n    wpa2_sm_free_eapol(outbuf);",
+        "    outbuf = wpa2_sm_alloc_eapol(sm, IEEE802_1X_TYPE_EAP_PACKET,\n                                 wpabuf_head_u8(resp), wpabuf_len(resp),\n                                 &outlen, NULL);\n    if (!outbuf && wpabuf_len(resp) <= 256) {\n        struct ieee802_1x_hdr *hdr;\n        esp8266_hal_eap_trace_code('B');\n        hdr = (struct ieee802_1x_hdr *)(stack_eapol + sizeof(struct l2_ethhdr));\n        outlen = sizeof(struct ieee802_1x_hdr) + wpabuf_len(resp);\n        hdr->version = 0x01;\n        hdr->type = IEEE802_1X_TYPE_EAP_PACKET;\n        hdr->length = host_to_be16(wpabuf_len(resp));\n        memcpy(hdr + 1, wpabuf_head_u8(resp), wpabuf_len(resp));\n        outbuf = (u8 *)hdr;\n        stack_backed = 1;\n    }\n    if (!outbuf) {\n        esp8266_hal_eap_trace_code('b');\n        return ESP_ERR_NO_MEM;\n    }\n\n    ret = wpa2_sm_ether_send(sm, bssid, ETH_P_EAPOL, outbuf, outlen);\n    if (!stack_backed) {\n        wpa2_sm_free_eapol(outbuf);\n    }",
+        "esp_wpa2.c EAPOL send stack fallback",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int eap_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)\n{\n    struct eap_sm *sm = gEapSm;\n\n    if (!sm) {\n        return ESP_FAIL;\n    }",
+        "static int eap_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)\n{\n    struct eap_sm *sm = gEapSm;\n    int ret;\n\n    esp8266_hal_eap_trace_code('3');\n    esp8266_hal_eap_trace_hex32((unsigned int)len);\n    if (!sm) {\n        esp8266_hal_eap_trace_code('m');\n        return ESP_FAIL;\n    }",
+        "esp_wpa2.c EAPOL rx entry trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        if (!param) {\n            return ESP_ERR_NO_MEM;\n        }\n\n        param->buf = (u8 *)os_zalloc(len);   /* free in task */\n        if (!param->buf) {\n            os_free(param);\n            return ESP_ERR_NO_MEM;\n        }",
+        "        if (!param) {\n            esp8266_hal_eap_trace_code('4');\n            ret = eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);\n            esp8266_hal_eap_trace_code('d');\n            esp8266_hal_eap_trace_hex32((unsigned int)ret);\n            return ret;\n        }\n\n        param->buf = (u8 *)os_zalloc(len);   /* free in task */\n        if (!param->buf) {\n            esp8266_hal_eap_trace_code('5');\n            os_free(param);\n            ret = eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);\n            esp8266_hal_eap_trace_code('d');\n            esp8266_hal_eap_trace_hex32((unsigned int)ret);\n            return ret;\n        }",
+        "esp_wpa2.c EAPOL rx queue allocation trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        wpa2_rxq_enqueue(param);\n        return wpa2_post(SIG_WPA2_RX, 0);",
+        "        wpa2_rxq_enqueue(param);\n        ret = wpa2_post(SIG_WPA2_RX, 0);\n        esp8266_hal_eap_trace_code('6');\n        esp8266_hal_eap_trace_hex32((unsigned int)ret);\n        return ret;",
+        "esp_wpa2.c EAPOL rx post trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int wpa2_ent_rx_eapol(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)\n{\n    struct ieee802_1x_hdr *hdr;\n    int ret = ESP_OK;\n\n    hdr = (struct ieee802_1x_hdr *) buf;\n\n    switch (hdr->type) {",
+        "static int wpa2_ent_rx_eapol(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)\n{\n    struct ieee802_1x_hdr *hdr;\n    int ret = ESP_OK;\n\n    hdr = (struct ieee802_1x_hdr *) buf;\n    esp8266_hal_eap_trace_code('2');\n    esp8266_hal_eap_trace_hex8((unsigned int)hdr->type);\n    esp8266_hal_eap_trace_hex32((unsigned int)len);\n\n    switch (hdr->type) {",
+        "esp_wpa2.c EAPOL dispatch trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int eap_sm_rx_eapol_internal(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)\n{\n    struct eap_sm *sm = gEapSm;",
+        "static int eap_sm_rx_eapol_internal(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)\n{\n    struct eap_sm *sm = gEapSm;\n    esp8266_hal_eap_trace_code('7');\n    esp8266_hal_eap_trace_hex32((unsigned int)len);",
+        "esp_wpa2.c EAPOL internal entry trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    struct wpabuf *req = NULL;\n    u8 *tmp;\n    int ret = ESP_FAIL;",
+        "    struct wpabuf *req = NULL;\n    struct wpabuf stack_req;\n    int stack_req_used = 0;\n    u8 *tmp;\n    int ret = ESP_FAIL;",
+        "esp_wpa2.c EAPOL internal stack request locals",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    if (len < sizeof(*hdr) + sizeof(*ehdr)) {",
+        "    if (len < sizeof(*hdr) + sizeof(*ehdr)) {\n        esp8266_hal_eap_trace_code('8');",
+        "esp_wpa2.c EAPOL short frame trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    if (hdr->type != IEEE802_1X_TYPE_EAP_PACKET) {",
+        "    esp8266_hal_eap_trace_code('8');\n    esp8266_hal_eap_trace_hex32((unsigned int)plen);\n    if (hdr->type != IEEE802_1X_TYPE_EAP_PACKET) {\n        esp8266_hal_eap_trace_code('9');",
+        "esp_wpa2.c EAPOL header trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    if (plen > len - sizeof(*hdr) || plen < sizeof(*ehdr)) {",
+        "    if (plen > len - sizeof(*hdr) || plen < sizeof(*ehdr)) {\n        esp8266_hal_eap_trace_code('0');",
+        "esp_wpa2.c EAPOL payload length trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        req = wpabuf_alloc_copy((u8 *)ehdr, len - sizeof(*hdr));\n        ret = eap_sm_process_request(sm, req);\n        break;",
+        "        req = wpabuf_alloc_copy((u8 *)ehdr, len - sizeof(*hdr));\n        esp8266_hal_eap_trace_code(req ? 'q' : 'Q');\n        if (!req) {\n            wpabuf_set(&stack_req, (u8 *)ehdr, len - sizeof(*hdr));\n            req = &stack_req;\n            stack_req_used = 1;\n            esp8266_hal_eap_trace_code('v');\n        }\n        ret = eap_sm_process_request(sm, req);\n        esp8266_hal_eap_trace_code('r');\n        esp8266_hal_eap_trace_hex32((unsigned int)ret);\n        break;",
+        "esp_wpa2.c EAP request allocation/process trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "_out:\n    wpabuf_free(req);",
+        "_out:\n    if (!stack_req_used) {\n        wpabuf_free(req);\n    }",
+        "esp_wpa2.c EAP stack request free guard",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched esp_wpa2.c");
+    patched
+}
+
+fn patch_eap_peap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("eap_peap_trace.c");
+    let source_text = fs::read_to_string(source).expect("failed to read eap_peap.c");
+    let patched_text = replace_required(
+        &source_text,
+        "#include \"eap_peer/eap_methods.h\"",
+        &format!("#include \"eap_peer/eap_methods.h\"\n{}", eap_trace_hook()),
+        "eap_peap.c EAP trace hook",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tdata = (struct eap_peap_data *)os_zalloc(sizeof(*data));\n\tif (data == NULL)\n\t\treturn NULL;",
+        "\tesp8266_hal_eap_trace_code('A');\n\tdata = (struct eap_peap_data *)os_zalloc(sizeof(*data));\n\tif (data == NULL) {\n\t\tesp8266_hal_eap_trace_code('D');\n\t\treturn NULL;\n\t}",
+        "eap_peap.c alloc trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (config && config->phase1 &&\n\t    eap_peap_parse_phase1(data, config->phase1) < 0) {\n\t\teap_peap_deinit(sm, data);\n\t\treturn NULL;\n\t}",
+        "\tif (config && config->phase1 &&\n\t    eap_peap_parse_phase1(data, config->phase1) < 0) {\n\t\tesp8266_hal_eap_trace_code('1');\n\t\teap_peap_deinit(sm, data);\n\t\treturn NULL;\n\t}",
+        "eap_peap.c phase1 trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (eap_peer_select_phase2_methods(config, \"auth=\",\n\t\t\t\t\t   &data->phase2_types,\n\t\t\t\t\t   &data->num_phase2_types) < 0) {\n\t\teap_peap_deinit(sm, data);\n\t\treturn NULL;\n\t}",
+        "\tif (eap_peer_select_phase2_methods(config, \"auth=\",\n\t\t\t\t\t   &data->phase2_types,\n\t\t\t\t\t   &data->num_phase2_types) < 0) {\n\t\tesp8266_hal_eap_trace_code('2');\n\t\teap_peap_deinit(sm, data);\n\t\treturn NULL;\n\t}\n\tesp8266_hal_eap_trace_code('M');",
+        "eap_peap.c phase2 selection trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (eap_peer_tls_ssl_init(sm, &data->ssl, config, EAP_TYPE_PEAP)) {\n\t\twpa_printf(MSG_INFO, \"EAP-PEAP: Failed to initialize SSL.\");\n\t\teap_peap_deinit(sm, data);\n\t\treturn NULL;\n\t}\n\n\treturn data;",
+        "\tesp8266_hal_eap_trace_code('T');\n\tif (eap_peer_tls_ssl_init(sm, &data->ssl, config, EAP_TYPE_PEAP)) {\n\t\tesp8266_hal_eap_trace_code('t');\n\t\twpa_printf(MSG_INFO, \"EAP-PEAP: Failed to initialize SSL.\");\n\t\teap_peap_deinit(sm, data);\n\t\treturn NULL;\n\t}\n\n\tesp8266_hal_eap_trace_code('p');\n\treturn data;",
+        "eap_peap.c tls init trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tpos = eap_peer_tls_process_init(sm, &data->ssl, EAP_TYPE_PEAP, ret,\n\t\t\t\t\treqData, &left, &flags);\n\tif (pos == NULL)\n\t\treturn NULL;",
+        "\tesp8266_hal_eap_trace_code('m');\n\tpos = eap_peer_tls_process_init(sm, &data->ssl, EAP_TYPE_PEAP, ret,\n\t\t\t\t\treqData, &left, &flags);\n\tif (pos == NULL) {\n\t\tesp8266_hal_eap_trace_code('j');\n\t\treturn NULL;\n\t}\n\tesp8266_hal_eap_trace_code('J');\n\tesp8266_hal_eap_trace_hex32((unsigned int)left);\n\tesp8266_hal_eap_trace_hex8((unsigned int)flags);",
+        "eap_peap.c process init trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t\tres = eap_peer_tls_process_helper(sm, &data->ssl,\n\t\t\t\t\t\t  EAP_TYPE_PEAP,\n\t\t\t\t\t\t  data->peap_version, id, pos,\n\t\t\t\t\t\t  left, &resp);\n\n\t\tif (tls_connection_established(sm->ssl_ctx, data->ssl.conn)) {",
+        "\t\tesp8266_hal_eap_trace_code('H');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)left);\n\t\tres = eap_peer_tls_process_helper(sm, &data->ssl,\n\t\t\t\t\t\t  EAP_TYPE_PEAP,\n\t\t\t\t\t\t  data->peap_version, id, pos,\n\t\t\t\t\t\t  left, &resp);\n\t\tesp8266_hal_eap_trace_code('g');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)res);\n\t\tesp8266_hal_eap_trace_code(resp ? 'G' : 'g');\n\n\t\tif (tls_connection_established(sm->ssl_ctx, data->ssl.conn)) {",
+        "eap_peap.c helper return trace",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched eap_peap.c");
+    patched
+}
+
+fn patch_eap_tls_common_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("eap_tls_common_patched.c");
+    let source_text = fs::read_to_string(source).expect("failed to read eap_tls_common.c");
+    let patched_text = replace_required(
+        &source_text,
+        "\tappl_data = NULL;\n\tdata->tls_out = tls_connection_handshake(data->ssl_ctx, data->conn,\n\t\t\t\t\t\t msg, &appl_data);",
+        "\tif (msg == data->tls_in) {\n\t\tdata->tls_in = NULL;\n\t\tdata->tls_in_left = data->tls_in_total = 0;\n\t}\n\tappl_data = NULL;\n\tdata->tls_out = tls_connection_handshake(data->ssl_ctx, data->conn,\n\t\t\t\t\t\t msg, &appl_data);",
+        "eap_tls_common.c transfer reassembled TLS input ownership",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched eap_tls_common.c");
+    patched
+}
+
+fn patch_eap_tls_common_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("eap_tls_common_trace.c");
+    let source_text = fs::read_to_string(source).expect("failed to read eap_tls_common.c");
+    let patched_text = replace_required(
+        &source_text,
+        "#include \"eap_peer/eap_methods.h\"",
+        &format!("#include \"eap_peer/eap_methods.h\"\n{}", eap_trace_hook()),
+        "eap_tls_common.c EAP trace hook",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tdata->conn = tls_connection_init(data->ssl_ctx);\n\tif (data->conn == NULL) {\n\t\twpa_printf(MSG_INFO, \"SSL: Failed to initialize new TLS \"\n\t\t\t   \"connection\");\n\t\treturn -1;\n\t}\n\n\tres = tls_connection_set_params(data->ssl_ctx, data->conn, params);",
+        "\tesp8266_hal_eap_trace_code('N');\n\tdata->conn = tls_connection_init(data->ssl_ctx);\n\tif (data->conn == NULL) {\n\t\tesp8266_hal_eap_trace_code('n');\n\t\twpa_printf(MSG_INFO, \"SSL: Failed to initialize new TLS \"\n\t\t\t   \"connection\");\n\t\treturn -1;\n\t}\n\n\tesp8266_hal_eap_trace_code('S');\n\tres = tls_connection_set_params(data->ssl_ctx, data->conn, params);\n\tesp8266_hal_eap_trace_code(res == 0 ? 's' : 'F');\n\tesp8266_hal_eap_trace_hex32((unsigned int)res);",
+        "eap_tls_common.c set params trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tstruct tls_connection_params params;\n\n\tif (config == NULL)\n\t\treturn -1;",
+        "\tstruct tls_connection_params params;\n\n\tesp8266_hal_eap_trace_code('L');\n\tif (config == NULL) {\n\t\tesp8266_hal_eap_trace_code('c');\n\t\treturn -1;\n\t}",
+        "eap_tls_common.c ssl init entry trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (eap_tls_params_from_conf(sm, data, &params, config, data->phase2) < 0) /* no phase2 */\n\t\treturn -1;\n\n\tif (eap_tls_init_connection(sm, data, config, &params) < 0)\n\t\treturn -1;",
+        "\tesp8266_hal_eap_trace_code('C');\n\tif (eap_tls_params_from_conf(sm, data, &params, config, data->phase2) < 0) { /* no phase2 */\n\t\tesp8266_hal_eap_trace_code('c');\n\t\treturn -1;\n\t}\n\n\tesp8266_hal_eap_trace_code('K');\n\tif (eap_tls_init_connection(sm, data, config, &params) < 0) {\n\t\tesp8266_hal_eap_trace_code('k');\n\t\treturn -1;\n\t}",
+        "eap_tls_common.c ssl init progress trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\treturn 0;\n}\n\n\n/**\n * eap_peer_tls_ssl_deinit",
+        "\tesp8266_hal_eap_trace_code('l');\n\treturn 0;\n}\n\n\n/**\n * eap_peer_tls_ssl_deinit",
+        "eap_tls_common.c ssl init success trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\ttls_in_len = data->tls_in ? wpabuf_len(data->tls_in) : 0;\n\tin_len = in_data ? wpabuf_len(in_data) : 0;",
+        "\ttls_in_len = data->tls_in ? wpabuf_len(data->tls_in) : 0;\n\tin_len = in_data ? wpabuf_len(in_data) : 0;\n\tesp8266_hal_eap_trace_code('<');\n\tesp8266_hal_eap_trace_hex32((unsigned int)data->tls_in_left);\n\tesp8266_hal_eap_trace_hex32((unsigned int)tls_in_len);\n\tesp8266_hal_eap_trace_hex32((unsigned int)in_len);",
+        "eap_tls_common.c reassembly state trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (wpabuf_resize(&data->tls_in, in_len) < 0) {\n\t\twpa_printf(MSG_INFO, \"SSL: Could not allocate memory for TLS \"\n\t\t\t   \"data\");\n\t\teap_peer_tls_reset_input(data);\n\t\treturn -1;\n\t}\n\tif (in_data)\n\t\twpabuf_put_buf(data->tls_in, in_data);\n\tdata->tls_in_left -= in_len;",
+        "\tif (wpabuf_resize(&data->tls_in, in_len) < 0) {\n\t\tesp8266_hal_eap_trace_code('!');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)in_len);\n\t\twpa_printf(MSG_INFO, \"SSL: Could not allocate memory for TLS \"\n\t\t\t   \"data\");\n\t\teap_peer_tls_reset_input(data);\n\t\treturn -1;\n\t}\n\tesp8266_hal_eap_trace_code('>');\n\tesp8266_hal_eap_trace_hex32((unsigned int)(tls_in_len + in_len));\n\tif (in_data)\n\t\twpabuf_put_buf(data->tls_in, in_data);\n\tdata->tls_in_left -= in_len;",
+        "eap_tls_common.c reassembly resize trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\twpabuf_set(&buf, in_data, in_len);\n\tmsg = eap_peer_tls_data_reassemble(data, &buf, &need_more_input);\n\tif (msg == NULL)\n\t\treturn need_more_input ? 1 : -1;",
+        "\tesp8266_hal_eap_trace_code('I');\n\tesp8266_hal_eap_trace_hex32((unsigned int)in_len);\n\twpabuf_set(&buf, in_data, in_len);\n\tmsg = eap_peer_tls_data_reassemble(data, &buf, &need_more_input);\n\tif (msg == NULL) {\n\t\tesp8266_hal_eap_trace_code('u');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)need_more_input);\n\t\treturn need_more_input ? 1 : -1;\n\t}\n\tesp8266_hal_eap_trace_code('V');\n\tesp8266_hal_eap_trace_hex32((unsigned int)wpabuf_len(msg));",
+        "eap_tls_common.c input reassembly trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tappl_data = NULL;\n\tdata->tls_out = tls_connection_handshake(data->ssl_ctx, data->conn,\n\t\t\t\t\t\t msg, &appl_data);",
+        "\tif (msg == data->tls_in) {\n\t\tesp8266_hal_eap_trace_code(']');\n\t\tdata->tls_in = NULL;\n\t\tdata->tls_in_left = data->tls_in_total = 0;\n\t}\n\tappl_data = NULL;\n\tdata->tls_out = tls_connection_handshake(data->ssl_ctx, data->conn,\n\t\t\t\t\t\t msg, &appl_data);\n\tesp8266_hal_eap_trace_code('Y');\n\tesp8266_hal_eap_trace_hex32(data->tls_out ? (unsigned int)wpabuf_len(data->tls_out) : 0xFFFFFFFFu);\n\tesp8266_hal_eap_trace_code(appl_data ? 'A' : 'a');",
+        "eap_tls_common.c handshake result trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (data->tls_out == NULL)\n\t\treturn -1;\n\tlen = wpabuf_len(data->tls_out) - data->tls_out_pos;",
+        "\tif (data->tls_out == NULL) {\n\t\tesp8266_hal_eap_trace_code('O');\n\t\treturn -1;\n\t}\n\tlen = wpabuf_len(data->tls_out) - data->tls_out_pos;\n\tesp8266_hal_eap_trace_code('o');\n\tesp8266_hal_eap_trace_hex32((unsigned int)len);\n\tesp8266_hal_eap_trace_hex32((unsigned int)wpabuf_len(data->tls_out));",
+        "eap_tls_common.c output length trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t*out_data = eap_tls_msg_alloc(eap_type, 1 + length_included * 4 + len,\n\t\t\t\t      EAP_CODE_RESPONSE, id);\n\tif (*out_data == NULL) {\n\t    printf(\"[Debug] out_data is null, return \\n\");\n\t\treturn -1;\n    } ",
+        "\t*out_data = eap_tls_msg_alloc(eap_type, 1 + length_included * 4 + len,\n\t\t\t\t      EAP_CODE_RESPONSE, id);\n\tif (*out_data == NULL) {\n\t\tesp8266_hal_eap_trace_code('z');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)(1 + length_included * 4 + len));\n\t    printf(\"[Debug] out_data is null, return \\n\");\n\t\treturn -1;\n    }\n\tesp8266_hal_eap_trace_code('Z');\n\tesp8266_hal_eap_trace_hex32((unsigned int)wpabuf_len(*out_data)); ",
+        "eap_tls_common.c output alloc trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t*out_data = NULL;\n\n\tif (data->tls_out && wpabuf_len(data->tls_out) > 0 && in_len > 0) {",
+        "\t*out_data = NULL;\n\tesp8266_hal_eap_trace_code('h');\n\tesp8266_hal_eap_trace_hex32((unsigned int)in_len);\n\n\tif (data->tls_out && wpabuf_len(data->tls_out) > 0 && in_len > 0) {",
+        "eap_tls_common.c helper entry trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (data->tls_out && wpabuf_len(data->tls_out) > 0 && in_len > 0) {\n\t\twpa_printf(MSG_DEBUG, \"SSL: Received non-ACK when output \"\n\t\t\t   \"fragments are waiting to be sent out\");\n\t\treturn -1;\n\t}",
+        "\tif (data->tls_out && wpabuf_len(data->tls_out) > 0 && in_len > 0) {\n\t\tesp8266_hal_eap_trace_code('f');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)wpabuf_len(data->tls_out));\n\t\twpa_printf(MSG_DEBUG, \"SSL: Received non-ACK when output \"\n\t\t\t   \"fragments are waiting to be sent out\");\n\t\treturn -1;\n\t}",
+        "eap_tls_common.c pending output trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t\tint res = eap_tls_process_input(sm, data, in_data, in_len,\n\t\t\t\t\t\tout_data);\n\t\tif (res) {",
+        "\t\tint res = eap_tls_process_input(sm, data, in_data, in_len,\n\t\t\t\t\t\tout_data);\n\t\tesp8266_hal_eap_trace_code('R');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)res);\n\t\tesp8266_hal_eap_trace_code(*out_data ? '1' : '0');\n\t\tif (res) {",
+        "eap_tls_common.c process input result trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (data->tls_out == NULL) {\n\t\t/*\n\t\t * No outgoing fragments remaining from the previous message\n\t\t * and no new message generated. This indicates an error in TLS\n\t\t * processing.\n\t\t */\n\t\teap_peer_tls_reset_output(data);\n\t\treturn -1;\n\t}",
+        "\tif (data->tls_out == NULL) {\n\t\tesp8266_hal_eap_trace_code('x');\n\t\t/*\n\t\t * No outgoing fragments remaining from the previous message\n\t\t * and no new message generated. This indicates an error in TLS\n\t\t * processing.\n\t\t */\n\t\teap_peer_tls_reset_output(data);\n\t\treturn -1;\n\t}",
+        "eap_tls_common.c no output trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (tls_connection_get_failed(data->ssl_ctx, data->conn)) {\n\t\t/* TLS processing has failed - return error */\n\t\twpa_printf(MSG_DEBUG, \"SSL: Failed - tls_out available to \"\n\t\t\t   \"report error\");\n\t\tret = -1;\n\t\t/* TODO: clean pin if engine used? */\n\t}",
+        "\tif (tls_connection_get_failed(data->ssl_ctx, data->conn)) {\n\t\tesp8266_hal_eap_trace_code('F');\n\t\t/* TLS processing has failed - return error */\n\t\twpa_printf(MSG_DEBUG, \"SSL: Failed - tls_out available to \"\n\t\t\t   \"report error\");\n\t\tret = -1;\n\t\t/* TODO: clean pin if engine used? */\n\t}",
+        "eap_tls_common.c tls failed trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (data->tls_out == NULL || wpabuf_len(data->tls_out) == 0) {\n\t\t/*\n\t\t * TLS negotiation should now be complete since all other cases\n\t\t * needing more data should have been caught above based on\n\t\t * the TLS Message Length field.\n\t\t */\n\t\twpa_printf(MSG_DEBUG, \"SSL: No data to be sent out\");\n\t\twpabuf_free(data->tls_out);\n\t\tdata->tls_out = NULL;\n\t\treturn 1;\n\t}",
+        "\tif (data->tls_out == NULL || wpabuf_len(data->tls_out) == 0) {\n\t\tesp8266_hal_eap_trace_code('e');\n\t\t/*\n\t\t * TLS negotiation should now be complete since all other cases\n\t\t * needing more data should have been caught above based on\n\t\t * the TLS Message Length field.\n\t\t */\n\t\twpa_printf(MSG_DEBUG, \"SSL: No data to be sent out\");\n\t\twpabuf_free(data->tls_out);\n\t\tdata->tls_out = NULL;\n\t\treturn 1;\n\t}",
+        "eap_tls_common.c empty output trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t/* Send the pending message (in fragments, if needed). */\n\treturn eap_tls_process_output(data, eap_type, peap_version, id, ret,\n\t\t\t\t      out_data);",
+        "\tesp8266_hal_eap_trace_code('P');\n\tesp8266_hal_eap_trace_hex32((unsigned int)(wpabuf_len(data->tls_out) - data->tls_out_pos));\n\t/* Send the pending message (in fragments, if needed). */\n\treturn eap_tls_process_output(data, eap_type, peap_version, id, ret,\n\t\t\t\t      out_data);",
+        "eap_tls_common.c output call trace",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched eap_tls_common.c");
+    patched
+}
+
+fn patch_tls_mbedtls_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("tls_mbedtls_patched.c");
+    let source_text = fs::read_to_string(source).expect("failed to read tls_mbedtls.c");
+    let patched_text = replace_required(
+        &source_text,
+        "struct tls_data {\n\t/* Data for mbedlts */\n\tstruct wpabuf *in_data;\n\t/* Data from mbedtls */\n\tstruct wpabuf *out_data;\n};",
+        "struct tls_data {\n\t/* Data for mbedlts */\n\tstruct wpabuf *in_data;\n\tconst u8 *in_ext_data;\n\tsize_t in_ext_len;\n\tsize_t in_ext_pos;\n\tstruct wpabuf *in_ext_owner;\n\t/* Data from mbedtls */\n\tstruct wpabuf *out_data;\n};",
+        "tls_mbedtls.c external input cursor fields",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int tls_mbedtls_read(void *ctx, unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\tstruct wpabuf *local_buf;\n\tsize_t data_len = len;\n\n\tif (len > wpabuf_len(data->in_data)) {\n\t\twpa_printf(MSG_ERROR, \"don't have suffient data\\n\");\n\t\tdata_len = wpabuf_len(data->in_data);\n\t}\n\n\tos_memcpy(buf, wpabuf_head(data->in_data), data_len);\n\t/* adjust buffer */\n\tif (len < wpabuf_len(data->in_data)) {\n\t\tlocal_buf = wpabuf_alloc_copy(wpabuf_head(data->in_data) + len,\n\t\t\t\t\t      wpabuf_len(data->in_data) - len);\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = local_buf;\n\t} else {\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = NULL;\n\t}\n\n\treturn data_len;\n}",
+        "static int tls_mbedtls_read(void *ctx, unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\tstruct wpabuf *local_buf;\n\tsize_t data_len = len;\n\n\tif (data->in_ext_data) {\n\t\tsize_t available = data->in_ext_len - data->in_ext_pos;\n\t\tif (len > available) {\n\t\t\twpa_printf(MSG_ERROR, \"don't have suffient data\\n\");\n\t\t\tdata_len = available;\n\t\t}\n\t\tos_memcpy(buf, data->in_ext_data + data->in_ext_pos, data_len);\n\t\tdata->in_ext_pos += data_len;\n\t\tif (data->in_ext_pos >= data->in_ext_len) {\n\t\t\tdata->in_ext_data = NULL;\n\t\t\tdata->in_ext_len = 0;\n\t\t\tdata->in_ext_pos = 0;\n\t\t\twpabuf_free(data->in_ext_owner);\n\t\t\tdata->in_ext_owner = NULL;\n\t\t}\n\t\treturn data_len;\n\t}\n\n\tif (!data->in_data) {\n\t\treturn MBEDTLS_ERR_SSL_WANT_READ;\n\t}\n\tif (len > wpabuf_len(data->in_data)) {\n\t\twpa_printf(MSG_ERROR, \"don't have suffient data\\n\");\n\t\tdata_len = wpabuf_len(data->in_data);\n\t}\n\n\tos_memcpy(buf, wpabuf_head(data->in_data), data_len);\n\t/* adjust buffer */\n\tif (len < wpabuf_len(data->in_data)) {\n\t\tlocal_buf = wpabuf_alloc_copy(wpabuf_head(data->in_data) + len,\n\t\t\t\t\t      wpabuf_len(data->in_data) - len);\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = local_buf;\n\t} else {\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = NULL;\n\t}\n\n\treturn data_len;\n}",
+        "tls_mbedtls.c external input cursor read",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int tls_mbedtls_write(void *ctx, const unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\n\tif (data->out_data) {\n\t\twpabuf_resize(&data->out_data, len);\n\t} else {\n\t\tdata->out_data = wpabuf_alloc(len);\n\t}\n\n\twpabuf_put_data(data->out_data, buf, len);\n\n\treturn len;\n}",
+        "static int tls_mbedtls_write(void *ctx, const unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\n\tif (data->out_data) {\n\t\tif (wpabuf_resize(&data->out_data, len) < 0) {\n\t\t\treturn MBEDTLS_ERR_SSL_ALLOC_FAILED;\n\t\t}\n\t} else {\n\t\tdata->out_data = wpabuf_alloc(len);\n\t}\n\tif (!data->out_data) {\n\t\treturn MBEDTLS_ERR_SSL_ALLOC_FAILED;\n\t}\n\n\twpabuf_put_data(data->out_data, buf, len);\n\n\treturn len;\n}",
+        "tls_mbedtls.c write allocation guard",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t/* Enable SHA1 support since it's not enabled by default in mbedtls */\n\ttls_enable_sha1_config(tls);",
+        "\t/* Enable SHA1 support since it's not enabled by default in mbedtls */\n\ttls_enable_sha1_config(tls);\n#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)\n\tmbedtls_ssl_conf_cbc_record_splitting(&tls->conf,\n\t\t\t\t\tMBEDTLS_SSL_CBC_RECORD_SPLITTING_DISABLED);\n#endif",
+        "tls_mbedtls.c disable EAP CBC record splitting",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t/* data freed by sender */\n\tconn->tls_io_data.out_data = NULL;\n\tif (wpabuf_len(in_data)) {\n\t\tconn->tls_io_data.in_data = wpabuf_dup(in_data);\n\t}\n\tret = mbedtls_ssl_handshake_step(&tls->ssl);",
+        "\t/* data freed by sender */\n\tconn->tls_io_data.out_data = NULL;\n\twpabuf_free(conn->tls_io_data.in_data);\n\tconn->tls_io_data.in_data = NULL;\n\twpabuf_free(conn->tls_io_data.in_ext_owner);\n\tconn->tls_io_data.in_ext_owner = (struct wpabuf *)in_data;\n\tconn->tls_io_data.in_ext_data = NULL;\n\tconn->tls_io_data.in_ext_len = 0;\n\tconn->tls_io_data.in_ext_pos = 0;\n\tif (wpabuf_len(in_data)) {\n\t\tconn->tls_io_data.in_ext_data = wpabuf_head_u8(in_data);\n\t\tconn->tls_io_data.in_ext_len = wpabuf_len(in_data);\n\t\tconn->tls_io_data.in_ext_pos = 0;\n\t}\n\tret = mbedtls_ssl_handshake_step(&tls->ssl);",
+        "tls_mbedtls.c handshake external input",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\twhile (conn->tls_io_data.in_data) {\n\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\tif (ret < 0)\n\t\t\tbreak;\n\t}",
+        "\twhile (conn->tls_io_data.in_data || conn->tls_io_data.in_ext_data) {\n\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\tif (ret < 0)\n\t\t\tbreak;\n\t}",
+        "tls_mbedtls.c input drain external input",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (tls->ssl.state == MBEDTLS_SSL_CLIENT_CERTIFICATE) {",
+        "\tif (tls->ssl.state == MBEDTLS_SSL_SERVER_HELLO_DONE ||\n\t    tls->ssl.state == MBEDTLS_SSL_CLIENT_CERTIFICATE) {",
+        "tls_mbedtls.c drive client flight from server hello done",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t\twhile (tls->ssl.state <= MBEDTLS_SSL_HANDSHAKE_OVER) {\n\t\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\t\tif (ret < 0) {\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}",
+        "\t\twhile (tls->ssl.state < MBEDTLS_SSL_HANDSHAKE_OVER) {\n\t\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\t\tif (ret < 0) {\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}",
+        "tls_mbedtls.c flush handshake without overstep",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "end:\n\treturn conn->tls_io_data.out_data;\n}",
+        "end:\n\tconn->tls_io_data.in_ext_data = NULL;\n\tconn->tls_io_data.in_ext_len = 0;\n\tconn->tls_io_data.in_ext_pos = 0;\n\twpabuf_free(conn->tls_io_data.in_ext_owner);\n\tconn->tls_io_data.in_ext_owner = NULL;\n\treturn conn->tls_io_data.out_data;\n}",
+        "tls_mbedtls.c handshake clear external input",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "struct wpabuf * tls_connection_decrypt(void *tls_ctx,\n\t\tstruct tls_connection *conn,\n\t\tconst struct wpabuf *in_data)\n{\n\tunsigned char buf[1200];\n\tint ret;\n\tconn->tls_io_data.in_data = wpabuf_dup(in_data);\n\tret = mbedtls_ssl_read(&conn->tls->ssl, buf, 1200);\n\tif (ret < 0) {\n\t\twpa_printf(MSG_ERROR, \"%s:%d, not able to write whole data\",\n\t\t\t\t__func__, __LINE__);\n\t\treturn NULL;\n\t}\n\n\tstruct wpabuf *out = wpabuf_alloc_copy(buf, ret);\n\n\treturn out;\n}",
+        "struct wpabuf * tls_connection_decrypt(void *tls_ctx,\n\t\tstruct tls_connection *conn,\n\t\tconst struct wpabuf *in_data)\n{\n\tunsigned char buf[1200];\n\tstruct wpabuf *out;\n\tint ret;\n\twpabuf_free(conn->tls_io_data.in_data);\n\tconn->tls_io_data.in_data = wpabuf_dup(in_data);\n\tconn->tls_io_data.in_ext_data = NULL;\n\tconn->tls_io_data.in_ext_len = 0;\n\tconn->tls_io_data.in_ext_pos = 0;\n\tif (!conn->tls_io_data.in_data) {\n\t\treturn NULL;\n\t}\n\tret = mbedtls_ssl_read(&conn->tls->ssl, buf, 1200);\n\tif (ret < 0) {\n\t\twpa_printf(MSG_ERROR, \"%s:%d, not able to write whole data\",\n\t\t\t\t__func__, __LINE__);\n\t\treturn NULL;\n\t}\n\n\tout = wpabuf_alloc_copy(buf, (size_t)ret);\n\n\treturn out;\n}",
+        "tls_mbedtls.c decrypt input ownership",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched tls_mbedtls.c");
+    patched
+}
+
+fn patch_tls_mbedtls_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("tls_mbedtls_eap_trace.c");
+    let source_text = fs::read_to_string(source).expect("failed to read tls_mbedtls.c");
+    let patched_text = replace_required(
+        &source_text,
+        "#define MAX_CIPHERSUITE 32",
+        &format!("#define MAX_CIPHERSUITE 32\n{}", eap_trace_hook()),
+        "tls_mbedtls.c EAP trace hook",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "struct tls_data {\n\t/* Data for mbedlts */\n\tstruct wpabuf *in_data;\n\t/* Data from mbedtls */\n\tstruct wpabuf *out_data;\n};",
+        "struct tls_data {\n\t/* Data for mbedlts */\n\tstruct wpabuf *in_data;\n\tconst u8 *in_ext_data;\n\tsize_t in_ext_len;\n\tsize_t in_ext_pos;\n\tstruct wpabuf *in_ext_owner;\n\t/* Data from mbedtls */\n\tstruct wpabuf *out_data;\n};",
+        "tls_mbedtls.c external input cursor fields",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int tls_mbedtls_read(void *ctx, unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\tstruct wpabuf *local_buf;\n\tsize_t data_len = len;\n\n\tif (len > wpabuf_len(data->in_data)) {\n\t\twpa_printf(MSG_ERROR, \"don't have suffient data\\n\");\n\t\tdata_len = wpabuf_len(data->in_data);\n\t}\n\n\tos_memcpy(buf, wpabuf_head(data->in_data), data_len);\n\t/* adjust buffer */\n\tif (len < wpabuf_len(data->in_data)) {\n\t\tlocal_buf = wpabuf_alloc_copy(wpabuf_head(data->in_data) + len,\n\t\t\t\t\t      wpabuf_len(data->in_data) - len);\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = local_buf;\n\t} else {\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = NULL;\n\t}\n\n\treturn data_len;\n}",
+        "static int tls_mbedtls_read(void *ctx, unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\tstruct wpabuf *local_buf;\n\tsize_t data_len = len;\n\n\tif (data->in_ext_data) {\n\t\tsize_t available = data->in_ext_len - data->in_ext_pos;\n\t\tif (len > available) {\n\t\t\twpa_printf(MSG_ERROR, \"don't have suffient data\\n\");\n\t\t\tdata_len = available;\n\t\t}\n\t\tos_memcpy(buf, data->in_ext_data + data->in_ext_pos, data_len);\n\t\tdata->in_ext_pos += data_len;\n\t\tif (data->in_ext_pos >= data->in_ext_len) {\n\t\t\tdata->in_ext_data = NULL;\n\t\t\tdata->in_ext_len = 0;\n\t\t\tdata->in_ext_pos = 0;\n\t\t\twpabuf_free(data->in_ext_owner);\n\t\t\tdata->in_ext_owner = NULL;\n\t\t}\n\t\treturn data_len;\n\t}\n\n\tif (!data->in_data) {\n\t\treturn MBEDTLS_ERR_SSL_WANT_READ;\n\t}\n\tif (len > wpabuf_len(data->in_data)) {\n\t\twpa_printf(MSG_ERROR, \"don't have suffient data\\n\");\n\t\tdata_len = wpabuf_len(data->in_data);\n\t}\n\n\tos_memcpy(buf, wpabuf_head(data->in_data), data_len);\n\t/* adjust buffer */\n\tif (len < wpabuf_len(data->in_data)) {\n\t\tlocal_buf = wpabuf_alloc_copy(wpabuf_head(data->in_data) + len,\n\t\t\t\t\t      wpabuf_len(data->in_data) - len);\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = local_buf;\n\t} else {\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = NULL;\n\t}\n\n\treturn data_len;\n}",
+        "tls_mbedtls.c external input cursor read",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int tls_mbedtls_write(void *ctx, const unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\n\tif (data->out_data) {\n\t\twpabuf_resize(&data->out_data, len);\n\t} else {\n\t\tdata->out_data = wpabuf_alloc(len);\n\t}\n\n\twpabuf_put_data(data->out_data, buf, len);\n\n\treturn len;\n}",
+        "static int tls_mbedtls_write(void *ctx, const unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\tesp8266_hal_eap_trace_code('w');\n\tesp8266_hal_eap_trace_hex32((unsigned int)len);\n\n\tif (data->out_data) {\n\t\twpabuf_resize(&data->out_data, len);\n\t} else {\n\t\tdata->out_data = wpabuf_alloc(len);\n\t}\n\tif (!data->out_data) {\n\t\tesp8266_hal_eap_trace_code('W');\n\t\treturn MBEDTLS_ERR_SSL_ALLOC_FAILED;\n\t}\n\n\twpabuf_put_data(data->out_data, buf, len);\n\n\treturn len;\n}",
+        "tls_mbedtls.c write allocation trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tret = mbedtls_ssl_config_defaults(&tls->conf,\n\t\t\t\t\tMBEDTLS_SSL_IS_CLIENT,\n\t\t\t\t\tMBEDTLS_SSL_TRANSPORT_STREAM,\n\t\t\t\t\tMBEDTLS_SSL_PRESET_DEFAULT);\n\tif (ret != 0) {\n\t\twpa_printf(MSG_ERROR, \"mbedtls_ssl_config_defaults returned -0x%x\", -ret);\n\t\treturn ret;\n\t}",
+        "\tesp8266_hal_eap_trace_code('D');\n\tret = mbedtls_ssl_config_defaults(&tls->conf,\n\t\t\t\t\tMBEDTLS_SSL_IS_CLIENT,\n\t\t\t\t\tMBEDTLS_SSL_TRANSPORT_STREAM,\n\t\t\t\t\tMBEDTLS_SSL_PRESET_DEFAULT);\n\tif (ret != 0) {\n\t\tesp8266_hal_eap_trace_code('d');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\t\twpa_printf(MSG_ERROR, \"mbedtls_ssl_config_defaults returned -0x%x\", -ret);\n\t\treturn ret;\n\t}\n\tesp8266_hal_eap_trace_code('P');",
+        "tls_mbedtls.c config defaults trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t/* Enable SHA1 support since it's not enabled by default in mbedtls */\n\ttls_enable_sha1_config(tls);",
+        "\t/* Enable SHA1 support since it's not enabled by default in mbedtls */\n\ttls_enable_sha1_config(tls);\n#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)\n\tesp8266_hal_eap_trace_code('m');\n\tmbedtls_ssl_conf_cbc_record_splitting(&tls->conf,\n\t\t\t\t\tMBEDTLS_SSL_CBC_RECORD_SPLITTING_DISABLED);\n#endif",
+        "tls_mbedtls.c disable EAP CBC record splitting",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\ttls_set_ciphersuite(tls);\n\n\treturn 0;\n}\n\nstatic int tls_create_mbedtls_handle",
+        "\ttls_set_ciphersuite(tls);\n\tesp8266_hal_eap_trace_code('Q');\n\n\treturn 0;\n}\n\nstatic int tls_create_mbedtls_handle",
+        "tls_mbedtls.c client config success trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tmbedtls_ssl_init(&tls->ssl);\n\tmbedtls_ctr_drbg_init(&tls->ctr_drbg);\n\tmbedtls_ssl_config_init(&tls->conf);\n\tmbedtls_entropy_init(&tls->entropy);\n\n\tret = set_client_config(params, tls);\n\tif (ret != 0) {\n\t\twpa_printf(MSG_ERROR, \"Failed to set client configurations\");\n\t\tgoto exit;\n\t}\n\n\tret = mbedtls_ctr_drbg_seed(&tls->ctr_drbg, mbedtls_entropy_func,\n\t\t\t\t    &tls->entropy, NULL, 0);\n\tif (ret != 0) {\n\t\twpa_printf(MSG_ERROR, \"mbedtls_ctr_drbg_seed returned -0x%x\", -ret);\n\t\tgoto exit;\n\t}\n\n\tmbedtls_ssl_conf_rng(&tls->conf, mbedtls_ctr_drbg_random, &tls->ctr_drbg);\n\n\tret = mbedtls_ssl_setup(&tls->ssl, &tls->conf);\n\tif (ret != 0) {\n\t\twpa_printf(MSG_ERROR, \"mbedtls_ssl_setup returned -0x%x\", -ret);\n\t\tgoto exit;\n\t}",
+        "\tmbedtls_ssl_init(&tls->ssl);\n\tmbedtls_ctr_drbg_init(&tls->ctr_drbg);\n\tmbedtls_ssl_config_init(&tls->conf);\n\tmbedtls_entropy_init(&tls->entropy);\n\tesp8266_hal_eap_trace_code('G');\n\n\tesp8266_hal_eap_trace_code('A');\n\tret = set_client_config(params, tls);\n\tif (ret != 0) {\n\t\tesp8266_hal_eap_trace_code('a');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\t\twpa_printf(MSG_ERROR, \"Failed to set client configurations\");\n\t\tgoto exit;\n\t}\n\tesp8266_hal_eap_trace_code('B');\n\n\tesp8266_hal_eap_trace_code('E');\n\tret = mbedtls_ctr_drbg_seed(&tls->ctr_drbg, mbedtls_entropy_func,\n\t\t\t\t    &tls->entropy, NULL, 0);\n\tif (ret != 0) {\n\t\tesp8266_hal_eap_trace_code('e');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\t\twpa_printf(MSG_ERROR, \"mbedtls_ctr_drbg_seed returned -0x%x\", -ret);\n\t\tgoto exit;\n\t}\n\tesp8266_hal_eap_trace_code('F');\n\n\tmbedtls_ssl_conf_rng(&tls->conf, mbedtls_ctr_drbg_random, &tls->ctr_drbg);\n\n\tesp8266_hal_eap_trace_code('U');\n\tret = mbedtls_ssl_setup(&tls->ssl, &tls->conf);\n\tif (ret != 0) {\n\t\tesp8266_hal_eap_trace_code('u');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\t\twpa_printf(MSG_ERROR, \"mbedtls_ssl_setup returned -0x%x\", -ret);\n\t\tgoto exit;\n\t}\n\tesp8266_hal_eap_trace_code('V');",
+        "tls_mbedtls.c handle creation trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\ttls_context_t *tls = (tls_context_t *)os_zalloc(sizeof(tls_context_t));\n\n\tif (!tls) {\n\t\twpa_printf(MSG_ERROR, \"failed to allocate tls context\");\n\t\treturn -1;\n\t}\n\tif (!params) {\n\t\twpa_printf(MSG_ERROR, \"configuration is null\");\n\t\tret = -1;\n\t\tgoto err;\n\t}\n\n\tret = tls_create_mbedtls_handle(params, tls);\n\tif (ret < 0) {\n\t\twpa_printf(MSG_ERROR, \"failed to create ssl handle\");\n\t\tgoto err;\n\t}\n\tmbedtls_ssl_set_bio(&tls->ssl, conn, tls_mbedtls_write, tls_mbedtls_read, NULL);\n\tconn->tls = (tls_context_t *)tls;\n\n\treturn ret;\nerr:\n\tos_free(tls);\n\treturn ret;",
+        "\tesp8266_hal_eap_trace_code('X');\n\ttls_context_t *tls = (tls_context_t *)os_zalloc(sizeof(tls_context_t));\n\n\tif (!tls) {\n\t\tesp8266_hal_eap_trace_code('x');\n\t\twpa_printf(MSG_ERROR, \"failed to allocate tls context\");\n\t\treturn -1;\n\t}\n\tif (!params) {\n\t\tesp8266_hal_eap_trace_code('p');\n\t\twpa_printf(MSG_ERROR, \"configuration is null\");\n\t\tret = -1;\n\t\tgoto err;\n\t}\n\n\tesp8266_hal_eap_trace_code('Y');\n\tret = tls_create_mbedtls_handle(params, tls);\n\tif (ret < 0) {\n\t\tesp8266_hal_eap_trace_code('y');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\t\twpa_printf(MSG_ERROR, \"failed to create ssl handle\");\n\t\tgoto err;\n\t}\n\tesp8266_hal_eap_trace_code('Z');\n\tmbedtls_ssl_set_bio(&tls->ssl, conn, tls_mbedtls_write, tls_mbedtls_read, NULL);\n\tconn->tls = (tls_context_t *)tls;\n\n\treturn ret;\nerr:\n\tos_free(tls);\n\treturn ret;",
+        "tls_mbedtls.c set params trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t/* data freed by sender */\n\tconn->tls_io_data.out_data = NULL;\n\tif (wpabuf_len(in_data)) {\n\t\tconn->tls_io_data.in_data = wpabuf_dup(in_data);\n\t}\n\tret = mbedtls_ssl_handshake_step(&tls->ssl);",
+        "\t/* data freed by sender */\n\tconn->tls_io_data.out_data = NULL;\n\twpabuf_free(conn->tls_io_data.in_data);\n\tconn->tls_io_data.in_data = NULL;\n\twpabuf_free(conn->tls_io_data.in_ext_owner);\n\tconn->tls_io_data.in_ext_owner = (struct wpabuf *)in_data;\n\tconn->tls_io_data.in_ext_data = NULL;\n\tconn->tls_io_data.in_ext_len = 0;\n\tconn->tls_io_data.in_ext_pos = 0;\n\tif (wpabuf_len(in_data)) {\n\t\tesp8266_hal_eap_trace_code('i');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)wpabuf_len(in_data));\n\t\tconn->tls_io_data.in_ext_data = wpabuf_head_u8(in_data);\n\t\tconn->tls_io_data.in_ext_len = wpabuf_len(in_data);\n\t\tconn->tls_io_data.in_ext_pos = 0;\n\t}\n\tesp8266_hal_eap_trace_code('h');\n\tret = mbedtls_ssl_handshake_step(&tls->ssl);",
+        "tls_mbedtls.c handshake external input",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tesp8266_hal_eap_trace_code('h');\n\tret = mbedtls_ssl_handshake_step(&tls->ssl);",
+        "\tesp8266_hal_eap_trace_code('h');\n\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\tesp8266_hal_eap_trace_code('r');\n\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\tesp8266_hal_eap_trace_hex32((unsigned int)tls->ssl.state);",
+        "tls_mbedtls.c first handshake step trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\twhile (conn->tls_io_data.in_data) {\n\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\tif (ret < 0)\n\t\t\tbreak;\n\t}",
+        "\twhile (conn->tls_io_data.in_data || conn->tls_io_data.in_ext_data) {\n\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\tesp8266_hal_eap_trace_code('r');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)tls->ssl.state);\n\t\tif (ret < 0)\n\t\t\tbreak;\n\t}",
+        "tls_mbedtls.c input drain handshake trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (tls->ssl.state == MBEDTLS_SSL_CLIENT_HELLO) {\n\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t}",
+        "\tif (tls->ssl.state == MBEDTLS_SSL_CLIENT_HELLO) {\n\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\tesp8266_hal_eap_trace_code('r');\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\t\tesp8266_hal_eap_trace_hex32((unsigned int)tls->ssl.state);\n\t}",
+        "tls_mbedtls.c client hello handshake trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tif (tls->ssl.state == MBEDTLS_SSL_CLIENT_CERTIFICATE) {",
+        "\tif (tls->ssl.state == MBEDTLS_SSL_SERVER_HELLO_DONE ||\n\t    tls->ssl.state == MBEDTLS_SSL_CLIENT_CERTIFICATE) {",
+        "tls_mbedtls.c drive client flight from server hello done",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t\twhile (tls->ssl.state <= MBEDTLS_SSL_CLIENT_FINISHED) {\n\t\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\t\tif (ret < 0) {\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}",
+        "\t\twhile (tls->ssl.state <= MBEDTLS_SSL_CLIENT_FINISHED) {\n\t\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\t\tesp8266_hal_eap_trace_code('r');\n\t\t\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\t\t\tesp8266_hal_eap_trace_hex32((unsigned int)tls->ssl.state);\n\t\t\tif (ret < 0) {\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}",
+        "tls_mbedtls.c client finished handshake trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\t\twhile (tls->ssl.state <= MBEDTLS_SSL_HANDSHAKE_OVER) {\n\t\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\t\tif (ret < 0) {\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}",
+        "\t\twhile (tls->ssl.state < MBEDTLS_SSL_HANDSHAKE_OVER) {\n\t\t\tret = mbedtls_ssl_handshake_step(&tls->ssl);\n\t\t\tesp8266_hal_eap_trace_code('r');\n\t\t\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\t\t\tesp8266_hal_eap_trace_hex32((unsigned int)tls->ssl.state);\n\t\t\tif (ret < 0) {\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}",
+        "tls_mbedtls.c flush handshake trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "end:\n\treturn conn->tls_io_data.out_data;\n}",
+        "end:\n\tconn->tls_io_data.in_ext_data = NULL;\n\tconn->tls_io_data.in_ext_len = 0;\n\tconn->tls_io_data.in_ext_pos = 0;\n\twpabuf_free(conn->tls_io_data.in_ext_owner);\n\tconn->tls_io_data.in_ext_owner = NULL;\n\tesp8266_hal_eap_trace_code(conn->tls_io_data.out_data ? 'o' : 'O');\n\treturn conn->tls_io_data.out_data;\n}",
+        "tls_mbedtls.c handshake output trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "struct wpabuf * tls_connection_encrypt(void *tls_ctx,\n\t\t\t\t       struct tls_connection *conn,\n\t\t\t\t       const struct wpabuf *in_data)\n{\n\t/* Reset dangling pointer */\n\tconn->tls_io_data.out_data = NULL;\n\n\tssize_t ret = mbedtls_ssl_write(&conn->tls->ssl,\n\t\t\t(unsigned char*) wpabuf_head(in_data),  wpabuf_len(in_data));\n\n\tif (ret < wpabuf_len(in_data)) {\n\t\twpa_printf(MSG_ERROR, \"%s:%d, not able to write whole data\",\n\t\t\t   __func__, __LINE__);\n\t}\n\n\treturn conn->tls_io_data.out_data;\n}",
+        "struct wpabuf * tls_connection_encrypt(void *tls_ctx,\n\t\t\t\t       struct tls_connection *conn,\n\t\t\t\t       const struct wpabuf *in_data)\n{\n\tsize_t out_len;\n\t/* Reset dangling pointer */\n\tconn->tls_io_data.out_data = NULL;\n\tesp8266_hal_eap_trace_code('e');\n\tesp8266_hal_eap_trace_hex32((unsigned int)wpabuf_len(in_data));\n\tif (wpabuf_len(in_data) > 0) {\n\t\tesp8266_hal_eap_trace_hex8((unsigned int)wpabuf_head_u8(in_data)[0]);\n\t}\n\n\tssize_t ret = mbedtls_ssl_write(&conn->tls->ssl,\n\t\t\t(unsigned char*) wpabuf_head(in_data),  wpabuf_len(in_data));\n\tout_len = conn->tls_io_data.out_data ? wpabuf_len(conn->tls_io_data.out_data) : 0;\n\tesp8266_hal_eap_trace_code('v');\n\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\tesp8266_hal_eap_trace_hex32((unsigned int)out_len);\n\n\tif (ret < 0 || (size_t)ret < wpabuf_len(in_data)) {\n\t\tesp8266_hal_eap_trace_code('V');\n\t\twpa_printf(MSG_ERROR, \"%s:%d, not able to write whole data\",\n\t\t\t   __func__, __LINE__);\n\t}\n\n\treturn conn->tls_io_data.out_data;\n}",
+        "tls_mbedtls.c encrypt trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "struct wpabuf * tls_connection_decrypt(void *tls_ctx,\n\t\tstruct tls_connection *conn,\n\t\tconst struct wpabuf *in_data)\n{\n\tunsigned char buf[1200];\n\tint ret;\n\tconn->tls_io_data.in_data = wpabuf_dup(in_data);\n\tret = mbedtls_ssl_read(&conn->tls->ssl, buf, 1200);\n\tif (ret < 0) {\n\t\twpa_printf(MSG_ERROR, \"%s:%d, not able to write whole data\",\n\t\t\t\t__func__, __LINE__);\n\t\treturn NULL;\n\t}\n\n\tstruct wpabuf *out = wpabuf_alloc_copy(buf, ret);\n\n\treturn out;\n}",
+        "struct wpabuf * tls_connection_decrypt(void *tls_ctx,\n\t\tstruct tls_connection *conn,\n\t\tconst struct wpabuf *in_data)\n{\n\tunsigned char buf[1200];\n\tstruct wpabuf *out;\n\tint ret;\n\tesp8266_hal_eap_trace_code('d');\n\tesp8266_hal_eap_trace_hex32((unsigned int)wpabuf_len(in_data));\n\twpabuf_free(conn->tls_io_data.in_data);\n\tconn->tls_io_data.in_data = wpabuf_dup(in_data);\n\tconn->tls_io_data.in_ext_data = NULL;\n\tconn->tls_io_data.in_ext_len = 0;\n\tconn->tls_io_data.in_ext_pos = 0;\n\tret = mbedtls_ssl_read(&conn->tls->ssl, buf, 1200);\n\tesp8266_hal_eap_trace_code('D');\n\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\tif (ret < 0) {\n\t\twpa_printf(MSG_ERROR, \"%s:%d, not able to write whole data\",\n\t\t\t\t__func__, __LINE__);\n\t\treturn NULL;\n\t}\n\n\tout = wpabuf_alloc_copy(buf, (size_t)ret);\n\tesp8266_hal_eap_trace_code(out ? 'O' : 'Q');\n\tesp8266_hal_eap_trace_hex32((unsigned int)ret);\n\treturn out;\n}",
+        "tls_mbedtls.c decrypt trace",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched tls_mbedtls.c");
+    patched
+}
+
+fn patch_aes_internal_source(source: &Path, out_dir: &Path) -> PathBuf {
+    patch_aes_i_header(source, out_dir);
+    let patched = out_dir.join("aes_internal_aligned_irom_tables.c");
+    let source_text = fs::read_to_string(source).expect("failed to read aes-internal.c");
+    let patched_text = replace_required(
+        &source_text,
+        "#define AES_SMALL_TABLES",
+        "/* ESP8266 IROM supports aligned 32-bit loads, but the small-table AES\n * mode emits byte loads from Te0/Td0 and faults when ESP-NOW encryption sets up\n * peer keys. Keep the full tables in flash instead. */\n/* #define AES_SMALL_TABLES */",
+        "aes-internal.c aligned IROM tables",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched aes-internal.c");
+    patched
+}
+
+fn patch_aes_internal_user_source(source: &Path, out_dir: &Path) -> PathBuf {
+    patch_aes_i_header(source, out_dir);
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("AES source file has no UTF-8 name");
+    let patched = out_dir.join(format!("{}_aligned_irom.c", file_name.replace('-', "_")));
+    let source_text = fs::read_to_string(source).expect("failed to read AES helper source");
+    fs::write(&patched, source_text).expect("failed to write patched AES helper source");
+    patched
+}
+
+fn patch_aes_i_header(source: &Path, out_dir: &Path) {
+    let header = source
+        .parent()
+        .expect("AES source has no parent directory")
+        .join("aes_i.h");
+    let source_text = fs::read_to_string(header).expect("failed to read aes_i.h");
+    let patched_text = replace_required(
+        &source_text,
+        "#define AES_SMALL_TABLES",
+        "/* ESP8266 IROM supports aligned 32-bit loads, but byte loads from\n * flash-mapped AES tables fault. Keep the full-table macros. */\n/* #define AES_SMALL_TABLES */",
+        "aes_i.h aligned IROM table macros",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        r#"#ifndef AES_SMALL_TABLES
+
+#define RCON(i) rcon[(i)]
+
+#define TE0(i) Te0[((i) >> 24) & 0xff]
+#define TE1(i) Te1[((i) >> 16) & 0xff]
+#define TE2(i) Te2[((i) >> 8) & 0xff]
+#define TE3(i) Te3[(i) & 0xff]
+#define TE41(i) (Te4[((i) >> 24) & 0xff] & 0xff000000)
+#define TE42(i) (Te4[((i) >> 16) & 0xff] & 0x00ff0000)
+#define TE43(i) (Te4[((i) >> 8) & 0xff] & 0x0000ff00)
+#define TE44(i) (Te4[(i) & 0xff] & 0x000000ff)
+#define TE421(i) (Te4[((i) >> 16) & 0xff] & 0xff000000)
+#define TE432(i) (Te4[((i) >> 8) & 0xff] & 0x00ff0000)
+#define TE443(i) (Te4[(i) & 0xff] & 0x0000ff00)
+#define TE414(i) (Te4[((i) >> 24) & 0xff] & 0x000000ff)
+#define TE411(i) (Te4[((i) >> 24) & 0xff] & 0xff000000)
+#define TE422(i) (Te4[((i) >> 16) & 0xff] & 0x00ff0000)
+#define TE433(i) (Te4[((i) >> 8) & 0xff] & 0x0000ff00)
+#define TE444(i) (Te4[(i) & 0xff] & 0x000000ff)
+#define TE4(i) (Te4[(i)] & 0x000000ff)
+
+#define TD0(i) Td0[((i) >> 24) & 0xff]
+#define TD1(i) Td1[((i) >> 16) & 0xff]
+#define TD2(i) Td2[((i) >> 8) & 0xff]
+#define TD3(i) Td3[(i) & 0xff]
+#define TD41(i) (Td4[((i) >> 24) & 0xff] & 0xff000000)
+#define TD42(i) (Td4[((i) >> 16) & 0xff] & 0x00ff0000)
+#define TD43(i) (Td4[((i) >> 8) & 0xff] & 0x0000ff00)
+#define TD44(i) (Td4[(i) & 0xff] & 0x000000ff)
+#define TD0_(i) Td0[(i) & 0xff]
+#define TD1_(i) Td1[(i) & 0xff]
+#define TD2_(i) Td2[(i) & 0xff]
+#define TD3_(i) Td3[(i) & 0xff]
+
+#else /* AES_SMALL_TABLES */"#,
+        r#"#ifndef AES_SMALL_TABLES
+
+#define AES_TABLE_LOAD(table, index) (((const volatile u32 *)(table))[(index)])
+
+#define RCON(i) AES_TABLE_LOAD(rcon, (i))
+
+#define TE0(i) AES_TABLE_LOAD(Te0, (((i) >> 24) & 0xff))
+#define TE1(i) AES_TABLE_LOAD(Te1, (((i) >> 16) & 0xff))
+#define TE2(i) AES_TABLE_LOAD(Te2, (((i) >> 8) & 0xff))
+#define TE3(i) AES_TABLE_LOAD(Te3, ((i) & 0xff))
+#define TE41(i) (AES_TABLE_LOAD(Te4, (((i) >> 24) & 0xff)) & 0xff000000)
+#define TE42(i) (AES_TABLE_LOAD(Te4, (((i) >> 16) & 0xff)) & 0x00ff0000)
+#define TE43(i) (AES_TABLE_LOAD(Te4, (((i) >> 8) & 0xff)) & 0x0000ff00)
+#define TE44(i) (AES_TABLE_LOAD(Te4, ((i) & 0xff)) & 0x000000ff)
+#define TE421(i) (AES_TABLE_LOAD(Te4, (((i) >> 16) & 0xff)) & 0xff000000)
+#define TE432(i) (AES_TABLE_LOAD(Te4, (((i) >> 8) & 0xff)) & 0x00ff0000)
+#define TE443(i) (AES_TABLE_LOAD(Te4, ((i) & 0xff)) & 0x0000ff00)
+#define TE414(i) (AES_TABLE_LOAD(Te4, (((i) >> 24) & 0xff)) & 0x000000ff)
+#define TE411(i) (AES_TABLE_LOAD(Te4, (((i) >> 24) & 0xff)) & 0xff000000)
+#define TE422(i) (AES_TABLE_LOAD(Te4, (((i) >> 16) & 0xff)) & 0x00ff0000)
+#define TE433(i) (AES_TABLE_LOAD(Te4, (((i) >> 8) & 0xff)) & 0x0000ff00)
+#define TE444(i) (AES_TABLE_LOAD(Te4, ((i) & 0xff)) & 0x000000ff)
+#define TE4(i) (AES_TABLE_LOAD(Te4, (i)) & 0x000000ff)
+
+#define TD0(i) AES_TABLE_LOAD(Td0, (((i) >> 24) & 0xff))
+#define TD1(i) AES_TABLE_LOAD(Td1, (((i) >> 16) & 0xff))
+#define TD2(i) AES_TABLE_LOAD(Td2, (((i) >> 8) & 0xff))
+#define TD3(i) AES_TABLE_LOAD(Td3, ((i) & 0xff))
+#define TD41(i) (AES_TABLE_LOAD(Td4, (((i) >> 24) & 0xff)) & 0xff000000)
+#define TD42(i) (AES_TABLE_LOAD(Td4, (((i) >> 16) & 0xff)) & 0x00ff0000)
+#define TD43(i) (AES_TABLE_LOAD(Td4, (((i) >> 8) & 0xff)) & 0x0000ff00)
+#define TD44(i) (AES_TABLE_LOAD(Td4, ((i) & 0xff)) & 0x000000ff)
+#define TD0_(i) AES_TABLE_LOAD(Td0, ((i) & 0xff))
+#define TD1_(i) AES_TABLE_LOAD(Td1, ((i) & 0xff))
+#define TD2_(i) AES_TABLE_LOAD(Td2, ((i) & 0xff))
+#define TD3_(i) AES_TABLE_LOAD(Td3, ((i) & 0xff))
+
+#else /* AES_SMALL_TABLES */"#,
+        "aes_i.h volatile 32-bit table loads",
+    );
+    fs::write(out_dir.join("aes_i.h"), patched_text).expect("failed to write patched aes_i.h");
 }
 
 fn patch_esp_wps_source(source: &Path, out_dir: &Path) -> PathBuf {
@@ -2060,6 +2811,12 @@ fn patch_esp_wps_source(source: &Path, out_dir: &Path) -> PathBuf {
     );
     let patched_text = replace_required(
         &patched_text,
+        "        ets_timer_disarm(&sm->wps_success_cb_timer);\n        ets_timer_arm(&sm->wps_success_cb_timer, 1000, 0);\n\n        ret = 0;",
+        "        ets_timer_disarm(&sm->wps_success_cb_timer);\n        wifi_station_wps_success_internal();\n\n        ret = 0;",
+        "esp_wps.c immediate WPS success callback",
+    );
+    let patched_text = replace_required(
+        &patched_text,
         "    esp_wifi_disarm_sta_connection_timer_internal();\n\n    wps_set_status(WPS_STATUS_DISABLE);",
         "    esp8266_hal_wps_trace_char('~');\n    esp8266_hal_wps_trace_char('T');\n    esp8266_hal_wps_trace_hex8(sm->wps->state);\n    esp8266_hal_wps_trace_hex8(wps_get_status());\n\n    esp_wifi_disarm_sta_connection_timer_internal();\n\n    wps_set_status(WPS_STATUS_DISABLE);",
         "esp_wps.c timeout trace",
@@ -2152,6 +2909,38 @@ fn patch_wps_enrollee_source(source: &Path, out_dir: &Path) -> PathBuf {
     patched
 }
 
+fn patch_ssl_tls_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("ssl_tls_patched.c");
+    let source_text = fs::read_to_string(source).expect("failed to read ssl_tls.c");
+    let patched_text = replace_required(
+        &source_text,
+        "    if( src->peer_cert != NULL )\n    {\n        int ret;\n\n        dst->peer_cert = mbedtls_calloc( 1, sizeof(mbedtls_x509_crt) );\n        if( dst->peer_cert == NULL )\n            return( MBEDTLS_ERR_SSL_ALLOC_FAILED );\n\n        mbedtls_x509_crt_init( dst->peer_cert );\n\n        if( ( ret = mbedtls_x509_crt_parse_der( dst->peer_cert, src->peer_cert->raw.p,\n                                        src->peer_cert->raw.len ) ) != 0 )\n        {\n            mbedtls_free( dst->peer_cert );\n            dst->peer_cert = NULL;\n            return( ret );\n        }\n    }",
+        "    if( src->peer_cert != NULL &&\n        src->peer_cert->raw.p != NULL && src->peer_cert->raw.len != 0 )\n    {\n        int ret;\n\n        dst->peer_cert = mbedtls_calloc( 1, sizeof(mbedtls_x509_crt) );\n        if( dst->peer_cert == NULL )\n            return( MBEDTLS_ERR_SSL_ALLOC_FAILED );\n\n        mbedtls_x509_crt_init( dst->peer_cert );\n\n        if( ( ret = mbedtls_x509_crt_parse_der( dst->peer_cert, src->peer_cert->raw.p,\n                                        src->peer_cert->raw.len ) ) != 0 )\n        {\n            mbedtls_free( dst->peer_cert );\n            dst->peer_cert = NULL;\n            return( ret );\n        }\n    }\n    else\n    {\n        dst->peer_cert = NULL;\n    }",
+        "ssl_tls.c rawless peer cert session copy",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    ssl->state++;\n\n    MBEDTLS_SSL_DEBUG_MSG( 2, ( \"<= parse certificate\" ) );\n\n    return( ret );",
+        "    if( ret == 0 && ssl->conf->endpoint == MBEDTLS_SSL_IS_CLIENT &&\n        ssl->session_negotiate != NULL &&\n        ssl->session_negotiate->peer_cert != NULL )\n    {\n        mbedtls_x509_crt *cert = ssl->session_negotiate->peer_cert;\n        while( cert != NULL )\n        {\n            if( cert->raw.p != NULL )\n            {\n                mbedtls_platform_zeroize( cert->raw.p, cert->raw.len );\n                mbedtls_free( cert->raw.p );\n                cert->raw.p = NULL;\n                cert->raw.len = 0;\n                cert->tbs.p = NULL;\n                cert->tbs.len = 0;\n                cert->issuer_raw.p = NULL;\n                cert->issuer_raw.len = 0;\n                cert->subject_raw.p = NULL;\n                cert->subject_raw.len = 0;\n                cert->sig_oid.p = NULL;\n                cert->sig_oid.len = 0;\n                cert->sig.p = NULL;\n                cert->sig.len = 0;\n            }\n            cert = cert->next;\n        }\n    }\n\n    ssl->state++;\n\n    MBEDTLS_SSL_DEBUG_MSG( 2, ( \"<= parse certificate\" ) );\n\n    return( ret );",
+        "ssl_tls.c drop verified peer cert raw der",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched ssl_tls.c");
+    patched
+}
+
+fn patch_ssl_cli_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("ssl_cli_patched.c");
+    let source_text = fs::read_to_string(source).expect("failed to read ssl_cli.c");
+    let patched_text = replace_required(
+        &source_text,
+        "    if( ( ret = mbedtls_pk_encrypt( &ssl->session_negotiate->peer_cert->pk,\n                            p, ssl->handshake->pmslen,\n                            ssl->out_msg + offset + len_bytes, olen,\n                            MBEDTLS_SSL_OUT_CONTENT_LEN - offset - len_bytes,\n                            ssl->conf->f_rng, ssl->conf->p_rng ) ) != 0 )\n    {\n        MBEDTLS_SSL_DEBUG_RET( 1, \"mbedtls_rsa_pkcs1_encrypt\", ret );\n        return( ret );\n    }",
+        "    extern void esp8266_hal_eap_rsa_reserve(void);\n    extern void esp8266_hal_eap_rsa_release(void);\n\n    esp8266_hal_eap_rsa_reserve();\n    if( ( ret = mbedtls_pk_encrypt( &ssl->session_negotiate->peer_cert->pk,\n                            p, ssl->handshake->pmslen,\n                            ssl->out_msg + offset + len_bytes, olen,\n                            MBEDTLS_SSL_OUT_CONTENT_LEN - offset - len_bytes,\n                            ssl->conf->f_rng, ssl->conf->p_rng ) ) != 0 )\n    {\n        esp8266_hal_eap_rsa_release();\n        MBEDTLS_SSL_DEBUG_RET( 1, \"mbedtls_rsa_pkcs1_encrypt\", ret );\n        return( ret );\n    }\n    esp8266_hal_eap_rsa_release();",
+        "ssl_cli.c RSA premaster reserve",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched ssl_cli.c");
+    patched
+}
+
 fn replace_required(source: &str, from: &str, to: &str, label: &str) -> String {
     let patched = source.replace(from, to);
     assert_ne!(patched, source, "failed to patch {label}");
@@ -2159,12 +2948,24 @@ fn replace_required(source: &str, from: &str, to: &str, label: &str) -> String {
 }
 
 /// Compile mbedTLS sources needed by wpa_supplicant and the TLS stack.
-fn compile_mbedtls(sdk: &Path, include_paths: &[PathBuf], _out_dir: &Path, gcc: Option<&str>) {
+fn compile_mbedtls(sdk: &Path, include_paths: &[PathBuf], out_dir: &Path, gcc: Option<&str>) {
     let mut build = cc::Build::new();
     init_cc_build(&mut build, gcc, include_paths);
+    let config_file = if env::var_os(MBEDTLS_SOFTWARE_AES_ENV).is_some() {
+        let shim = out_dir.join("esp_config_software_aes.h");
+        fs::write(
+            &shim,
+            "#include \"mbedtls/esp_config.h\"\n#undef MBEDTLS_AES_ALT\n",
+        )
+        .expect("failed to write software-AES mbedTLS config shim");
+        "esp_config_software_aes.h"
+    } else {
+        "mbedtls/esp_config.h"
+    };
     build
-        .define("MBEDTLS_CONFIG_FILE", "\"mbedtls/esp_config.h\"")
-        .define("CONFIG_SSL_USING_MBEDTLS", None);
+        .define("MBEDTLS_CONFIG_FILE", format!("\"{config_file}\"").as_str())
+        .define("CONFIG_SSL_USING_MBEDTLS", None)
+        .define("USING_IBUS_FASTER_GET", None);
 
     // mbedTLS library sources from the upstream mbedtls/library/ directory.
     let mbed_lib = sdk.join("components/mbedtls/mbedtls/library");
@@ -2245,7 +3046,17 @@ fn compile_mbedtls(sdk: &Path, include_paths: &[PathBuf], _out_dir: &Path, gcc: 
     for src in &mbed_srcs {
         let path = mbed_lib.join(src);
         if path.exists() {
-            build.file(&path);
+            match *src {
+                "ssl_cli.c" => {
+                    build.file(patch_ssl_cli_source(&path, out_dir));
+                }
+                "ssl_tls.c" => {
+                    build.file(patch_ssl_tls_source(&path, out_dir));
+                }
+                _ => {
+                    build.file(&path);
+                }
+            }
         }
     }
 

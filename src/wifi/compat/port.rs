@@ -325,7 +325,6 @@ pub unsafe fn set_isr_context(active: bool) {
 /// frame on return, so a compat task switch must overwrite that live frame
 /// with the selected task's saved frame before control returns to the outer
 /// xtensa-lx-rt restore sequence.
-#[inline(never)]
 #[ram]
 pub unsafe fn apply_pending_context_switch(frame: *mut u8) {
     unsafe {
@@ -616,10 +615,7 @@ pub unsafe extern "C" fn xPortStartScheduler() -> i32 {
         task::vTaskSwitchContext();
 
         // Jump to the first task — this never returns.
-        compat_enter_first_task();
-
-        // Unreachable
-        1
+        compat_enter_first_task()
     }
 }
 

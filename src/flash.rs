@@ -21,6 +21,7 @@ mod cache {
     use core::ops::{Deref, DerefMut};
     use esp8266::SPI0;
 
+    #[allow(dead_code)]
     pub(crate) fn cache_enable(_spi0: &mut SPI0, _mb: u8) {
         // noop
     }
@@ -50,6 +51,7 @@ mod cache {
     }
 }
 
+#[cfg(feature = "rt")]
 pub(crate) use cache::cache_enable;
 use cache::CachePauseGuard;
 use core::ptr::{read_volatile, write_volatile};

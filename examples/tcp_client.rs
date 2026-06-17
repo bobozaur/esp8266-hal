@@ -9,7 +9,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_time::Duration;
 use embedded_io_async::Write as IoWrite;
 
-use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverState};
+use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverStateWithMtu};
 use esp8266_hal::wifi::{
     Channel, ClientConfig, Credential, Esp8266TargetBackend, InitConfig, Ipv4Addr as CoreIpv4Addr,
     Passphrase, Ssid, StaMode, Started, StaticIpv4Config, WifiDriver, WifiResources,
@@ -41,9 +41,12 @@ const STATIC_GATEWAY: Option<&str> = option_env!("ESP8266_HAL_STATIC_GATEWAY");
 const WIFI_CHANNEL: Option<&str> = option_env!("ESP8266_HAL_WIFI_CHANNEL");
 const NET_RX_PACKETS: usize = 1;
 const NET_TX_PACKETS: usize = 1;
+// Keep the bridge MTU modest for ESP8266 DRAM. The TCP stack advertises an
+// MSS derived from this MTU, so remote peers can still use the example safely.
+const NET_MTU: usize = 640;
 const TCP_BUF_BYTES: usize = 64;
 
-type TcpClientNetState = NetDriverState<NET_RX_PACKETS, NET_TX_PACKETS>;
+type TcpClientNetState = NetDriverStateWithMtu<NET_MTU, NET_RX_PACKETS, NET_TX_PACKETS>;
 type WifiDriverResources = WifiResources<8, 4, 2>;
 
 static NET_STATE: StaticCell<TcpClientNetState> = StaticCell::new();
@@ -56,9 +59,22 @@ static TCP_TX_BUF: StaticCell<[u8; TCP_BUF_BYTES]> = StaticCell::new();
 
 type WifiStaDriver =
     WifiDriver<'static, Started<StaMode>, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
-type WifiNetRunner =
-    wifi_net::Runner<'static, 'static, StaMode, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
-type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDevice<'static>>;
+type WifiNetRunner = wifi_net::RunnerWithMtu<
+    'static,
+    'static,
+    StaMode,
+    Esp8266TargetBackend<'static, 8, 4, 2>,
+    8,
+    4,
+    2,
+    0,
+    0,
+    0,
+    0,
+    0,
+    NET_MTU,
+>;
+type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDeviceWithMtu<'static, NET_MTU>>;
 
 #[inline(always)]
 fn log_line(message: &[u8]) {
@@ -156,7 +172,7 @@ fn start_network(
 ) -> embassy_net::Stack<'static> {
     let link = driver.sta_link().expect("sta link");
     let net_state = NET_STATE.init(TcpClientNetState::new());
-    let (driver_runner, net_device) = wifi_net::new(net_state, link).expect("net driver");
+    let (driver_runner, net_device) = wifi_net::new_with_mtu(net_state, link).expect("net driver");
 
     let config = match static_config {
         Some(config) => embassy_net::Config::ipv4_static(to_embassy_static_config(config)),

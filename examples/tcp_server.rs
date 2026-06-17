@@ -11,7 +11,7 @@
 #![no_std]
 #![no_main]
 
-use core::future::{poll_fn, Future};
+use core::future::{pending, poll_fn, Future};
 use core::task::Poll;
 
 use embassy_executor::Spawner;
@@ -21,7 +21,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_time::Duration;
 use embedded_io_async::Write as IoWrite;
 
-use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverState};
+use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverStateWithMtu};
 #[cfg(feature = "wifi-debug-trace")]
 use esp8266_hal::wifi::{sta_rx_callback_debug_snapshot, tx_debug_snapshot};
 use esp8266_hal::wifi::{
@@ -43,10 +43,11 @@ const WIFI_CHANNEL: Option<&str> = option_env!("ESP8266_HAL_WIFI_CHANNEL");
 const LISTEN_PORT: u16 = 1234;
 const NET_RX_PACKETS: usize = 1;
 const NET_TX_PACKETS: usize = 1;
+const NET_MTU: usize = 640;
 // Keep the smoke-test socket buffers intentionally tiny; ESP8266 DRAM is tight
 // and the hardware scenario only echoes a four-byte payload.
 const TCP_BUF_BYTES: usize = 16;
-type TcpServerNetState = NetDriverState<NET_RX_PACKETS, NET_TX_PACKETS>;
+type TcpServerNetState = NetDriverStateWithMtu<NET_MTU, NET_RX_PACKETS, NET_TX_PACKETS>;
 type WifiDriverResources = WifiResources<8, 4, 2>;
 
 static NET_STATE: StaticCell<TcpServerNetState> = StaticCell::new();
@@ -59,9 +60,22 @@ static TCP_TX_BUF: StaticCell<[u8; TCP_BUF_BYTES]> = StaticCell::new();
 
 type WifiStaDriver =
     WifiDriver<'static, Started<StaMode>, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
-type WifiNetRunner =
-    wifi_net::Runner<'static, 'static, StaMode, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
-type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDevice<'static>>;
+type WifiNetRunner = wifi_net::RunnerWithMtu<
+    'static,
+    'static,
+    StaMode,
+    Esp8266TargetBackend<'static, 8, 4, 2>,
+    8,
+    4,
+    2,
+    0,
+    0,
+    0,
+    0,
+    0,
+    NET_MTU,
+>;
+type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDeviceWithMtu<'static, NET_MTU>>;
 
 #[inline(always)]
 fn log_line(message: &[u8]) {
@@ -123,8 +137,17 @@ fn log_debug_snapshot() {
     esp8266_hal::logger::write_newline();
 }
 
-#[inline(always)]
-fn log_dhcp_timeout() {
+#[inline(never)]
+fn log_dhcp_timeout(stack: &embassy_net::Stack<'static>, resources: &'static WifiDriverResources) {
+    esp8266_hal::logger::write_bytes(b"tcp server dhcp detail link=");
+    esp8266_hal::logger::write_dec_u32(stack.is_link_up() as u32);
+    esp8266_hal::logger::write_bytes(b" cfg=");
+    esp8266_hal::logger::write_dec_u32(stack.is_config_up() as u32);
+    esp8266_hal::logger::write_bytes(b" queued=");
+    esp8266_hal::logger::write_dec_u32(resources.queued_rx() as u32);
+    esp8266_hal::logger::write_bytes(b" drops=");
+    esp8266_hal::logger::write_dec_u32(resources.rx_drops());
+    esp8266_hal::logger::write_newline();
     log_line(b"tcp server dhcp timeout");
 }
 
@@ -143,6 +166,35 @@ fn driver_error_name(error: esp8266_hal::wifi::DriverError) -> &'static [u8] {
         esp8266_hal::wifi::DriverError::BackendRejected => b"backend-rejected",
         esp8266_hal::wifi::DriverError::BackendError(_) => b"backend-error",
     }
+}
+
+#[inline(never)]
+fn log_connect_error(
+    error: esp8266_hal::wifi::DriverError,
+    resources: &'static WifiDriverResources,
+) {
+    esp8266_hal::logger::write_bytes(b"tcp server connect detail error=");
+    esp8266_hal::logger::write_bytes(driver_error_name(error));
+    esp8266_hal::logger::write_bytes(b" reason=");
+    esp8266_hal::logger::write_dec_u32(resources.last_disconnect_reason().unwrap_or(0) as u32);
+    esp8266_hal::logger::write_bytes(b" heap=");
+    esp8266_hal::logger::write_hex_u32(esp8266_hal::wifi::free_heap_bytes());
+
+    if let Some(failure) = esp8266_hal::wifi::last_alloc_failure() {
+        esp8266_hal::logger::write_bytes(b" alloc_kind=");
+        esp8266_hal::logger::write_byte(failure.kind);
+        esp8266_hal::logger::write_bytes(b" alloc_size=");
+        esp8266_hal::logger::write_hex_u32(failure.requested_bytes as u32);
+        esp8266_hal::logger::write_bytes(b" alloc_free=");
+        esp8266_hal::logger::write_hex_u32(failure.free_bytes as u32);
+        esp8266_hal::logger::write_bytes(b" alloc_task=");
+        esp8266_hal::logger::write_byte(failure.task_marker);
+        esp8266_hal::logger::write_bytes(b" alloc_count=");
+        esp8266_hal::logger::write_dec_u32(failure.count);
+    } else {
+        esp8266_hal::logger::write_bytes(b" alloc=none");
+    }
+    esp8266_hal::logger::write_newline();
 }
 
 #[inline(never)]
@@ -221,11 +273,16 @@ async fn debug_trace_task() -> ! {
     }
 }
 
+#[embassy_executor::task]
+async fn tcp_server_task(stack: embassy_net::Stack<'static>) -> ! {
+    tcp_server_loop(stack).await
+}
+
 #[inline(never)]
 fn start_network(spawner: Spawner, driver: WifiStaDriver) -> embassy_net::Stack<'static> {
     let link = driver.sta_link().expect("sta link");
     let net_state = NET_STATE.init(TcpServerNetState::new());
-    let (driver_runner, net_device) = wifi_net::new(net_state, link).expect("net driver");
+    let (driver_runner, net_device) = wifi_net::new_with_mtu(net_state, link).expect("net driver");
 
     let config = embassy_net::Config::dhcpv4(Default::default());
     let stack_resources = STACK_RESOURCES.init(embassy_net::StackResources::<2>::new());
@@ -245,27 +302,30 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "wifi-debug-trace")]
     spawner.must_spawn(debug_trace_task());
 
-    let (mut driver, _resources) = init_wifi();
+    let (mut driver, resources) = init_wifi();
 
     log_line(b"wifi started");
     if let Err(error) = connect_wifi(&mut driver) {
-        esp8266_hal::logger::write_bytes(b"tcp server wifi err ");
-        esp8266_hal::logger::write_bytes(driver_error_name(error));
-        esp8266_hal::logger::write_newline();
+        log_connect_error(error, resources);
+        log_line(b"tcp server wifi err");
         loop {
             embassy_time::Timer::after(Duration::from_secs(60)).await;
         }
     }
     let stack = start_network(spawner, driver);
-    if !wait_for_dhcp(&stack).await {
+    if !wait_for_dhcp(&stack, resources).await {
         loop {
             embassy_time::Timer::after(Duration::from_secs(60)).await;
         }
     }
-    tcp_server_loop(stack).await
+    spawner.must_spawn(tcp_server_task(stack));
+    pending::<()>().await;
 }
 
-async fn wait_for_dhcp(stack: &embassy_net::Stack<'static>) -> bool {
+async fn wait_for_dhcp(
+    stack: &embassy_net::Stack<'static>,
+    resources: &'static WifiDriverResources,
+) -> bool {
     log_line(b"waiting dhcp");
 
     match select(
@@ -284,7 +344,7 @@ async fn wait_for_dhcp(stack: &embassy_net::Stack<'static>) -> bool {
             }
         }
         Either::Second(()) => {
-            log_dhcp_timeout();
+            log_dhcp_timeout(stack, resources);
             false
         }
     }

@@ -167,8 +167,20 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[link_section = ".rwtext"]
 #[xtensa_lx_rt::exception]
 fn exception(cause: ExceptionCause, frame: Context) -> ! {
-    let _ = cause;
-    let _ = frame;
-    esp8266_hal::logger::write_byte(b'E');
+    esp8266_hal::logger::write_bytes(b"exception cause=");
+    esp8266_hal::logger::write_dec_u32(cause as u32);
+    let registers =
+        unsafe { core::slice::from_raw_parts((&frame as *const Context).cast::<u32>(), 21) };
+    esp8266_hal::logger::write_bytes(b" pc=0x");
+    esp8266_hal::logger::write_hex_u32(registers[0]);
+    esp8266_hal::logger::write_bytes(b" a0=0x");
+    esp8266_hal::logger::write_hex_u32(registers[2]);
+    esp8266_hal::logger::write_bytes(b" a1=0x");
+    esp8266_hal::logger::write_hex_u32(registers[3]);
+    esp8266_hal::logger::write_bytes(b" vaddr=0x");
+    esp8266_hal::logger::write_hex_u32(registers[20]);
+    esp8266_hal::logger::write_newline();
+    esp8266_hal::logger::write_bytes(b"panic");
+    esp8266_hal::logger::write_newline();
     loop {}
 }

@@ -16,7 +16,9 @@ fn scenario_registry_includes_required_full_matrix_entries() {
         "sta_dhcp",
         "sta_static_ip",
         "tcp_server",
+        "eap_sta_assoc",
         "ap_start",
+        "wps",
         "esp_now_unicast",
         "esp_now_broadcast",
         "esp_now_encrypted",
@@ -48,7 +50,7 @@ fn rig_blocked_scenarios_have_reasons() {
         }
     }
     assert!(
-        count >= 3,
+        count >= 2,
         "expected current rig limitations to be explicit"
     );
 }
@@ -157,6 +159,22 @@ fn tcp_client_uses_host_served_tcp_runtime() {
 }
 
 #[test]
+fn eap_sta_assoc_uses_router_radius_uart_runtime() {
+    let scenario = scenario_by_name("eap_sta_assoc").expect("eap scenario");
+    let RuntimePlan::UartWatch { timeout, .. } = scenario.runtime else {
+        panic!("eap_sta_assoc should use UART watch runtime");
+    };
+
+    assert_eq!(scenario.state, ScenarioState::Implemented);
+    assert_eq!(scenario.example, Some("wifi_eap"));
+    assert!(scenario.features.contains(&"wifi-enterprise"));
+    assert!(
+        timeout >= Duration::from_secs(90),
+        "EAP scenario timeout must cover Enterprise association and RADIUS exchange"
+    );
+}
+
+#[test]
 fn ap_start_is_an_implemented_uart_scenario() {
     let ap_start = scenario_by_name("ap_start").expect("ap_start scenario");
 
@@ -243,15 +261,22 @@ fn esp_now_two_board_scenarios_are_implemented() {
 }
 
 #[test]
-fn provisioning_scenarios_are_rig_blocked() {
-    for (name, example) in [("wps", "wifi_wps"), ("smartconfig", "wifi_smartconfig")] {
-        let scenario = scenario_by_name(name).expect("provisioning scenario");
+fn wps_scenario_is_implemented() {
+    let scenario = scenario_by_name("wps").expect("wps scenario");
 
-        let ScenarioState::RigBlocked { reason } = scenario.state else {
-            panic!("{name} should be rig-blocked");
-        };
-        assert!(!reason.is_empty());
-        assert_eq!(scenario.example, Some(example));
-        assert!(matches!(scenario.runtime, RuntimePlan::UartWatch { .. }));
-    }
+    assert_eq!(scenario.state, ScenarioState::Implemented);
+    assert_eq!(scenario.example, Some("wifi_wps"));
+    assert!(matches!(scenario.runtime, RuntimePlan::UartWatch { .. }));
+}
+
+#[test]
+fn smartconfig_scenario_is_rig_blocked() {
+    let scenario = scenario_by_name("smartconfig").expect("smartconfig scenario");
+
+    let ScenarioState::RigBlocked { reason } = scenario.state else {
+        panic!("smartconfig should be rig-blocked");
+    };
+    assert!(!reason.is_empty());
+    assert_eq!(scenario.example, Some("wifi_smartconfig"));
+    assert!(matches!(scenario.runtime, RuntimePlan::UartWatch { .. }));
 }

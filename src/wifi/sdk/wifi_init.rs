@@ -16,6 +16,13 @@ use crate::wifi_core::TxDebugSnapshot;
 // ---------------------------------------------------------------------------
 
 const EP_OFFSET: usize = 36;
+const TX_FALLBACK_PAYLOAD_BYTES: usize = 256;
+const TX_FALLBACK_BYTES: usize = TX_FALLBACK_PAYLOAD_BYTES + EP_OFFSET;
+
+#[repr(align(4))]
+struct TxFallbackBuffer {
+    bytes: [u8; TX_FALLBACK_BYTES],
+}
 
 static TX_CALLS: AtomicU32 = AtomicU32::new(0);
 static TX_OK: AtomicU32 = AtomicU32::new(0);
@@ -26,6 +33,10 @@ static TX_LAST_RET: AtomicI32 = AtomicI32::new(0);
 static TX_LAST_LEN: AtomicU32 = AtomicU32::new(0);
 static TX_LAST_ALLOC_SIZE: AtomicU32 = AtomicU32::new(0);
 static TX_LAST_FREE_HEAP: AtomicU32 = AtomicU32::new(0);
+static TX_FALLBACK_IN_USE: AtomicU32 = AtomicU32::new(0);
+static mut TX_FALLBACK_BUF: TxFallbackBuffer = TxFallbackBuffer {
+    bytes: [0; TX_FALLBACK_BYTES],
+};
 
 #[cfg(feature = "wifi-debug-trace")]
 pub fn internal_tx_debug_snapshot() -> TxDebugSnapshot {
@@ -99,6 +110,12 @@ unsafe extern "C" fn wifi_internal_send_cb(aio: *mut EspAio) -> i32 {
     }
 }
 
+/// TX completion callback for the emergency static buffer.
+unsafe extern "C" fn wifi_internal_fallback_send_cb(_aio: *mut EspAio) -> i32 {
+    TX_FALLBACK_IN_USE.store(0, Ordering::Release);
+    sys::ESP_OK
+}
+
 // ---------------------------------------------------------------------------
 // WiFi event base
 // ---------------------------------------------------------------------------
@@ -111,7 +128,7 @@ unsafe extern "C" fn wifi_internal_send_cb(aio: *mut EspAio) -> i32 {
 /// `*const u8` doesn't implement `Sync`, so we wrap in a `#[repr(transparent)]`
 /// newtype that does.
 #[repr(transparent)]
-struct EventBase(*const u8);
+pub(crate) struct EventBase(*const u8);
 // SAFETY: the pointer is to a static string literal — immutable and valid for 'static.
 unsafe impl Sync for EventBase {}
 
@@ -216,27 +233,53 @@ pub unsafe extern "C" fn esp_wifi_internal_tx(wifi_if: u32, buffer: *mut c_void,
             Ordering::Relaxed,
         );
         let alloc = super::super::compat::memory::malloc(total);
-        if alloc.is_null() {
-            TX_NO_MEM.fetch_add(1, Ordering::Relaxed);
-            TX_LAST_RET.store(sys::ESP_ERR_NO_MEM, Ordering::Relaxed);
-            return sys::ESP_ERR_NO_MEM;
-        }
-
-        let dram_buf = (alloc as *mut u8).add(EP_OFFSET);
+        let mut used_fallback = false;
+        let (dram_buf, cb, arg) = if alloc.is_null() {
+            if total > TX_FALLBACK_BYTES {
+                TX_NO_MEM.fetch_add(1, Ordering::Relaxed);
+                TX_LAST_RET.store(sys::ESP_ERR_NO_MEM, Ordering::Relaxed);
+                return sys::ESP_ERR_NO_MEM;
+            }
+            if TX_FALLBACK_IN_USE
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                TX_WOULD_BLOCK.fetch_add(1, Ordering::Relaxed);
+                TX_LAST_RET.store(-1, Ordering::Relaxed);
+                return -1;
+            }
+            used_fallback = true;
+            let fallback = core::ptr::addr_of_mut!(TX_FALLBACK_BUF.bytes) as *mut u8;
+            (
+                fallback.add(EP_OFFSET),
+                wifi_internal_fallback_send_cb as unsafe extern "C" fn(*mut EspAio) -> i32,
+                core::ptr::null_mut(),
+            )
+        } else {
+            (
+                (alloc as *mut u8).add(EP_OFFSET),
+                wifi_internal_send_cb as unsafe extern "C" fn(*mut EspAio) -> i32,
+                alloc,
+            )
+        };
         core::ptr::copy_nonoverlapping(buffer as *const u8, dram_buf, len as usize);
 
         let mut aio = EspAio {
             fd: wifi_if as i32,
             pbuf: dram_buf,
             len: len as u32,
-            cb: wifi_internal_send_cb,
-            arg: alloc,
+            cb,
+            arg,
             ret: 0,
         };
 
         let ret = ieee80211_output_pbuf(&mut aio);
         if ret != 0 {
-            super::super::compat::memory::free(aio.arg);
+            if used_fallback {
+                TX_FALLBACK_IN_USE.store(0, Ordering::Release);
+            } else {
+                super::super::compat::memory::free(aio.arg);
+            }
         }
         TX_LAST_RET.store(ret, Ordering::Relaxed);
         match ret {

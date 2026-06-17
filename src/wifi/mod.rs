@@ -120,6 +120,59 @@ pub fn free_heap_bytes() -> u32 {
     unsafe { compat::memory::esp_get_free_heap_size() }
 }
 
+/// Snapshot of the first compat allocation failure since the last WiFi
+/// initialization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllocFailureDebug {
+    pub kind: u8,
+    pub requested_bytes: usize,
+    pub free_bytes: usize,
+    pub task_marker: u8,
+    pub count: u32,
+}
+
+/// Snapshot of the RSA workspace reservation used during EAP diagnostics.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EapRsaWorkspaceDebug {
+    pub reserved_now: bool,
+    pub reserve_attempts: u32,
+    pub reserved: u32,
+    pub used: u32,
+    pub released: u32,
+}
+
+/// Return the first compat allocation failure recorded since WiFi init.
+///
+/// This is a diagnostics-only hook for constrained hardware bring-up. A
+/// returned value indicates that some SDK/blob allocation failed; it does not
+/// imply the public API call currently being handled returned allocation error.
+pub fn last_alloc_failure() -> Option<AllocFailureDebug> {
+    compat::memory::debug_last_alloc_failure().map(
+        |(kind, requested_bytes, free_bytes, task_marker, count)| AllocFailureDebug {
+            kind,
+            requested_bytes,
+            free_bytes,
+            task_marker,
+            count,
+        },
+    )
+}
+
+/// Return the current RSA workspace reservation counters.
+#[doc(hidden)]
+pub fn eap_rsa_workspace_debug() -> EapRsaWorkspaceDebug {
+    let (reserved_now, reserve_attempts, reserved, used, released) =
+        compat::memory::debug_eap_rsa_workspace();
+    EapRsaWorkspaceDebug {
+        reserved_now,
+        reserve_attempts,
+        reserved,
+        used,
+        released,
+    }
+}
+
 /// WiFi operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WifiMode {

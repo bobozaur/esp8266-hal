@@ -21,6 +21,7 @@ pub(super) fn map_client_config(config: &ClientConfig) -> crate::wifi::StaConfig
     let (password, auth_threshold) = match config.credential() {
         Credential::Open => (&[][..], crate::wifi::AuthMode::Open),
         Credential::Wpa2(passphrase) => (passphrase.as_bytes(), crate::wifi::AuthMode::Wpa2Psk),
+        Credential::Wpa2Enterprise(_) => (&[][..], crate::wifi::AuthMode::Open),
     };
 
     let mut raw = crate::wifi::StaConfig::from_validated_bytes(
@@ -52,6 +53,7 @@ pub(super) fn map_ap_config(config: &AccessPointConfig) -> crate::wifi::ApConfig
     let (password, auth_mode) = match config.credential() {
         Credential::Open => (&[][..], crate::wifi::AuthMode::Open),
         Credential::Wpa2(passphrase) => (passphrase.as_bytes(), crate::wifi::AuthMode::Wpa2Psk),
+        Credential::Wpa2Enterprise(_) => (&[][..], crate::wifi::AuthMode::Open),
     };
 
     crate::wifi::ApConfig::from_validated_bytes(

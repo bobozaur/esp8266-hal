@@ -63,6 +63,120 @@ impl Passphrase {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnterpriseIdentity(Vec<u8, 127>);
+
+impl EnterpriseIdentity {
+    pub const MAX_LEN: usize = 127;
+
+    pub fn new(value: &str) -> Result<Self, ConfigError> {
+        Self::from_bytes(value.as_bytes())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
+        if bytes.is_empty() {
+            return Err(ConfigError::EnterpriseIdentityEmpty);
+        }
+        if bytes.len() > Self::MAX_LEN {
+            return Err(ConfigError::EnterpriseIdentityTooLong);
+        }
+
+        let mut identity = Vec::new();
+        identity
+            .extend_from_slice(bytes)
+            .map_err(|_| ConfigError::EnterpriseIdentityTooLong)?;
+        Ok(Self(identity))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for EnterpriseIdentity {
+    type Error = ConfigError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnterpriseUsername(Vec<u8, 127>);
+
+impl EnterpriseUsername {
+    pub const MAX_LEN: usize = 127;
+
+    pub fn new(value: &str) -> Result<Self, ConfigError> {
+        Self::from_bytes(value.as_bytes())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
+        if bytes.is_empty() {
+            return Err(ConfigError::EnterpriseUsernameEmpty);
+        }
+        if bytes.len() > Self::MAX_LEN {
+            return Err(ConfigError::EnterpriseUsernameTooLong);
+        }
+
+        let mut username = Vec::new();
+        username
+            .extend_from_slice(bytes)
+            .map_err(|_| ConfigError::EnterpriseUsernameTooLong)?;
+        Ok(Self(username))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for EnterpriseUsername {
+    type Error = ConfigError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnterprisePassword(Vec<u8, 128>);
+
+impl EnterprisePassword {
+    pub const MAX_LEN: usize = 128;
+
+    pub fn new(value: &str) -> Result<Self, ConfigError> {
+        Self::from_bytes(value.as_bytes())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
+        if bytes.is_empty() {
+            return Err(ConfigError::EnterprisePasswordEmpty);
+        }
+        if bytes.len() > Self::MAX_LEN {
+            return Err(ConfigError::EnterprisePasswordTooLong);
+        }
+
+        let mut password = Vec::new();
+        password
+            .extend_from_slice(bytes)
+            .map_err(|_| ConfigError::EnterprisePasswordTooLong)?;
+        Ok(Self(password))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for EnterprisePassword {
+    type Error = ConfigError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Channel(u8);
 
@@ -444,6 +558,110 @@ impl TryFrom<u16> for BeaconInterval {
 pub enum Credential {
     Open,
     Wpa2(Passphrase),
+    Wpa2Enterprise(Wpa2EnterpriseCredentials),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wpa2EnterpriseClientCertificate {
+    client_cert: &'static [u8],
+    private_key: &'static [u8],
+    private_key_password: Option<&'static [u8]>,
+}
+
+impl Wpa2EnterpriseClientCertificate {
+    pub const fn new(client_cert: &'static [u8], private_key: &'static [u8]) -> Self {
+        Self {
+            client_cert,
+            private_key,
+            private_key_password: None,
+        }
+    }
+
+    pub const fn with_private_key_password(mut self, password: &'static [u8]) -> Self {
+        self.private_key_password = Some(password);
+        self
+    }
+
+    pub const fn client_cert(&self) -> &'static [u8] {
+        self.client_cert
+    }
+
+    pub const fn private_key(&self) -> &'static [u8] {
+        self.private_key
+    }
+
+    pub const fn private_key_password(&self) -> Option<&'static [u8]> {
+        self.private_key_password
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wpa2EnterpriseCredentials {
+    identity: EnterpriseIdentity,
+    username: EnterpriseUsername,
+    password: EnterprisePassword,
+    ca_cert: Option<&'static [u8]>,
+    client_certificate: Option<Wpa2EnterpriseClientCertificate>,
+    disable_time_check: bool,
+}
+
+impl Wpa2EnterpriseCredentials {
+    pub const fn new(
+        identity: EnterpriseIdentity,
+        username: EnterpriseUsername,
+        password: EnterprisePassword,
+    ) -> Self {
+        Self {
+            identity,
+            username,
+            password,
+            ca_cert: None,
+            client_certificate: None,
+            disable_time_check: true,
+        }
+    }
+
+    pub const fn with_ca_cert(mut self, ca_cert: &'static [u8]) -> Self {
+        self.ca_cert = Some(ca_cert);
+        self
+    }
+
+    pub const fn with_client_certificate(
+        mut self,
+        certificate: Wpa2EnterpriseClientCertificate,
+    ) -> Self {
+        self.client_certificate = Some(certificate);
+        self
+    }
+
+    pub const fn with_disable_time_check(mut self, disable: bool) -> Self {
+        self.disable_time_check = disable;
+        self
+    }
+
+    pub fn identity(&self) -> &EnterpriseIdentity {
+        &self.identity
+    }
+
+    pub fn username(&self) -> &EnterpriseUsername {
+        &self.username
+    }
+
+    pub fn password(&self) -> &EnterprisePassword {
+        &self.password
+    }
+
+    pub const fn ca_cert(&self) -> Option<&'static [u8]> {
+        self.ca_cert
+    }
+
+    pub const fn client_certificate(&self) -> Option<Wpa2EnterpriseClientCertificate> {
+        self.client_certificate
+    }
+
+    pub const fn disable_time_check(&self) -> bool {
+        self.disable_time_check
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

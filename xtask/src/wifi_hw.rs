@@ -21,15 +21,22 @@ const DEFAULT_UART_BAUD: u32 = 115_200;
 const DEFAULT_FLASH_BAUD: u32 = 460_800;
 const DEFAULT_SERIAL_PORT: &str = "/dev/ttyUSB0";
 const DEFAULT_COMPANION_PORT: &str = esp32_companion::DEFAULT_COMPANION_PORT;
+const DEFAULT_ROUTER_HOST: &str = "10.42.0.131";
+const DEFAULT_ROUTER_USER: &str = "root";
+const DEFAULT_ROUTER_IDENTITY: &str = "target/wifi-hw-router/id_rsa";
+const DEFAULT_ROUTER_KNOWN_HOSTS: &str = "/tmp/esp8266-hal-openwrt-known-hosts";
+const DEFAULT_ROUTER_HOSTAPD_IFACE: &str = "phy0-ap0";
 const DEFAULT_MATRIX_ATTEMPTS: usize = 3;
 const MATRIX_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 const COMPANION_TCP_CONNECT_TIMEOUT_MS: u32 = 20_000;
+const WPS_ROUTER_SSID: &str = "esp8266-hal-wps";
+const WPS_ROUTER_PASSPHRASE: &str = "esp8266wps";
+const WPS_PIN: &str = "12345670";
+const DEFAULT_WPS_DUT_MAC: &str = "48:3f:da:68:e3:04";
 const RIG_BLOCKED_PROMISC_CONTROL: &str =
     "ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames";
 const RIG_BLOCKED_SMARTCONFIG: &str =
     "current ESP32 companion cannot emulate ESPTouch phone/STA-through-AP provisioning";
-const RIG_BLOCKED_WPS: &str =
-    "ESP-IDF AP registrar PBC/PIN attempts fail without sniffer evidence to identify the failing side";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -72,6 +79,28 @@ pub struct Scenario {
     pub profile: &'static str,
     pub state: ScenarioState,
     pub runtime: RuntimePlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FlashImage {
+    address: u32,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct RouterRig {
+    host: String,
+    user: String,
+    identity_file: Option<PathBuf>,
+    known_hosts_file: PathBuf,
+    hostapd_iface: String,
+}
+
+#[derive(Debug, Clone)]
+struct RouterWpsFixture {
+    router: RouterRig,
+    backup_path: String,
+    dut_mac: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +254,26 @@ const WIFI_SCENARIOS: &[Scenario] = &[
                 "Guru Meditation",
             ],
             response: b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong",
+        },
+    },
+    Scenario {
+        name: "eap_sta_assoc",
+        description: "associate to the OpenWrt WPA2 Enterprise AP through the RADIUS fixture",
+        example: Some("wifi_eap"),
+        features: &["interrupt", "rt", "wifi-enterprise", "wifi-sta"],
+        profile: "release",
+        state: ScenarioState::Implemented,
+        runtime: RuntimePlan::UartWatch {
+            timeout: Duration::from_secs(150),
+            success_markers: &["eap-ok"],
+            failure_markers: &[
+                "wifi eap configure err",
+                "wifi eap start err",
+                "wifi eap connect err",
+                "DISCONNECT reason=",
+                "panic",
+                "Guru Meditation",
+            ],
         },
     },
     Scenario {
@@ -398,9 +447,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         example: Some("wifi_wps"),
         features: &["interrupt", "rt", "wifi-sta", "wifi-wps"],
         profile: "release",
-        state: ScenarioState::RigBlocked {
-            reason: RIG_BLOCKED_WPS,
-        },
+        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(180),
             success_markers: &["wps-ok"],
@@ -988,6 +1035,10 @@ fn run_scenario_with_root(
         );
     }
 
+    if scenario.name == "wps" {
+        return run_wps_router_scenario(scenario, root, serial_port);
+    }
+
     if scenario_uses_companion_rig(scenario.name) {
         return run_companion_scenario_with_root(scenario, root, serial_port, companion_port);
     }
@@ -1113,7 +1164,6 @@ fn scenario_uses_companion_rig(name: &str) -> bool {
         "ap_station_list"
             | "ap_dhcp"
             | "ap_sta"
-            | "wps"
             | "smartconfig"
             | "esp_now_unicast"
             | "esp_now_encrypted"
@@ -1131,6 +1181,300 @@ fn is_promisc_rig_scenario(name: &str) -> bool {
             | "promisc_control_filters"
             | "promisc_data_companion"
     )
+}
+
+fn run_wps_router_scenario(scenario: &Scenario, root: &Path, serial_port: &Path) -> Result<()> {
+    let example = scenario
+        .example
+        .ok_or_else(|| anyhow!("scenario `{}` has no example", scenario.name))?;
+    let run_dir = prepare_run_dir(root, scenario.name)?;
+    write_manifest(&run_dir, scenario, serial_port)?;
+
+    build_example(&run_dir, example, scenario, &[])?;
+    let images = elf2image(&run_dir, example, scenario)?;
+    flash_images(&run_dir, &images, serial_port)?;
+
+    let fixture = RouterWpsFixture::new()?;
+    append_router_manifest(&run_dir, &fixture)?;
+
+    if let Err(error) = configure_router_wps_fixture(&run_dir, &fixture) {
+        let _ = restore_router_wps_fixture(&run_dir, &fixture);
+        return Err(error);
+    }
+
+    let result = match scenario.runtime {
+        RuntimePlan::UartWatch {
+            timeout,
+            success_markers,
+            failure_markers,
+        } => watch_uart(
+            &run_dir,
+            serial_port,
+            timeout,
+            success_markers,
+            failure_markers,
+        ),
+        _ => bail!("WPS router scenario requires a UART watch runtime plan"),
+    };
+
+    let status_result = collect_router_wps_status(&run_dir, &fixture, "router-after");
+    let restore_result = restore_router_wps_fixture(&run_dir, &fixture);
+
+    match (result, status_result, restore_result) {
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
+        (Err(error), _, Ok(())) => Err(error),
+        (Ok(()), Err(error), Ok(())) => Err(error),
+        (Ok(()), Ok(()), Err(error)) => Err(error),
+        (Err(error), _, Err(restore_error)) => {
+            Err(error.context(format!("router restore also failed: {restore_error:#}")))
+        }
+        (Ok(()), Err(error), Err(restore_error)) => {
+            Err(error.context(format!("router restore also failed: {restore_error:#}")))
+        }
+    }
+}
+
+impl RouterRig {
+    fn from_env() -> Result<Self> {
+        let host =
+            env::var("ESP8266_HAL_ROUTER_HOST").unwrap_or_else(|_| DEFAULT_ROUTER_HOST.to_owned());
+        let user =
+            env::var("ESP8266_HAL_ROUTER_USER").unwrap_or_else(|_| DEFAULT_ROUTER_USER.to_owned());
+        let known_hosts_file = env::var_os("ESP8266_HAL_ROUTER_KNOWN_HOSTS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_ROUTER_KNOWN_HOSTS));
+        let hostapd_iface = env::var("ESP8266_HAL_ROUTER_HOSTAPD_IFACE")
+            .unwrap_or_else(|_| DEFAULT_ROUTER_HOSTAPD_IFACE.to_owned());
+
+        let identity_file = env::var_os("ESP8266_HAL_ROUTER_SSH_KEY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                repo_root()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(DEFAULT_ROUTER_IDENTITY)
+            });
+        let identity_file = (!identity_file.as_os_str().is_empty()).then_some(identity_file);
+
+        Ok(Self {
+            host,
+            user,
+            identity_file,
+            known_hosts_file,
+            hostapd_iface,
+        })
+    }
+
+    fn target(&self) -> String {
+        format!("{}@{}", self.user, self.host)
+    }
+
+    fn ssh_command(&self) -> Command {
+        let mut command = Command::new("ssh");
+        command
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg(format!(
+                "UserKnownHostsFile={}",
+                self.known_hosts_file.display()
+            ));
+        if let Some(identity_file) = &self.identity_file {
+            command
+                .arg("-i")
+                .arg(identity_file)
+                .arg("-o")
+                .arg("IdentitiesOnly=yes");
+        }
+        command.arg(self.target());
+        command
+    }
+}
+
+impl RouterWpsFixture {
+    fn new() -> Result<Self> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_secs();
+        Ok(Self {
+            router: RouterRig::from_env()?,
+            backup_path: format!(
+                "/tmp/esp8266-hal-wireless-wps-{stamp}-{}",
+                std::process::id()
+            ),
+            dut_mac: env::var("ESP8266_HAL_WPS_DUT_MAC")
+                .unwrap_or_else(|_| DEFAULT_WPS_DUT_MAC.to_owned()),
+        })
+    }
+}
+
+fn append_router_manifest(run_dir: &Path, fixture: &RouterWpsFixture) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(run_dir.join("manifest.txt"))
+        .with_context(|| format!("failed to open {}", run_dir.join("manifest.txt").display()))?;
+    writeln!(file, "router_host={}", fixture.router.host)?;
+    writeln!(file, "router_user={}", fixture.router.user)?;
+    writeln!(
+        file,
+        "router_hostapd_iface={}",
+        fixture.router.hostapd_iface
+    )?;
+    writeln!(file, "router_wireless_backup={}", fixture.backup_path)?;
+    writeln!(file, "wps_dut_mac={}", fixture.dut_mac)?;
+    Ok(())
+}
+
+fn router_run(
+    run_dir: &Path,
+    fixture: &RouterWpsFixture,
+    label: &str,
+    script: &str,
+) -> Result<String> {
+    let log_path = run_dir.join(format!("{label}.log"));
+    let mut log = File::create(&log_path)
+        .with_context(|| format!("failed to create {}", log_path.display()))?;
+    writeln!(log, "$ ssh {} {label}", fixture.router.target())?;
+    writeln!(log, "{script}")?;
+
+    let mut command = fixture.router.ssh_command();
+    command
+        .arg(script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = command
+        .output()
+        .with_context(|| format!("failed to run router command `{label}`"))?;
+    log.write_all(&output.stdout)?;
+    log.write_all(&output.stderr)?;
+
+    if !output.status.success() {
+        bail!(
+            "router command `{label}` failed; see {}",
+            log_path.display()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn configure_router_wps_fixture(run_dir: &Path, fixture: &RouterWpsFixture) -> Result<()> {
+    let iface = shell_quote(&fixture.router.hostapd_iface);
+    let backup = shell_quote(&fixture.backup_path);
+    let ssid = shell_quote(WPS_ROUTER_SSID);
+    let passphrase = shell_quote(WPS_ROUTER_PASSPHRASE);
+    let pin = shell_quote(WPS_PIN);
+    let dut_mac = shell_quote(&fixture.dut_mac);
+    let script = format!(
+        r#"set -e
+iface={iface}
+backup={backup}
+expected_ssid={ssid}
+pin={pin}
+dut_mac={dut_mac}
+cp /etc/config/wireless "$backup"
+uci set wireless.radio0.disabled=0
+uci set wireless.radio0.channel=6
+uci set wireless.radio0.htmode=NOHT
+uci set wireless.default_radio0.disabled=0
+uci set wireless.default_radio0.mode=ap
+uci set wireless.default_radio0.network=lan
+uci set wireless.default_radio0.ssid={ssid}
+uci set wireless.default_radio0.encryption=psk2
+uci set wireless.default_radio0.key={passphrase}
+uci set wireless.default_radio0.hidden=0
+uci set wireless.default_radio0.ieee80211w=0
+uci set wireless.default_radio0.uapsd=0
+uci set wireless.default_radio0.wmm=0
+uci set wireless.default_radio0.wps_pushbutton=1
+uci -q delete wireless.default_radio0.auth_server || true
+uci -q delete wireless.default_radio0.auth_port || true
+uci -q delete wireless.default_radio0.auth_secret || true
+uci commit wireless
+wifi down radio0 || true
+sleep 2
+wifi up radio0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
+         21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 \
+         41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60; do
+    config="$(hostapd_cli -p /var/run/hostapd -i "$iface" get_config 2>/dev/null || true)"
+    if printf '%s\n' "$config" | grep -qx "ssid=$expected_ssid" &&
+       printf '%s\n' "$config" | grep -qx "wps_state=configured"; then
+        break
+    fi
+    sleep 1
+done
+config="$(hostapd_cli -p /var/run/hostapd -i "$iface" get_config 2>&1)"
+printf '%s\n' "$config"
+printf '%s\n' "$config" | grep -qx "ssid=$expected_ssid"
+printf '%s\n' "$config" | grep -qx "wps_state=configured"
+hostapd_cli -p /var/run/hostapd -i "$iface" wps_cancel >/dev/null 2>&1 || true
+pin_result="$(hostapd_cli -p /var/run/hostapd -i "$iface" wps_pin any "$pin" 300 "$dut_mac")"
+printf '%s\n' "$pin_result"
+test "$pin_result" = "OK"
+hostapd_cli -p /var/run/hostapd -i "$iface" wps_get_status
+sleep 2
+echo "backup_path=$backup"
+"#
+    );
+    router_run(run_dir, fixture, "router-wps-setup", &script).map(|_| ())
+}
+
+fn collect_router_wps_status(
+    run_dir: &Path,
+    fixture: &RouterWpsFixture,
+    label: &str,
+) -> Result<()> {
+    let iface = shell_quote(&fixture.router.hostapd_iface);
+    let script = format!(
+        r#"set -e
+iface={iface}
+echo "---wps-status"
+hostapd_cli -p /var/run/hostapd -i "$iface" wps_get_status 2>&1 || true
+echo "---hostapd-status"
+ubus -S call "hostapd.$iface" get_status 2>/dev/null || true
+echo "---recent-log"
+logread | tail -n 180 | grep -i "wps\|eap\|48:3f:da:68:e3:04\|ap-sta\|wpa" || true
+"#
+    );
+    router_run(run_dir, fixture, label, &script).map(|_| ())
+}
+
+fn restore_router_wps_fixture(run_dir: &Path, fixture: &RouterWpsFixture) -> Result<()> {
+    let iface = shell_quote(&fixture.router.hostapd_iface);
+    let backup = shell_quote(&fixture.backup_path);
+    let script = format!(
+        r#"set -e
+iface={iface}
+backup={backup}
+if [ -f "$backup" ]; then
+    cp "$backup" /etc/config/wireless
+    rm -f "$backup"
+fi
+expected_ssid="$(uci -q get wireless.default_radio0.ssid || true)"
+wifi reload
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
+         21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 \
+         41 42 43 44 45 46 47 48; do
+    config="$(hostapd_cli -p /var/run/hostapd -i "$iface" get_config 2>/dev/null || true)"
+    if [ -n "$expected_ssid" ] &&
+       printf '%s\n' "$config" | grep -qx "ssid=$expected_ssid"; then
+        break
+    fi
+    sleep 1
+done
+uci show wireless
+hostapd_cli -p /var/run/hostapd -i "$iface" get_config 2>/dev/null || true
+ubus -S call "hostapd.$iface" get_status 2>/dev/null || true
+"#
+    );
+    router_run(run_dir, fixture, "router-restore", &script).map(|_| ())
 }
 
 fn promisc_success_marker(name: &str) -> &'static str {
@@ -1376,7 +1720,6 @@ fn run_companion_scenario_with_root(
                 .expect("mixed companion AP started before build");
             run_ap_sta_downstream_companion(&run_dir, serial_port, session)
         }
-        "wps" => run_wps_companion(&run_dir, serial_port, &companion),
         "smartconfig" => run_smartconfig_companion(&run_dir, serial_port, &companion),
         "esp_now_unicast" | "esp_now_unicast_companion" => {
             run_esp_now_companion(&run_dir, serial_port, &companion, EspNowMode::Unicast)
@@ -2252,6 +2595,7 @@ fn run_ap_sta_downstream_companion(
     )
 }
 
+#[allow(dead_code)]
 fn run_wps_companion(run_dir: &Path, serial_port: &Path, companion: &CompanionRig) -> Result<()> {
     let mut companion_log = open_companion_log(run_dir)?;
     let mut companion_commands = esp32_companion::CommandSession::open(&companion.port)?;
@@ -2788,7 +3132,11 @@ fn build_env_prefix(
     }
 
     if scenario.name == "wps" {
-        prefix.push_str("ESP8266_HAL_WPS_PIN=12345670 ");
+        prefix.push_str(&format!("ESP8266_HAL_WPS_PIN={WPS_PIN} "));
+    }
+
+    if scenario.name == "eap_sta_assoc" {
+        prefix.push_str("ESP8266_HAL_EAP_SSID=esp8266-router-eap ESP8266_HAL_EAP_IDENTITY=esp8266-user ESP8266_HAL_EAP_USERNAME=esp8266-user ESP8266_HAL_EAP_PASSWORD=esp8266-password ESP8266_HAL_EAP_CHANNEL=11 ");
     }
 
     if scenario.name == "ap_station_list" || scenario.name == "ap_station_list_companion" {
@@ -2896,7 +3244,7 @@ fn shell_env_assignment(key: &str, value: &str) -> String {
     format!("{key}='{escaped}'")
 }
 
-fn elf2image(run_dir: &Path, example: &str, scenario: &Scenario) -> Result<[PathBuf; 2]> {
+fn elf2image(run_dir: &Path, example: &str, scenario: &Scenario) -> Result<Vec<FlashImage>> {
     let log_path = run_dir.join("elf2image.log");
     let mut log = File::create(&log_path)
         .with_context(|| format!("failed to create {}", log_path.display()))?;
@@ -2937,18 +3285,51 @@ fn elf2image(run_dir: &Path, example: &str, scenario: &Scenario) -> Result<[Path
         bail!("elf2image failed; see {}", log_path.display());
     }
 
-    let first = PathBuf::from(format!("{}0x00000.bin", out_prefix.display()));
-    let second = PathBuf::from(format!("{}0x10000.bin", out_prefix.display()));
-    if !first.exists() || !second.exists() {
+    let images = discover_flash_images(&out_prefix)?;
+    if images.len() != 2 || images.first().map(|image| image.address) != Some(0) {
         bail!(
-            "elf2image did not produce split v1 images in {}",
+            "elf2image did not produce the expected split v1 images in {}",
             run_dir.display()
         );
     }
-    Ok([first, second])
+    Ok(images)
 }
 
-fn flash_images(run_dir: &Path, images: &[PathBuf; 2], serial_port: &Path) -> Result<()> {
+fn discover_flash_images(out_prefix: &Path) -> Result<Vec<FlashImage>> {
+    let parent = out_prefix
+        .parent()
+        .ok_or_else(|| anyhow!("elf2image output prefix has no parent"))?;
+    let prefix = out_prefix
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("elf2image output prefix is not valid UTF-8"))?;
+    let mut images = Vec::new();
+
+    for entry in
+        fs::read_dir(parent).with_context(|| format!("failed to list {}", parent.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(address) = flash_image_address(prefix, name) else {
+            continue;
+        };
+        images.push(FlashImage { address, path });
+    }
+
+    images.sort_by_key(|image| image.address);
+    Ok(images)
+}
+
+fn flash_image_address(prefix: &str, name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(prefix)?;
+    let hex = rest.strip_prefix("0x")?.strip_suffix(".bin")?;
+    u32::from_str_radix(hex, 16).ok()
+}
+
+fn flash_images(run_dir: &Path, images: &[FlashImage], serial_port: &Path) -> Result<()> {
     let log_path = run_dir.join("flash.log");
     let mut log = File::create(&log_path)
         .with_context(|| format!("failed to create {}", log_path.display()))?;
@@ -2962,22 +3343,24 @@ fn flash_images(run_dir: &Path, images: &[PathBuf; 2], serial_port: &Path) -> Re
         .arg(serial_port)
         .arg("--baud")
         .arg(DEFAULT_FLASH_BAUD.to_string())
-        .arg("write-flash")
-        .arg("0x00000")
-        .arg(&images[0])
-        .arg("0x10000")
-        .arg(&images[1])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg("write-flash");
+
+    let mut log_args = Vec::new();
+    for image in images {
+        let address = format!("0x{:05x}", image.address);
+        command.arg(&address).arg(&image.path);
+        log_args.push(address);
+        log_args.push(image.path.display().to_string());
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     writeln!(
         log,
-        "$ {} --chip esp8266 --port {} --baud {} write-flash 0x00000 {} 0x10000 {}",
+        "$ {} --chip esp8266 --port {} --baud {} write-flash {}",
         esptool.to_string_lossy(),
         serial_port.display(),
         DEFAULT_FLASH_BAUD,
-        images[0].display(),
-        images[1].display()
+        log_args.join(" ")
     )?;
 
     let output = command.output().context("failed to flash images")?;

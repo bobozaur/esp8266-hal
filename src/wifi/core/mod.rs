@@ -39,8 +39,10 @@ pub use backend::{
 pub use capability::{HasAp, HasSta};
 pub use config::{
     AccessPointConfig, AccessPointRecord, ApClientLimit, ApStationInfo, BeaconInterval, Channel,
-    ClientConfig, Credential, InitConfig, Ipv4Addr, MixedConfig, Passphrase, ScanOptions,
-    ScanTimings, ScanType, SmartConfigTimeout, Ssid, StaticIpv4Config, StationPowerSave, WpsPin,
+    ClientConfig, Credential, EnterpriseIdentity, EnterprisePassword, EnterpriseUsername,
+    InitConfig, Ipv4Addr, MixedConfig, Passphrase, ScanOptions, ScanTimings, ScanType,
+    SmartConfigTimeout, Ssid, StaticIpv4Config, StationPowerSave, Wpa2EnterpriseClientCertificate,
+    Wpa2EnterpriseCredentials, WpsPin,
 };
 pub use dhcp::{
     DhcpLease, DhcpMessageType, DhcpReply, DhcpServer, DhcpServerConfig, DhcpServerError,

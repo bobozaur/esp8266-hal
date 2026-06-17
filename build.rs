@@ -3,21 +3,23 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
+const IROM_FLASH_OFFSET_ENV: &str = "ESP8266_HAL_IROM_FLASH_OFFSET";
+const DEFAULT_IROM_ORIGIN: u32 = 0x4021_0000;
+const IROM_FLASH_BASE: u32 = 0x4020_0000;
+
 fn main() {
     // Put the linker script somewhere the linker can find it
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let memory_x = memory_x();
     File::create(out.join("memory.x"))
         .unwrap()
-        .write_all(include_bytes!("ld/memory.x"))
+        .write_all(memory_x.as_bytes())
         .unwrap();
 
+    let alias_x = alias_x();
     File::create(out.join("alias.x"))
         .unwrap()
-        .write_all(if cfg!(feature = "all_in_ram") {
-            include_bytes!("ld/ram.x")
-        } else {
-            include_bytes!("ld/rom.x")
-        })
+        .write_all(alias_x.as_bytes())
         .unwrap();
 
     // Override xtensa-lx-rt's link.x with our own version that collects
@@ -98,4 +100,53 @@ fn main() {
     // Re-run when linker scripts change.
     println!("cargo:rerun-if-changed=ld/memory.x");
     println!("cargo:rerun-if-changed=ld/link.x");
+    println!("cargo:rerun-if-changed=ld/rom.x");
+    println!("cargo:rerun-if-changed=ld/ram.x");
+    println!("cargo:rerun-if-env-changed={IROM_FLASH_OFFSET_ENV}");
+}
+
+fn alias_x() -> &'static str {
+    if cfg!(feature = "all_in_ram") {
+        include_str!("ld/ram.x")
+    } else {
+        include_str!("ld/rom.x")
+    }
+}
+
+fn memory_x() -> String {
+    let mut memory = include_str!("ld/memory.x").to_owned();
+    let Some(offset) = irom_flash_offset() else {
+        return memory;
+    };
+    let origin = IROM_FLASH_BASE
+        .checked_add(offset)
+        .expect("ESP8266_HAL_IROM_FLASH_OFFSET overflows IROM address");
+    memory = memory.replace(
+        &format!("ORIGIN = 0x{DEFAULT_IROM_ORIGIN:08x}"),
+        &format!("ORIGIN = 0x{origin:08x}"),
+    );
+    memory
+}
+
+fn irom_flash_offset() -> Option<u32> {
+    let raw = env::var(IROM_FLASH_OFFSET_ENV).ok()?;
+    let offset = parse_u32_literal(&raw).unwrap_or_else(|| {
+        panic!("{IROM_FLASH_OFFSET_ENV} must be a decimal or 0x-prefixed number")
+    });
+    if offset < 0x10000 || offset & 0xffff != 0 {
+        panic!("{IROM_FLASH_OFFSET_ENV} must be 64 KiB aligned and at least 0x10000");
+    }
+    Some(offset)
+}
+
+fn parse_u32_literal(raw: &str) -> Option<u32> {
+    let value = raw.trim();
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse().ok()
+    }
 }

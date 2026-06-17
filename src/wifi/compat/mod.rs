@@ -32,7 +32,6 @@ pub mod pp_stage;
 
 #[cfg(not(feature = "wifi-debug-trace"))]
 pub mod pp_stage {
-    use core::ffi::c_void;
     #[no_mangle]
     pub static mut g_pp_stage: u32 = 0;
     #[no_mangle]

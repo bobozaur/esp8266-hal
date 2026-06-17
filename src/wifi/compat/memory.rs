@@ -58,6 +58,11 @@ static mut FIRST_ALLOC_FAIL_SIZE: usize = 0;
 static mut FIRST_ALLOC_FAIL_FREE: usize = 0;
 static mut ALLOC_FAIL_COUNT: u32 = 0;
 static mut FIRST_EVENT_LOOP_CALLOC_TRACE_DONE: bool = false;
+static mut EAP_RSA_WORKSPACE_ACTIVE: bool = false;
+static mut EAP_RSA_WORKSPACE_RESERVE_ATTEMPTS: u32 = 0;
+static mut EAP_RSA_WORKSPACE_RESERVED: u32 = 0;
+static mut EAP_RSA_WORKSPACE_USED: u32 = 0;
+static mut EAP_RSA_WORKSPACE_RELEASED: u32 = 0;
 
 /// Initialize the heap from linker-provided symbols if not already done.
 unsafe fn ensure_init() {
@@ -157,6 +162,57 @@ unsafe fn dealloc_raw(ptr: *mut u8, layout: Layout) {
 
 fn total_free() -> usize {
     HEAP_HI.free() + HEAP_LO.free()
+}
+
+fn take_eap_rsa_workspace(size: usize) -> *mut c_void {
+    let _ = size;
+    ptr::null_mut()
+}
+
+pub(crate) fn reserve_eap_rsa_workspace() {
+    critical_section::with(|_| unsafe {
+        ensure_init();
+        EAP_RSA_WORKSPACE_RESERVE_ATTEMPTS = EAP_RSA_WORKSPACE_RESERVE_ATTEMPTS.saturating_add(1);
+        EAP_RSA_WORKSPACE_ACTIVE = true;
+    });
+}
+
+pub(crate) fn release_eap_rsa_workspace() {
+    critical_section::with(|_| unsafe {
+        EAP_RSA_WORKSPACE_ACTIVE = false;
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn esp8266_hal_eap_rsa_reserve() {
+    reserve_eap_rsa_workspace();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn esp8266_hal_eap_rsa_release() {
+    release_eap_rsa_workspace();
+}
+
+pub fn debug_eap_rsa_workspace() -> (bool, u32, u32, u32, u32) {
+    critical_section::with(|_| unsafe {
+        (
+            EAP_RSA_WORKSPACE_ACTIVE,
+            EAP_RSA_WORKSPACE_RESERVE_ATTEMPTS,
+            EAP_RSA_WORKSPACE_RESERVED,
+            EAP_RSA_WORKSPACE_USED,
+            EAP_RSA_WORKSPACE_RELEASED,
+        )
+    })
+}
+
+fn eap_rsa_workspace_usable(ptr: *mut c_void) -> Option<usize> {
+    let _ = ptr;
+    None
+}
+
+unsafe fn free_eap_rsa_workspace(ptr: *mut c_void) -> bool {
+    let _ = ptr;
+    false
 }
 
 pub fn debug_region_info() -> (usize, usize, usize, usize, usize, usize) {
@@ -291,6 +347,10 @@ fn raw_in_heap_regions(raw: *mut u8) -> bool {
 }
 
 fn c_malloc_inner(kind: u8, size: usize) -> *mut c_void {
+    c_malloc_inner_with_reserve(kind, size, true)
+}
+
+fn c_malloc_inner_with_reserve(kind: u8, size: usize, use_reserve: bool) -> *mut c_void {
     if size == 0 {
         return ptr::null_mut();
     }
@@ -302,11 +362,20 @@ fn c_malloc_inner(kind: u8, size: usize) -> *mut c_void {
             Err(_) => return ptr::null_mut(),
         };
         let raw = alloc_raw(layout);
-        super::pp_stage::note_deliver_probe_alloc(size, !raw.is_null());
         if raw.is_null() {
+            if use_reserve {
+                let reserved = take_eap_rsa_workspace(size);
+                if !reserved.is_null() {
+                    super::pp_stage::note_deliver_probe_alloc(size, true);
+                    trace_task3_overlap(reserved as usize, size, b'V', b'v');
+                    return reserved;
+                }
+            }
+            super::pp_stage::note_deliver_probe_alloc(size, false);
             record_alloc_failure(kind, size);
             return ptr::null_mut();
         }
+        super::pp_stage::note_deliver_probe_alloc(size, true);
         let header = raw as *mut u32;
         header.write(total as u32);
         header.add(1).write(ALLOC_MAGIC);
@@ -325,6 +394,10 @@ fn c_free(ptr: *mut c_void) {
         return;
     }
     critical_section::with(|_| unsafe {
+        if free_eap_rsa_workspace(ptr) {
+            return;
+        }
+
         let raw = (ptr as usize).saturating_sub(HEADER_SIZE) as *mut u8;
         ensure_init();
         if !raw_in_heap_regions(raw) {
@@ -352,8 +425,12 @@ fn c_realloc(ptr: *mut c_void, new_size: usize) -> *mut c_void {
         c_free(ptr);
         return ptr::null_mut();
     }
-    let old_total = unsafe { *((ptr as usize - HEADER_SIZE) as *const u32) } as usize;
-    let old_usable = old_total.saturating_sub(HEADER_SIZE);
+    let old_usable = if let Some(size) = eap_rsa_workspace_usable(ptr) {
+        size
+    } else {
+        let old_total = unsafe { *((ptr as usize - HEADER_SIZE) as *const u32) } as usize;
+        old_total.saturating_sub(HEADER_SIZE)
+    };
 
     let new_ptr = c_malloc_inner(b'R', new_size);
     if !new_ptr.is_null() {

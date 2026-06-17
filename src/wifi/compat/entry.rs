@@ -179,13 +179,13 @@ pub unsafe fn hardware_init_safe() {
         esp_phy_init_clk();
 
         crate::wifi_debugln!("hw[3] gpio");
-        let ret = base_gpio_init();
-        crate::wifi_debugln!("hw[3] gpio = {}", ret);
+        let _ret = base_gpio_init();
+        crate::wifi_debugln!("hw[3] gpio = {}", _ret);
 
         crate::wifi_debugln!("hw[4] mac");
         if reset_reason_early != ESP_RST_FAST_SW {
-            let ret = esp_mac_init();
-            crate::wifi_debugln!("hw[4] mac = {}", ret);
+            let _ret = esp_mac_init();
+            crate::wifi_debugln!("hw[4] mac = {}", _ret);
         }
 
         crate::wifi_debugln!("hw[5] reset_reason");
@@ -196,8 +196,8 @@ pub unsafe fn hardware_init_safe() {
         esp_task_wdt_init();
 
         crate::wifi_debugln!("hw[7] pthread");
-        let ret = esp_pthread_init();
-        crate::wifi_debugln!("hw[7] pthread = {}", ret);
+        let _ret = esp_pthread_init();
+        crate::wifi_debugln!("hw[7] pthread = {}", _ret);
 
         crate::wifi_debugln!("hw_init: done");
     }
