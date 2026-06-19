@@ -18,6 +18,7 @@ const WIFI_PASS: &str = match option_env!("ESP8266_HAL_WIFI_PASS") {
     None => include_str!("pass"),
 };
 const WIFI_CHANNEL: Option<&str> = option_env!("ESP8266_HAL_WIFI_CHANNEL");
+const WIFI_CONNECT_TIMEOUT_MS: Option<&str> = option_env!("ESP8266_HAL_WIFI_CONNECT_TIMEOUT_MS");
 
 static RESOURCES: StaticCell<WifiResources<8, 4, 2>> = StaticCell::new();
 
@@ -54,9 +55,12 @@ fn main() -> ! {
         .expect("start");
     esp8266_hal::logger::write_bytes(b"wifi core started");
     esp8266_hal::logger::write_newline();
+    let connect_timeout_ms = WIFI_CONNECT_TIMEOUT_MS
+        .and_then(parse_u32_literal)
+        .unwrap_or(60_000);
     {
         let mut sta = driver.sta().expect("sta");
-        if let Err(error) = sta.connect_blocking(60_000) {
+        if let Err(error) = sta.connect_blocking(connect_timeout_ms) {
             esp8266_hal::logger::write_bytes(b"wifi-connect-error=");
             esp8266_hal::logger::write_bytes(driver_error_name(error).as_bytes());
             esp8266_hal::logger::write_bytes(b" reason=");
@@ -93,6 +97,17 @@ fn parse_u8_literal(value: &str) -> Option<u8> {
             return None;
         }
         result = result.checked_mul(10)?.checked_add(byte - b'0')?;
+    }
+    Some(result)
+}
+
+fn parse_u32_literal(value: &str) -> Option<u32> {
+    let mut result = 0u32;
+    for byte in value.trim().bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        result = result.checked_mul(10)?.checked_add((byte - b'0') as u32)?;
     }
     Some(result)
 }

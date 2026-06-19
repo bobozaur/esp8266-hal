@@ -95,6 +95,7 @@ static mut FIRST_TIMER_PENDSV_TRACE_DONE: bool = false;
 static mut FIRST_TIMER_SOFT_ISR_TRACE_DONE: bool = false;
 static mut FIRST_TIMER_CTX_SWITCH_TRACE_DONE: bool = false;
 static mut FIRST_UI_TICK_TRACE_DONE: bool = false;
+static mut POLL_WDEV_ON_TICK: u32 = 0;
 
 // ---------------------------------------------------------------------------
 // ISR table
@@ -319,6 +320,16 @@ pub unsafe fn set_isr_context(active: bool) {
     }
 }
 
+/// Enable polling of the WiFi FIQ processor from the tick ISR.
+///
+/// Hardware validation shows this is required for closed-library paths such as
+/// SmartConfig to drain promiscuous RX traffic at the expected rate.
+pub fn set_wdev_tick_poll_enabled(enabled: bool) {
+    unsafe {
+        POLL_WDEV_ON_TICK = enabled as u32;
+    }
+}
+
 /// Apply a pending task switch using the live xtensa-lx-rt interrupt frame.
 ///
 /// xtensa-lx-rt restores CPU state from the current live level-1 interrupt
@@ -438,6 +449,10 @@ pub unsafe extern "C" fn xPortSysTickHandle(_p: *mut c_void) {
         // processed by ets_timer_task (via ets_timer_proc) and by FRC1
         // interrupt directly. Posting 0x10 every tick floods ppTask and
         // prevents it from processing auth/EAPOL frames promptly.
+
+        if POLL_WDEV_ON_TICK != 0 {
+            wDev_ProcessFiq();
+        }
 
         if task::xTaskIncrementTick() != 0 {
             portYIELD_FROM_ISR();

@@ -1760,3 +1760,1343 @@
     - `eap_sta_assoc-1781720051`: `wifi eap associated`, `eap-ok`;
     - `tcp_server-1781720014`: companion `OK TCP_CONNECT recv=70696e67`;
     - `esp_now_encrypted_companion-1781720095` and `esp_now_encrypted-1781720363`: encrypted ESP-NOW paths passed without the prior AES table exception.
+
+### 2026-06-17 OpenWrt Router WPS Harness and SDK Success Race Fix
+
+- Live fixture recheck before WPS work:
+  - no active `wifi-hw`, `esptool`, or serial runner was present; the broad process pattern only matched systemd's `--deserialize` argument;
+  - `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no `fuser` owners;
+  - FreeRADIUS PID `1909223` remained bound on UDP `1812`/`1813`;
+  - `enp3s0` was `10.42.0.1/24`, `wlp4s0` was `192.168.0.221/24`, and router `10.42.0.131` replied to ping.
+- Router access and fixture control:
+  - Dropbear key auth rejected the laptop ED25519 key, so generated a repo-local RSA fixture key under ignored `target/wifi-hw-router/id_rsa`;
+  - installed the public key on the router and set `dropbear.main.PubkeyAuth=on`;
+  - verified noninteractive SSH with isolated known-hosts file: `ssh -i target/wifi-hw-router/id_rsa -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/esp8266-hal-openwrt-known-hosts -o StrictHostKeyChecking=no -o BatchMode=yes root@10.42.0.131 'echo key-ok'`.
+- Manual OpenWrt WPS investigation:
+  - configured the router AP as SSID `esp8266-hal-wps`, PSK `esp8266wps`, channel `6`, WPS enabled, and started a PIN session with PIN `12345670`;
+  - before the SDK patch, artifact `target/wifi-hw-artifacts-20260617-wps-router-manual/manual-wps` showed the router reached `WPS-REG-SUCCESS` and `WPS-SUCCESS` for DUT MAC `48:3f:da:68:e3:04`, but the DUT reported `wps-sta-disconnect reason=23` and `wps-failed`;
+  - conclusion: RF exchange and registrar side were good; the ESP8266 SDK delayed WPS success callback lost a race with hostapd's following EAP failure/deauth.
+- Retained WPS SDK patch:
+  - patched the copied SDK WPS enrollee source in `esp8266-wifi-sys/build.rs` so `wps_finish()` calls `wifi_station_wps_success_internal()` immediately instead of arming the delayed `wps_success_cb_timer`;
+  - retained the existing `ESP8266_HAL_WPS_ENROLLEE_TRACE` path as an investigation-only trace patch; normal WPS builds keep trace disabled;
+  - manual retry after the immediate-success patch passed in `target/wifi-hw-artifacts-20260617-wps-router-immediate-success-retry`, with DUT UART reaching `wps-ok` and router logs again showing `WPS-REG-SUCCESS` and `WPS-SUCCESS`.
+- Added a real OpenWrt router WPS scenario to `xtask wifi-hw`:
+  - marked `wps` implemented instead of rig-blocked;
+  - added router fixture controls with env overrides for host, user, SSH key, known-hosts path, hostapd iface, and DUT MAC;
+  - scenario setup backs up `/etc/config/wireless`, configures SSID `esp8266-hal-wps` on channel `6`, enables WPS, starts hostapd with `wifi down radio0; sleep 2; wifi up radio0`, waits for `hostapd_cli get_config`, and opens a MAC-scoped PIN session for `48:3f:da:68:e3:04`;
+  - scenario restore copies the backup wireless config back, runs `wifi reload`, waits for the restored SSID, and records UCI, hostapd, and ubus status.
+- Harness iteration evidence:
+  - `target/wifi-hw-artifacts-20260617-wps-router-xtask/wps-1781721763`: failed setup because `wifi reload` raced and hostapd still exposed the old EAP config, with `wps_pin FAIL`;
+  - `target/wifi-hw-artifacts-20260617-wps-router-xtask-v2/wps-1781721928`: setup timeout while waiting for the WPS AP after changing router config;
+  - `target/wifi-hw-artifacts-20260617-wps-router-xtask-v3/wps-1781722323`: WPS AP came up, but the DUT only scan-looped before adding the MAC-scoped PIN;
+  - `target/wifi-hw-artifacts-20260617-wps-router-xtask-v4/wps-1781722770`: first automated WPS pass; router status showed `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, and the DUT reached `wps-ok`;
+  - changed restore from down/up to `wifi reload` to reduce netifd churn, then reran the final scenario.
+- Final WPS validation:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260617-wps-router-xtask-final CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps`;
+  - result: passed with artifact `target/wifi-hw-artifacts-20260617-wps-router-xtask-final/wps-1781723112`;
+  - DUT UART reached `wifi_wps start`, `wifi init ok`, `wps sta started`, `wps ready`, `wps pin=12345670`, and `wps-ok`;
+  - router `router-after.log` showed `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, SSID `esp8266-hal-wps`, channel `6`, and recent hostapd log lines including `WPS-REG-SUCCESS` and `WPS-SUCCESS`;
+  - router `router-restore.log` showed restored UCI config for SSID `esp8266-router-eap`, channel `11`, RADIUS host `10.42.0.1`, secret `esp8266-radius-secret`, and hostapd config `key_mgmt=WPA-EAP`.
+- Live router restore verification after the final WPS run:
+  - `ssh -i target/wifi-hw-router/id_rsa -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/esp8266-hal-openwrt-known-hosts -o StrictHostKeyChecking=no -o BatchMode=yes root@10.42.0.131 'uci -q get wireless.default_radio0.ssid; hostapd_cli -p /var/run/hostapd -i phy0-ap0 get_config; ubus -S call hostapd.phy0-ap0 get_status'`: passed;
+  - router reported `ssid=esp8266-router-eap`, `bssid=a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, frequency `2462`, and channel `11`.
+- Current WPS status:
+  - superseded by the 2026-06-18 reboot recovery section below: manual PIN evidence remains useful, but the retained automated router scenario now uses PBC because MAC-scoped PIN automation proved flaky after fixture hardening.
+
+### 2026-06-18 Reboot Recovery, WPS PBC Automation, and Post-WPS EAP Regression
+
+- Laptop restart recovery:
+  - `git status --short`: active dirty files were `examples/wifi_wps.rs`, `research.md`, and `xtask/src/wifi_hw.rs`; unrelated prior artifacts remained untouched;
+  - safety checks found no active `wifi-hw`, `esptool`, serial runner, or `eap_sta_assoc` process and no `fuser` owners for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - `enp3s0` was still `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` stayed connected at `192.168.0.221/24`, and the router at `10.42.0.131` replied to ping;
+  - after reboot FreeRADIUS was absent, so restarted the ECDSA/P-256 fixture from `/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/sbin/freeradius` with `OPENSSL_CONF=target/eap-radius-1024/openssl-lowsec.cnf`, config root `target/eap-radius-ecdsa/raddb`, and log `target/wifi-hw-artifacts-20260618-reboot-recovery/freeradius-ecdsa.log`;
+  - `ss -lunpt | rg ':(1812|1813)\b|freeradius'`: FreeRADIUS PID `35807` was listening on UDP `1812`/`1813`;
+  - router live check reported SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, and `key_mgmt=WPA-EAP`.
+- Post-reboot Enterprise baseline:
+  - `source .envrc && env -u ESP8266_HAL_EAP_TRACE ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-reboot-recovery-eap CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: passed;
+  - artifact `target/wifi-hw-artifacts-20260618-reboot-recovery-eap/eap_sta_assoc-1781752623` reached `wifi eap associated` and `eap-ok`;
+  - FreeRADIUS logged `Calling-Station-Id = "48-3F-DA-68-E3-04"`, `TLS-Session-Cipher-Suite = "ECDHE-ECDSA-AES128-SHA"`, and `Sent Access-Accept`;
+  - hostapd showed the DUT authorized with `last_eap_type_as=25 (PEAP)` and `EAPOL-4WAY-HS-COMPLETED`.
+- WPS router harness refinement:
+  - hardened WPS router setup to wait on `ubus` status plus `hostapd_cli get_config` before starting WPS;
+  - hardened restore to copy back the wireless backup, run `wifi down radio0; sleep 3; wifi up radio0`, wait for netifd/hostapd to settle, and verify the restored UCI SSID instead of racing `hostapd_cli` during teardown;
+  - retained router env overrides and artifact logging, including router host, user, hostapd iface, backup path, and DUT MAC in `manifest.txt`.
+- WPS PIN automation status:
+  - `target/wifi-hw-artifacts-20260618-wps-fixed-restore/wps-1781753125`: with the hardened restore/setup, MAC-scoped PIN setup succeeded on the router but the DUT only produced repeated scan/debug markers and timed out before the WPS exchange;
+  - router restore completed cleanly after the failed PIN run, and live router checks again showed the EAP SSID on channel `11`;
+  - conclusion: manual PIN WPS remains evidenced, but automatic PIN coverage is not retained as the default because selected-registrar/beacon timing is flaky with this OpenWrt fixture.
+- Retained automated WPS path:
+  - switched the repo-local `wifi-hw run wps` router scenario to PBC (`hostapd_cli wps_pbc`) and stopped forcing `ESP8266_HAL_WPS_PIN`, so the `wifi_wps` example runs in PBC mode unless a PIN env var is supplied manually;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-wps-pbc CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps`: passed in artifact `wps-1781753666`;
+  - first PBC pass reached `wps-ok`, and router reported `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, `WPS-REG-SUCCESS`, `WPS-PBC-DISABLE`, and `WPS-SUCCESS`;
+  - that first PBC UART later printed `wps-sta-disconnect reason=23` and `wps-fail-detail ... wps-failed` after success, matching hostapd's post-success EAP failure/deauth behavior.
+- WPS example success parking fix:
+  - changed `examples/wifi_wps.rs` so the `WpsSucceeded` branch stops WPS, prints `wps-ok`, logs headroom, and then parks forever instead of continuing to process later disconnect/failure events from the registrar;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed all xtask tests (`7`, `5`, and `23` tests in the non-empty binaries);
+  - stale command `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_wps --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-wps -q` failed because the example also requires `wifi-sta`;
+  - corrected command `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_wps --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-wps -q`: passed with the known broad warning set.
+- Final WPS PBC validation after success parking:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-wps-pbc-after-success-park CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps`;
+  - result: passed with artifact `target/wifi-hw-artifacts-20260618-wps-pbc-after-success-park/wps-1781754089`;
+  - DUT UART reached `wifi_wps start`, `wifi init ok`, `wps sta started`, `wps ready`, and `wps-ok`; text decoding showed no later `wps-failed`;
+  - router setup recorded WPS AP `esp8266-hal-wps` on channel `6`, `wps_state=configured`, `key_mgmt=WPA-PSK`, and `PBC Status: Active`;
+  - router after log reported `PBC Status: Disabled`, `Last WPS result: Success`, `Peer Address: 48:3f:da:68:e3:04`, and hostapd log lines `WPS-REG-SUCCESS`, `WPS-PBC-DISABLE`, and `WPS-SUCCESS`;
+  - router restore log restored UCI SSID `esp8266-router-eap`, channel `11`, and RADIUS secret `esp8266-radius-secret`.
+- Live restore and EAP regression after WPS:
+  - live router check after the WPS run reported SSID `esp8266-router-eap`, channel `11`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and `ubus` status `ENABLED`;
+  - FreeRADIUS PID `35807` was still listening on UDP `1812`/`1813`;
+  - `source .envrc && env -u ESP8266_HAL_EAP_TRACE ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-post-wps-eap CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc`: passed;
+  - artifact `target/wifi-hw-artifacts-20260618-post-wps-eap/eap_sta_assoc-1781754325` reached `wifi eap associated` and `eap-ok`;
+  - FreeRADIUS log showed `Calling-Station-Id = "48-3F-DA-68-E3-04"`, `TLS-Session-Cipher-Suite = "ECDHE-ECDSA-AES128-SHA"`, and `Sent Access-Accept`;
+  - hostapd `all_sta` showed the DUT authorized, `last_eap_type_as=25 (PEAP)`, `last_eap_type_sta=25 (PEAP)`, and `dot1xAuthBackendAuthSuccesses=1`.
+- Current status after this pass:
+  - automated WPS PBC is hardware-validated against the OpenWrt/Netgear fixture and is no longer rig-blocked;
+  - WPS PIN has manual hardware evidence but default automation is still not stable enough to claim as green;
+  - WPA2 Enterprise PEAP/MSCHAPv2 remains green for the ECDSA/P-256 FreeRADIUS fixture after reboot and after WPS router reconfiguration;
+  - remaining known gaps are SmartConfig sender coverage and deterministic promiscuous control-frame injection, plus broader negative/edge case validation.
+
+### 2026-06-18 Matrix Reliability Pass After Reboot
+
+- Live safety and fixture checks before continuing:
+  - `git status --short`: modified files were `examples/wifi_wps.rs`, `research.md`, and `xtask/src/wifi_hw.rs`;
+  - no active `wifi-hw`, `esptool`, serial runner, or `eap_sta_assoc` process was present, and `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no `fuser` owners;
+  - FreeRADIUS PID `35807` remained bound on UDP `1812`/`1813`;
+  - `enp3s0` was `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` stayed connected at `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+  - live router check showed restored EAP fixture state: SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `status=ENABLED`.
+- ESP-NOW unicast failure isolation:
+  - previous full matrix root `target/wifi-hw-artifacts-20260618-full-after-wps-promisc-hardening` failed only the later duplicate `esp_now_unicast` scenario after three attempts (`1781758289`, `1781758307`, `1781758324`);
+  - all three failed attempts had DUT UART at `wifi_esp_now_rx start`, `wifi init ok`, `esp-now sta started`, `esp-now channel ok`, `esp-now rx peer unicast`, and `esp-now rx ready`;
+  - all three companion logs failed on a single sender-side line: `ERR code=espnow-status detail=failed`;
+  - isolated rerun before changing the harness passed: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-espnow-unicast-after-matrix CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run esp_now_unicast`;
+  - artifact `target/wifi-hw-artifacts-20260618-espnow-unicast-after-matrix/esp_now_unicast-1781758581` had companion `OK ESPNOW_TX status=success` and DUT `esp-now-rx-ok`.
+- ESP-NOW harness refinement:
+  - changed `run_esp_now_companion()` to retry non-negative `ESPNOW_TX` commands up to five times with a 750 ms backoff while the DUT remains at `esp-now rx ready`;
+  - the DUT receive marker `esp-now-rx-ok` remains the required pass condition, and the bad-key negative path is not retried or treated as a positive delivery;
+  - after this change, `cargo fmt --all -- --check`, `git diff --check`, and `cargo test -p xtask --target x86_64-unknown-linux-gnu -q` passed.
+- Focused ESP-NOW validation after the retry change:
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-espnow-unicast-retry CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run esp_now_unicast`: passed;
+  - artifact `target/wifi-hw-artifacts-20260618-espnow-unicast-retry/esp_now_unicast-1781758712` delivered on the first `ESPNOW_TX` attempt and DUT logged `esp-now rx peer=4c:c3:82:82:32:80`, `esp-now rx len=19`, and `esp-now-rx-ok`.
+- Full hardware matrix after WPS/promisc/ESP-NOW hardening:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-full-after-espnow-retry CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - matrix reported the two expected rig-blocked cases only:
+    - `smartconfig`: current ESP32 companion cannot emulate ESPTouch phone/STA-through-AP provisioning;
+    - `promisc_control_filters`: ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames.
+- Representative matrix evidence:
+  - completed scenario directories included `sta_connect-1781758747`, `sta_scan-1781758762`, `sta_dhcp-1781758777`, `sta_static_ip-1781758794`, `tcp_server-1781758811`, `tcp_client-1781758828`, `eap_sta_assoc-1781758849`, `esp_now_unicast_companion-1781758878`, `esp_now_encrypted_companion-1781758892`, `esp_now_bad_key_companion-1781758908`, `promisc_data_companion-1781758927`, `ap_start-1781758940`, `ap_station_list-1781758951`, `ap_dhcp-1781758968`, `ap_sta-1781758994`, `wps-1781759089`, `wps-1781759293`, `esp_now_unicast-1781759497`, `esp_now_broadcast-1781759515`, `esp_now_encrypted-1781759525`, `promisc_capture-1781759542`, `promisc_filters-1781759555`, and `promisc_control_filter_api-1781759568`;
+  - first WPS attempt `wps-1781759089` failed and restored the router; second attempt `wps-1781759293` passed with DUT `wps-ok`, router `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, `WPS-REG-SUCCESS`, `WPS-PBC-DISABLE`, and `WPS-SUCCESS`;
+  - receiver-side `esp_now_unicast-1781759497` exercised the new retry path: first companion `ESPNOW_TX` returned `ERR code=espnow-status detail=failed`, second returned `OK ESPNOW_TX status=success`, and the DUT completed `esp-now-rx-ok`;
+  - `esp_now_unicast_companion-1781758878`, `esp_now_encrypted_companion-1781758892`, `esp_now_bad_key_companion-1781758908`, and `esp_now_encrypted-1781759525` completed on one sender attempt;
+  - `promisc_filters-1781759555` used active `RAW80211_TX kind=beacon` stimulus and reached the management-frame success marker.
+- Post-matrix fixture state:
+  - live router check after the matrix again reported SSID `esp8266-router-eap`, channel `11`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `status=ENABLED`;
+  - FreeRADIUS PID `35807` still listened on UDP `1812`/`1813`.
+- Final static validation for this pass:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q`: passed with the known broad warning set;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_wps --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-wps -q`: passed with the known broad warning set.
+- Status after the matrix reliability pass:
+  - implemented hardware matrix coverage is green for STA connect/scan/DHCP/static IP, TCP server/client, WPA2 Enterprise PEAP/MSCHAPv2 with the ECDSA/P-256 RADIUS fixture, AP start/station list/DHCP/AP+STA, ESP-NOW unicast/broadcast/encrypted/bad-key paths, promiscuous capture/data/filter/API paths, and WPS PBC against the OpenWrt router;
+  - WPS PIN remains manual-only/flaky under the router fixture and should not be claimed as automated green;
+  - SmartConfig remains blocked by the lack of an ESPTouch/AirKiss sender fixture;
+  - deterministic promiscuous control-frame RF validation remains blocked by ESP32 raw-TX limitations, while the control-filter API itself is green.
+
+### 2026-06-18 SmartConfig Fixture Investigation
+
+- Safety and fixture context:
+  - `git status --short`: active files included `examples/wifi_wps.rs`, `research.md`, `xtask/src/wifi_hw.rs`, and later `companion/esp32-pico-d4/main/main.c` plus `xtask/tests/wifi_hw_cli.rs`;
+  - serial safety checks found no owners for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - router restore checks repeatedly returned SSID `esp8266-router-eap`, BSSID `a0:63:91:0f:e5:f0`, channel `11`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and `status=ENABLED`;
+  - FreeRADIUS remained live on UDP `1812`/`1813`; laptop Ethernet stayed `enp3s0 10.42.0.1/24`, and laptop Wi-Fi stayed connected.
+- Host ESPTouch sender reference:
+  - cloned/read Espressif's Android ESPTouch sender under ignored `target/esptouch-for-android`;
+  - matched guide lengths `[515, 514, 513, 512]`, CRC8 polynomial `0x8c`, extra length `40`, inserted BSSID data codes, UDP port `7001`, 2s guide/4s data period, and 8 ms packet interval;
+  - found and fixed an off-by-one BSSID insertion bug in the existing ESP32 companion ESPTouch encoder so it matches the Android reference insertion index.
+- First router-backed host sender attempt:
+  - added a temporary OpenWrt router SmartConfig AP fixture for SSID `esp8266-hal-smart`, channel `6`, BSSID `a0:63:91:0f:e5:f0`, and a repo-local SmartConfig artifact manifest;
+  - `cargo fmt --all -- --check`, `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`, and `git diff --check`: passed after the initial harness changes;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-router/smartconfig-1781764775`: failed after host-over-Ethernet ESPTouch broadcast to `255.255.255.255:7001`; sender emitted `sent_packets=14825 elapsed_ms=120019`, but the DUT only reached `smartconfig ready` and `smartconfig scan done`, never `smartconfig found channel`;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-router-directed/smartconfig-1781765182`: failed with directed broadcast `ESP8266_HAL_SMARTCONFIG_TARGET=10.42.0.255:7001`; DUT again did not reach `smartconfig found channel`;
+  - conclusion: laptop Ethernet broadcast through the router does not produce ESPTouch RF frames accepted by the ESP8266 SmartConfig sniffer.
+- ESP32 companion STA sender attempt:
+  - added `SMARTCONFIG_STA_PROVISION` to `companion/esp32-pico-d4/main/main.c`;
+  - command behavior: join the router AP as an ESP32 STA, use the ESP32 STA IP as the encoded phone IP, encode the router AP BSSID, bind UDP sockets to the STA netif, send ESPTouch lengths, and wait for ACK on UDP `18266`;
+  - changed xtask SmartConfig to keep a persistent companion `CommandSession` open before DUT reset, avoiding ESP32 reset/partial-command parsing when the DUT later prints `smartconfig ready`;
+  - `source .envrc && cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion build`: passed after companion changes;
+  - `source .envrc && cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion flash --serial-port /dev/ttyACM0`: passed;
+  - `source .envrc && cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion command --serial-port /dev/ttyACM0 PING`: returned `READY companion esp32-pico-d4 mac=4c:c3:82:82:32:80` and `OK PONG`.
+- ESP32 sender failure evidence:
+  - `target/wifi-hw-artifacts-20260618-smartconfig-companion-sta/smartconfig-1781766271`: first persistent-router attempt failed before provisioning because opening the companion port at `smartconfig ready` reset the ESP32 and the long command was parsed as `ERR code=unknown-command detail=artpass`;
+  - fixed that by using a persistent companion session through the scenario;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-companion-session/smartconfig-1781766616`: command reached firmware but failed joining the temporary WPA2 AP with `step=join-sender-ap`;
+  - added SmartConfig join disconnect reason reporting in the companion;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-join-reason/smartconfig-1781767050`: failed with ESP-IDF reason `201` (`WIFI_REASON_NO_AP_FOUND`) while router setup was not yet strictly validating live `hostapd_cli status`;
+  - hardened router setup to require both `ubus hostapd get_status` and `hostapd_cli status` to report the expected SSID and channel before DUT reset;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-stable-router-fullscan/smartconfig-1781767611`: router AP was confirmed enabled on channel `6`, companion used full-scan join (`channel=0`), but failed with reason `39` (`WIFI_REASON_TIMEOUT`); router log showed ESP32 MAC `4c:c3:82:82:32:80` authenticated but did not complete association;
+  - tried a mixed-PSK/WMM-on temporary AP, but `target/wifi-hw-artifacts-20260618-smartconfig-standard-ap/smartconfig-1781767966` failed during router setup because `hostapd_cli status` was blank despite `ubus` reporting enabled, so that profile was not retained;
+  - extended the ESP32 sender join window to 45 seconds, rebuilt/flashed the companion, and reran with the stable WPA2 AP: `target/wifi-hw-artifacts-20260618-smartconfig-long-join/smartconfig-1781768618` failed with reason `2` (`WIFI_REASON_AUTH_EXPIRE`);
+  - switched default SmartConfig fixture to an open temporary AP while preserving the PSK env override path; `target/wifi-hw-artifacts-20260618-smartconfig-open-ap/smartconfig-1781768965` confirmed open hostapd config (`ssid=esp8266-hal-smart`, no `key_mgmt=WPA-PSK`) but the ESP32 still failed before association with reason `2`.
+- Final SmartConfig status from this pass:
+  - SmartConfig is not hardware green;
+  - the scenario has been returned to `rig-blocked` with an explicit ESPTouch sender-fixture reason, so normal `wifi-hw matrix` will not claim it as implemented;
+  - useful diagnostic code remains: router SmartConfig setup/restore, companion `SMARTCONFIG_STA_PROVISION`, persistent companion session handling, official-reference ESPTouch encoding, and richer companion join error reporting;
+  - the current OpenWrt/Netgear AP plus ESP32 STA sender is not a reliable phone-equivalent ESPTouch sender. A next pass should use a real phone/app or a different Wi-Fi transmitter path that can associate and emit ESPTouch frames reliably.
+- Final validation after returning SmartConfig to rig-blocked:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed all xtask test binaries (`7`, `5`, and `23` tests in the non-empty groups);
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list`: passed and reported `smartconfig` as `rig-blocked` with the ESPTouch sender reason and `promisc_control_filters` as rig-blocked for control-frame injection;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q`: passed with the known broad warning set;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_smartconfig --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-smartconfig -q`: passed with the known broad warning set;
+  - final live fixture sanity: no active `wifi-hw`/serial/esptool owners, FreeRADIUS PID `35807` listening on UDP `1812`/`1813`, `enp3s0` at `10.42.0.1/24`, `wlp4s0` at `192.168.0.221/24`, and router restored to SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, `status=ENABLED`.
+
+### 2026-06-18 Promiscuous Harness Reliability Follow-Up
+
+- Full matrix after returning SmartConfig to rig-blocked:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-full-after-smartconfig-block CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: failed only `promisc_filters` after three attempts;
+  - matrix skipped the expected rig-blocked cases: `smartconfig` for lack of a working ESPTouch sender fixture, and `promisc_control_filters` because ESP32 raw TX cannot deterministically inject 802.11 control frames;
+  - failing attempt directories were `promisc_filters-1781770619`, `promisc_filters-1781770678`, and `promisc_filters-1781770737`;
+  - DUT UART reached `wifi_promisc start`, `wifi init ok`, `promisc sta started`, `promisc filter management`, `promisc ctrl filter none`, `promisc channel 6`, `promisc set channel ok`, `promisc enable ok`, and `promisc started`, but never reached `promisc-management-ok`;
+  - companion logs showed repeated one-shot `RAW80211_TX kind=beacon channel=6 count=24 interval_ms=5` commands, with a new `READY` banner before each OK response, meaning the harness was reopening `/dev/ttyACM0` and resetting the ESP32 between beacon bursts.
+- Harness change:
+  - changed `run_promisc_companion()` to keep one persistent `esp32_companion::CommandSession` open and use `ensure_companion_session_ready()` plus `companion_session_command()` for AP setup and `RAW80211_TX`;
+  - increased active raw stimulus counts to `128` for `promisc_capture` and `promisc_filters`, `64` for `promisc_control_filters`, and `48` for the other paths;
+  - increased the focused management-frame timeout for `promisc_capture` and `promisc_filters` to `75` seconds.
+- Static checks after the harness change:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `git diff --check`: passed.
+- Focused hardware validation:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-promisc-persistent-companion CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run promisc_filters`;
+  - result: passed with artifact `target/wifi-hw-artifacts-20260618-promisc-persistent-companion/promisc_filters-1781770921`;
+  - DUT UART reached `promisc started`, `promisc frame type=management ch=6 len=256`, and `promisc-management-ok`;
+  - companion log showed a persistent session with `$ PING`, `$ RESET_WIFI`, and one `$ RAW80211_TX kind=beacon channel=6 count=128 interval_ms=5`, followed by `OK RAW80211_TX kind=beacon channel=6 count=128`.
+- Resume safety checks before rerunning the full matrix:
+  - `git status --short`: modified files were `companion/esp32-pico-d4/main/main.c`, `examples/wifi_wps.rs`, `research.md`, `xtask/src/wifi_hw.rs`, and `xtask/tests/wifi_hw_cli.rs`;
+  - no active hardware-test, serial, esptool, or `wifi-hw` process was present, and `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no `fuser` owners;
+  - FreeRADIUS PID `35807` remained bound on UDP `1812`/`1813`;
+  - `enp3s0` was `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` stayed connected at `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+  - live router check reported SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `status=ENABLED`.
+- Full matrix after the persistent companion-session change:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-full-after-promisc-persistent CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: failed only the promiscuous management-frame stimulus scenarios;
+  - `promisc_capture` failed all three attempts because companion `RAW80211_TX kind=beacon channel=6 count=128 interval_ms=5` returned `ERR code=raw80211-tx detail=ESP_ERR_NO_MEM`;
+  - `promisc_filters` failed one attempt by timeout and two attempts with the same companion `ESP_ERR_NO_MEM`;
+  - skipped rig-blocked cases remained `smartconfig` and `promisc_control_filters`.
+- Follow-up stimulus attempts:
+  - changed raw management stimulus to smaller `count=32 interval_ms=8` bursts and made companion `ESP_ERR_NO_MEM` retryable at the xtask layer; `cargo fmt --all -- --check`, `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`, and `git diff --check` passed;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-promisc-small-bursts CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run promisc_capture`: failed by timeout even though repeated `RAW80211_TX kind=beacon channel=6 count=32 interval_ms=8` commands returned OK;
+  - switched the management scenarios to `RAW80211_TX kind=management` probe requests; broad `promisc_capture` passed once by seeing `promisc frame type=data ch=6 len=0`, but `promisc_filters` timed out, so this was not accepted as valid management-filter evidence;
+  - switched `promisc_capture` and `promisc_filters` to the passive companion AP beacon path (`AP_START ssid=esp8266-hal-promisc pass=open channel=6`) instead of active raw beacon injection.
+- Focused validation for passive AP beacon stimulus:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `git diff --check`: passed;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-promisc-passive-beacon CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run promisc_capture`: passed with artifact `target/wifi-hw-artifacts-20260618-promisc-passive-beacon/promisc_capture-1781773230`;
+  - `promisc_capture-1781773230` companion log showed `OK AP_START ssid=esp8266-hal-promisc ch=6`; DUT UART reached `promisc frame type=management ch=6 len=148` and `promisc-ok`;
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-promisc-passive-beacon CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run promisc_filters`: passed with artifact `target/wifi-hw-artifacts-20260618-promisc-passive-beacon/promisc_filters-1781773250`;
+  - `promisc_filters-1781773250` companion log showed `OK AP_START ssid=esp8266-hal-promisc ch=6`; DUT UART reached `promisc filter management`, `promisc frame type=management ch=6 len=0`, and `promisc-management-ok`.
+- Full hardware matrix after passive AP beacon promisc stimulus:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-full-after-promisc-passive-beacon CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - matrix reported the two expected rig-blocked cases only:
+    - `smartconfig`: current rig lacks a working phone-equivalent ESPTouch sender; host-Ethernet and ESP32/router sender attempts failed before DUT credentials;
+    - `promisc_control_filters`: ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames.
+- Matrix transient/retry evidence:
+  - `promisc_data_companion` failed attempts `promisc_data_companion-1781773509` and `promisc_data_companion-1781773569`; third attempt `promisc_data_companion-1781773628` passed with companion `OK RAW80211_TX kind=data channel=6 count=48` and DUT `promisc frame type=data ch=6 len=0`, `promisc-ok`;
+  - WPS PBC failed attempts `wps-1781773713` and `wps-1781774072`; third attempt `wps-1781774461` passed with DUT `wps-ok`, router `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, and hostapd `WPS-REG-SUCCESS`, `WPS-PBC-DISABLE`, `WPS-SUCCESS`;
+  - `promisc_capture-1781774781` used companion `OK AP_START ssid=esp8266-hal-promisc ch=6` and DUT reached `promisc frame type=management ch=6 len=256`, `promisc-ok`;
+  - `promisc_filters-1781774795` used the same passive AP beacon source and DUT reached `promisc filter management`, `promisc frame type=management ch=6 len=256`, `promisc-management-ok`;
+  - `promisc_control_filter_api-1781774809` reached `promisc ctrl filter ack ok`, `promisc ctrl filter none ok`, `promisc stop ok`, and `promisc-control-api-ok`;
+  - `eap_sta_assoc-1781773429` reached `wifi eap associated` and `eap-ok`;
+  - `esp_now_unicast-1781774740` companion returned `OK ESPNOW_TX status=success`, and DUT reached `esp-now rx peer=4c:c3:82:82:32:80`, `esp-now rx len=19`, and `esp-now-rx-ok`.
+- Post-matrix fixture and static validation:
+  - no active hardware-test, serial, esptool, or `wifi-hw` process was present, and `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no `fuser` owners;
+  - FreeRADIUS PID `35807` remained bound on UDP `1812`/`1813`;
+  - `enp3s0` was `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` stayed connected at `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+  - live router check reported SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `status=ENABLED`;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q`: passed with the known broad warning set;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list`: passed and reported implemented scenarios for STA, TCP, EAP, AP, WPS, ESP-NOW, promiscuous data/capture/filter/API paths, with `smartconfig` and `promisc_control_filters` still rig-blocked.
+
+### 2026-06-18 Promiscuous Control-Frame Fixture Probe
+
+- Motivation:
+  - `promisc_control_filter_api` is green for control-filter setup/state transitions, but RF validation of actual control frames is still rig-blocked because ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames;
+  - tried to find a natural RF traffic source where the DUT sniffs control frames while two other radios exchange normal traffic.
+- ESP32 AP plus OpenWrt STA probe:
+  - started the ESP32 companion AP with `source .envrc && cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion command --serial-port /dev/ttyACM0 'AP_START ssid=esp8266-hal-control pass=open channel=6'`;
+  - result: companion returned `READY companion esp32-pico-d4 mac=4c:c3:82:82:32:80` and `OK AP_START ssid=esp8266-hal-control ch=6`;
+  - first router station-mode probe failed because the lean OpenWrt image does not include `iw`, but the script restored `/etc/config/wireless`;
+  - verified available router tooling: `/sbin/ip`, `/sbin/ifconfig`, `/usr/sbin/hostapd_cli`, and `/bin/ubus` are present; `iw` and `wpa_cli` are absent;
+  - retried with temporary `/etc/config/network` interface `control` (`192.168.4.10/24`) and OpenWrt radio mode `sta` on SSID `esp8266-hal-control`, channel `6`;
+  - `ubus -S call network.wireless status` reported temporary STA interface `phy0-sta0`, but `ifconfig -a` did not show it with an IP and `ping -c 10 -W 1 192.168.4.1` returned `10 packets transmitted, 0 packets received, 100% packet loss`;
+  - restore trap copied back both `/etc/config/wireless` and `/etc/config/network`, restarted the radio/network, and live verification again showed SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `status=ENABLED`.
+- Current conclusion:
+  - the OpenWrt-as-STA path did not produce a usable traffic pair with the current lean router image and ESP32 AP;
+  - promising next control-frame path is to use the second ESP8266 on `/dev/ttyUSB1` as a STA traffic generator while the main DUT on `/dev/ttyUSB0` runs `wifi_promisc` with `ESP8266_HAL_PROMISC_FILTER=control`.
+- Two-ESP8266 control-frame probe:
+  - built and flashed `/dev/ttyUSB0` with `ESP8266_HAL_PROMISC_FILTER=control ESP8266_HAL_PROMISC_CTRL_FILTER=ack ESP8266_HAL_PROMISC_CHANNEL=6` and used `/dev/ttyUSB1` running `wifi_core_connect` as a STA generator against ESP32 AP `esp8266-hal-control` on channel `6`;
+  - before the control-frame payload fix, the main DUT reached `promisc filter control`, `promisc ctrl filter ack`, `promisc channel 6`, `promisc enable ok`, `promisc ctrl filter ok`, and `promisc started`, then emitted the panic marker `?` while the STA generator associated and connected;
+  - patched the core promiscuous callback to map the packet type before computing payload length and force `payload_len=0` for `PromiscuousPacketType::Control`;
+  - reran the same two-ESP8266 probe with artifact `target/wifi-hw-artifacts-20260618-promisc-control-two-esp8266/manual-two-esp8266-fixed-summary.txt`: main DUT again reached `promisc started`, STA generator reached `wifi core associated` and `wifi core connected`, and no panic marker appeared, but the DUT still did not print `promisc-control-ok`;
+  - reran a broader variant with `ESP8266_HAL_PROMISC_CTRL_FILTER=all`, AP restart, and the same STA generator; summary `target/wifi-hw-artifacts-20260618-promisc-control-two-esp8266/manual-two-esp8266-control-all-summary.txt` reported `success=False`, `started=True`, `sta_reset=True`, `failure=None`; the main DUT reached `promisc ctrl filter all` and `promisc started`, the STA generator connected, and no panic marker appeared;
+  - conclusion: the HAL-side crash hazard from reading bogus control-frame payload lengths is fixed, but this natural-traffic fixture still does not produce repeatable positive RF evidence for control-frame capture.
+- Follow-up code cleanup:
+  - applied the same zero-length control-frame rule to the legacy direct `src/wifi/promiscuous.rs` callback path;
+  - fixed that path to call the user handler with `&[]` for zero-length frames instead of dropping them.
+- Static validation after the control-frame payload fix:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed all host Wi-Fi-core test binaries;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed all xtask test binaries (`7`, `5`, and `23` tests in the non-empty groups);
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q`: passed with the known broad warning set.
+- Full hardware matrix on the current source:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-after-control-payload-fix CARGO_INCREMENTAL=0 timeout 3600 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - expected rig-blocked cases only:
+    - `smartconfig`: current rig lacks a working phone-equivalent ESPTouch sender; host-Ethernet and ESP32/router sender attempts failed before DUT credentials;
+    - `promisc_control_filters`: ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames.
+- Matrix scenario artifacts:
+  - `sta_connect-1781776117`, `sta_scan-1781776135`, `sta_dhcp-1781776153`, `sta_static_ip-1781776172`, `tcp_server-1781776190`, `tcp_client-1781776208`, `eap_sta_assoc-1781776229`, `esp_now_unicast_companion-1781776259`, `esp_now_encrypted_companion-1781776275`, `esp_now_bad_key_companion-1781776290`, `promisc_data_companion-1781776310`, `ap_start-1781776326`, `ap_station_list-1781776339`, `ap_dhcp-1781776355`, `ap_sta-1781776381`, `wps-1781776403`, `esp_now_unicast-1781776619`, `esp_now_broadcast-1781776644`, `esp_now_encrypted-1781776655`, `promisc_capture-1781776671`, `promisc_filters-1781776685`, `promisc_control_filter_api-1781776699`.
+- Representative current-source matrix markers:
+  - `sta_connect-1781776117`: `wifi core connected`;
+  - `sta_scan-1781776135`: `scan-ok`;
+  - `sta_dhcp-1781776153`: DHCP path passed;
+  - `sta_static_ip-1781776172`: `static ip up`;
+  - `tcp_server-1781776190`: `listen 1234`, companion `OK TCP_CONNECT recv=70696e67`;
+  - `tcp_client-1781776208`: `tcp client connected`, `recv:32`;
+  - `eap_sta_assoc-1781776229`: `wifi eap associated`, `eap-ok`;
+  - `ap_start-1781776326`: `ap-start-ok`;
+  - `ap_station_list-1781776339`: `ap-station-list-ok`, companion `OK STA_JOIN connected=1`;
+  - `ap_dhcp-1781776355`: `ap-dhcp-offer`, `ap-dhcp-ack`, `ap-dhcp-ok`, companion `OK STA_JOIN ip=192.168.4.2 ch=6`;
+  - `ap_sta-1781776381`: `ap-sta-downstream-ok`, companion `OK STA_JOIN_KEEP_AP ip=192.168.4.2 ch=6`;
+  - `wps-1781776403`: DUT `wps-ok`; router `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, `WPS-REG-SUCCESS`, `WPS-PBC-DISABLE`, and `WPS-SUCCESS`;
+  - `esp_now_unicast-1781776619`: companion `OK ESPNOW_TX status=success`, DUT `esp-now-rx-ok`;
+  - `esp_now_broadcast-1781776644`: `esp-now send-callback-ok`, `esp-now-tx-ok`;
+  - `esp_now_encrypted-1781776655`: companion `OK ESPNOW_TX status=success`, DUT `esp-now-rx-ok`;
+  - `promisc_data_companion-1781776310`: `promisc frame type=data ch=6 len=139`, `promisc-ok`;
+  - `promisc_capture-1781776671`: companion `OK AP_START ssid=esp8266-hal-promisc ch=6`, DUT `promisc frame type=management ch=6 len=256`, `promisc-ok`;
+  - `promisc_filters-1781776685`: `promisc frame type=management ch=6 len=256`, `promisc-management-ok`;
+  - `promisc_control_filter_api-1781776699`: `promisc-control-api-ok`.
+- Post-matrix live fixture check:
+  - no active hardware-test, serial, esptool, or `wifi-hw` process was present, and `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no `fuser` owners;
+  - FreeRADIUS PID `35807` remained bound on UDP `1812`/`1813`;
+  - `enp3s0` was `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` remained connected at `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+  - router status via the fixture SSH key reported SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `state=ENABLED`.
+
+### 2026-06-18 WPS Router Harness Re-Arm Follow-Up
+
+- Resume after laptop restart:
+  - safety checks found no active hardware-test, esptool, serial, `cargo run -p xtask`, or `wifi-hw` processes, and `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no `fuser` owners;
+  - FreeRADIUS PID `35807` was still listening on UDP `1812`/`1813`;
+  - `enp3s0` was `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` was still connected at `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+  - the interrupted matrix session from `target/wifi-hw-artifacts-20260618-full-after-wps-pin-scenario` had no matching local process but had left the router in temporary WPS AP state, so the wireless backup `/tmp/esp8266-hal-wireless-wps-1781779203-283986` was restored manually;
+  - manual restore result: router returned to SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `state=ENABLED`.
+- Harness changes:
+  - `wifi_wps` now accepts build-time `ESP8266_HAL_WPS_MAX_ATTEMPTS` while keeping a standalone default of `8` attempts;
+  - router-backed WPS scenarios build the DUT example with `ESP8266_HAL_WPS_MAX_ATTEMPTS=1`, so failed PBC/PIN exchanges do not retry inside the DUT against stale one-shot hostapd WPS state;
+  - focused `wifi-hw run wps` and `wifi-hw run wps_pin` now use the same three whole-scenario retry policy as the matrix, giving each retry a fresh router setup, DUT flash/reset, and artifact directory;
+  - added an xtask unit test covering focused WPS retry policy.
+- Static validation after the retry-policy change:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed all xtask test binaries (`9`, `5`, and `23` tests in the non-empty groups);
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed all host Wi-Fi-core test binaries;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_wps --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-wps -q`: passed with the known broad warning set;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q`: passed with the known broad warning set;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list`: passed and reported both `wps` and `wps_pin` as implemented, with `smartconfig` and `promisc_control_filters` still explicitly rig-blocked.
+- WPS PIN focused hardware validation:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-wps-rearm-pin CARGO_INCREMENTAL=0 timeout 1500 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps_pin`;
+  - result: command exited successfully;
+  - artifact `target/wifi-hw-artifacts-20260618-wps-rearm-pin/wps_pin-1781780250`;
+  - DUT UART reached `wps max-attempts=1`, `wps pin=12345670`, and `wps-ok`;
+  - router log reported `Last WPS result: Success`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`.
+- WPS PBC focused hardware validation:
+  - an initial PBC run in `target/wifi-hw-artifacts-20260618-wps-rearm-run/wps-1781779948` produced valid success evidence (`wps max-attempts=1`, `wps-ok`, router `WPS-REG-SUCCESS`/`WPS-SUCCESS`), but the local PTY was interrupted while investigating delayed restore output, so it is not counted as the clean command-exit result;
+  - clean command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-wps-rearm-run-v2 CARGO_INCREMENTAL=0 timeout 1500 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps`;
+  - result: command exited successfully after the new whole-scenario retry path handled two transient PBC failures;
+  - attempt `wps-1781780468`: DUT reached `wps max-attempts=1`, `wps ready`, then `wps-fail-detail reason=1 disconnect=0 ... wps-failed`; router status had `Last WPS result: None`;
+  - attempt `wps-1781780655`: DUT reached `wps max-attempts=1` and `wps ready`, router later reported `WPS-TIMEOUT`;
+  - attempt `wps-1781781010`: DUT reached `wps max-attempts=1`, `wps ready`, and `wps-ok`; router status reported `Last WPS result: Success`, `Peer Address: 48:3f:da:68:e3:04`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`;
+  - final live router check after the run again reported SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `state=ENABLED`.
+- Current WPS conclusion:
+  - PBC remains RF/registrar-timing flaky on this OpenWrt fixture, but the xtask harness now validates it with evidence-backed full re-arms instead of hiding failures behind DUT-local retries;
+  - PIN mode is a stronger deterministic WPS enrollment path on this fixture and is now a first-class implemented scenario.
+- Full hardware matrix after the WPS re-arm/PIN scenario changes:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-full-after-wps-rearm CARGO_INCREMENTAL=0 timeout 5400 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - expected rig-blocked cases only:
+    - `smartconfig`: current rig lacks a working phone-equivalent ESPTouch sender; host-Ethernet and ESP32/router sender attempts failed before DUT credentials;
+    - `promisc_control_filters`: ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames.
+  - scenario artifacts: `sta_connect-1781781332`, `sta_scan-1781781349`, `sta_dhcp-1781781366`, `sta_static_ip-1781781383`, `tcp_server-1781781400`, `tcp_client-1781781417`, `eap_sta_assoc-1781781438`, `esp_now_unicast_companion-1781781466`, `esp_now_encrypted_companion-1781781482`, `esp_now_bad_key_companion-1781781497`, `promisc_data_companion-1781781517`, `ap_start-1781781531`, `ap_station_list-1781781542`, `ap_dhcp-1781781559`, `ap_sta-1781781584`, `wps-1781781604`, `wps-1781781796`, `wps-1781782133`, `wps_pin-1781782330`, `esp_now_unicast-1781782653`, `esp_now_broadcast-1781782675`, `esp_now_encrypted-1781782685`, `promisc_capture-1781782700`, `promisc_filters-1781782714`, and `promisc_control_filter_api-1781782728`.
+  - representative markers:
+    - `sta_connect-1781781332`: `wifi core connected`;
+    - `sta_scan-1781781349`: `scan-ok`;
+    - `sta_dhcp-1781781366`: `wifi connected`, `dhcp up Cidr`;
+    - `sta_static_ip-1781781383`: `static ip up`;
+    - `tcp_server-1781781400`: `dhcp up`, `listen 1234`, connect helper observed `dhcp_ip:192.168.4.2`;
+    - `tcp_client-1781781417`: `tcp client connected`, `recv:32`;
+    - `eap_sta_assoc-1781781438`: `wifi eap associated`, `eap-ok`;
+    - `esp_now_unicast_companion-1781781466` and `esp_now_encrypted_companion-1781781482`: companion `OK ESPNOW_TX status=success`, DUT `esp-now-rx-ok`;
+    - `esp_now_bad_key_companion-1781781497`: companion sender completed `OK ESPNOW_TX status=success` while the DUT bad-key negative path did not accept an encrypted payload;
+    - `promisc_data_companion-1781781517`: `promisc frame type=data ch=6 len=0`, `promisc-ok`;
+    - `ap_start-1781781531`: `ap-start-ok`;
+    - `ap_station_list-1781781542`: `ap-station-list-ok`, companion `OK STA_JOIN connected=1 ch=6`;
+    - `ap_dhcp-1781781559`: `ap-dhcp-offer`, `ap-dhcp-ack`, `ap-dhcp-ok`, companion `OK STA_JOIN ip=192.168.4.2 ch=6`;
+    - `ap_sta-1781781584`: `ap-sta-downstream-ok`, companion `OK STA_JOIN_KEEP_AP ip=192.168.4.2 ch=6`;
+    - WPS PBC failed attempt `wps-1781781796` with `wps-fail-detail reason=0 disconnect=8`, then passed attempt `wps-1781782133` with `wps max-attempts=1`, `wps-ok`, router `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`;
+    - `wps_pin-1781782330`: `wps max-attempts=1`, `wps pin=12345670`, `wps-ok`, router `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`;
+    - `esp_now_unicast-1781782653` and `esp_now_encrypted-1781782685`: companion `OK ESPNOW_TX status=success`, DUT `esp-now-rx-ok`;
+    - `esp_now_broadcast-1781782675`: `esp-now-tx-ok`;
+    - `promisc_capture-1781782700`: `promisc frame type=management ch=6 len=256`, `promisc-ok`;
+    - `promisc_filters-1781782714`: `promisc frame type=management ch=6 len=256`, `promisc-management-ok`;
+    - `promisc_control_filter_api-1781782728`: `promisc ctrl filter ack ok`, `promisc ctrl filter none ok`, `promisc stop ok`, `promisc-control-api-ok`.
+  - post-matrix fixture check: no hardware-test, esptool, serial, or `wifi-hw` process was active; `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no owners; FreeRADIUS PID `35807` still listened on UDP `1812`/`1813`; `enp3s0` was `10.42.0.1/24`; laptop Wi-Fi `wlp4s0` stayed connected at `192.168.0.221/24`; router `10.42.0.131` replied to ping and reported SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `state=ENABLED`.
+
+### 2026-06-18 SmartConfig Sender Fixture Follow-Up
+
+- OpenWrt AP join isolation:
+  - tested a temporary OpenWrt AP profile for SSID `esp8266-hal-smart`, channel `6`, open auth, `htmode=HT20`, and `wmm=1`, then restored the router through a local shell trap;
+  - direct ESP32 `STA_JOIN ... channel=0` was rejected by the companion CLI as `ERR code=invalid-channel detail=0`;
+  - retrying `STA_JOIN ssid=esp8266-hal-smart pass=open timeout_ms=45000 channel=6 wait_ip=1` failed with ESP-IDF disconnect reason `201` (`NO_AP_FOUND`) even though the router setup reported hostapd enabled on channel `6`;
+  - post-probe router verification again showed SSID `esp8266-router-eap`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd `state=ENABLED`.
+- Host/sender inventory:
+  - `nmcli` reported only one Wi-Fi interface, `wlp4s0`, connected to `Auto Elsa`; per the standing constraint it was not used for SmartConfig tests;
+  - no Android device was available through `adb devices`;
+  - no second host Wi-Fi interface was available for phone-equivalent STA-through-AP ESPTouch transmission.
+- ESP8266 AP sender-path probe:
+  - added BSSID reporting to the ESP32 companion `SCAN_FIND` response, rebuilt/flashed the ESP32 companion, and verified `PING`;
+  - first build/flash did not pick up `SMARTCONFIG_STA_PROVISION`; after removing `target/esp32-companion`, rebuilding, and reflashing, the command table was refreshed;
+  - `/dev/ttyUSB1` as an ESP8266 AP source was not viable: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-smartconfig-esp8266-ap CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run ap_dhcp --serial-port /dev/ttyUSB1 --companion-port /dev/ttyACM0` failed because ESP32 `STA_JOIN` returned reason `2` (`AUTH_EXPIRE`) across all 10 join attempts while the AP UART had reached `ap-start-ok` and `ap-dhcp-ready`;
+  - `SCAN_FIND ssid=esp8266-hal-ap` after that `/dev/ttyUSB1` AP run returned `found=0 total=0`, so the ESP32 did not see that board's AP beacons.
+- Swapped ESP8266 topology probe:
+  - brought up the known-good primary `/dev/ttyUSB0` AP with `wifi-hw run ap_dhcp --serial-port /dev/ttyUSB0 --companion-port /dev/ttyACM0`; command exited successfully;
+  - ESP32 `SCAN_FIND ssid=esp8266-hal-ap` then reported `found=1 ssid=esp8266-hal-ap bssid=4a:3f:da:68:e3:04 ch=6 rssi=-6 auth=open total=2`;
+  - flashing `/dev/ttyUSB1` with `wifi_smartconfig` built with an extra `wifi` feature produced only UART noise and no startup marker, but rebuilding with the exact scenario feature set `interrupt,rt,wifi-sta,wifi-smartconfig` fixed startup;
+  - exact-feature `/dev/ttyUSB1` UART reached `wifi_smartconfig start`, `wifi init ok`, `smartconfig sta started`, `smartconfig ready`, and `smartconfig scan done`;
+  - manual sender attempt `smartconfig-usb1-uart-v4.log` reached `smartconfig ready`, but using the one-shot `wifi-hw companion command` for the long `SMARTCONFIG_STA_PROVISION ... timeout_ms=90000` line sent the command before the ESP32 app was fully ready and the firmware parsed only a tail token (`ERR code=unknown-command detail=timeout_ms=90000` shape);
+  - manual sender attempt `smartconfig-usb1-uart-v5.log` kept `/dev/ttyACM0` open, waited for `READY`/`OK PONG`, then sent the full command directly; the ESP32 recognized the command but failed at `step=join-sender-ap reason=201`, and the DUT remained at `smartconfig ready`;
+  - a follow-up `SCAN_FIND ssid=esp8266-hal-ap` returned `found=0 total=0`, indicating the primary AP was no longer visible by the time the direct sender was retried.
+- Current SmartConfig conclusion:
+  - the HAL SmartConfig receiver still has compile/start evidence but no complete credential/on-air success evidence;
+  - the current bench still lacks a stable phone-equivalent sender fixture: host-over-Ethernet, ESP32-through-OpenWrt, OpenWrt-as-STA, ESP32-through-secondary-ESP8266, and the swapped primary-AP/manual receiver path all failed before DUT credentials;
+  - useful retained improvement: ESP32 companion scans now report the discovered AP BSSID, which removes a guess from future ESPTouch sender attempts;
+  - likely next options are an actual phone/app, a second independent Wi-Fi STA interface that is not `wlp4s0`, or a more capable programmable sender that can remain associated to a visible AP and emit ESPTouch frames for the full provisioning window.
+
+### 2026-06-18 STA Negative Coverage, Promisc Filter, and WPS PIN Matrix Hardening
+
+- Resume and fixture preflight after the laptop restart:
+  - `git status --short` showed the existing dirty tree plus ongoing Wi-Fi/xtask edits; no unrelated files were reverted or deleted;
+  - safety checks found no active hardware-test, esptool, serial, `cargo run -p xtask`, or `wifi-hw` process, and `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no owners;
+  - FreeRADIUS PID `35807` was still listening on UDP `1812`/`1813`;
+  - `enp3s0` was `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw doctor`: passed;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion doctor`: passed and identified `/dev/ttyUSB0` as ESP8266EX MAC `48:3f:da:68:e3:04` and `/dev/ttyACM0` as ESP32-PICO-D4 MAC `4c:c3:82:82:32:80`;
+  - router status check reported SSID `esp8266-router-eap`, channel `11`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, and hostapd `state=ENABLED`.
+- STA negative coverage:
+  - first tried a `sta_wrong_channel` negative scenario by starting the companion AP on channel `6` and building `wifi_core_connect` with `ESP8266_HAL_WIFI_CHANNEL=11`;
+  - result was not a valid negative case: artifact `target/wifi-hw-artifacts-20260618-sta-negative/sta_wrong_channel-1781785153` built with channel `11`, companion log showed `AP_START ... channel=6`, but DUT UART still reached `wifi core associated`;
+  - conclusion: the ESP8266 SDK path does not make that channel hint a strict negative connect condition, so the scenario was not kept in the matrix;
+  - added `ESP8266_HAL_WIFI_CONNECT_TIMEOUT_MS` to `examples/wifi_core_connect.rs`, defaulting to the existing `60_000` ms behavior when unset;
+  - added implemented scenario `sta_wrong_password`, which starts a secured ESP32 companion AP with passphrase `esp8266-hal-pass` and builds the DUT with `ESP8266_HAL_WIFI_PASS=esp8266-wrong-pass` and `ESP8266_HAL_WIFI_CONNECT_TIMEOUT_MS=30000`;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'sta_wrong_password|sta_wrong_channel|rig-blocked'`: reported `sta_wrong_password` implemented, no `sta_wrong_channel`, and only `smartconfig`/`promisc_control_filters` rig-blocked.
+- Static validation for the STA negative change:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed all xtask test binaries (`9`, `5`, and `24` tests in the non-empty groups after the new scenario test);
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_core_connect --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-core,wifi,wifi-sta -q`: passed with the known broad warning set;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed all host Wi-Fi-core test binaries;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q`: passed with the known broad warning set.
+- Focused `sta_wrong_password` hardware validation:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-sta-negative CARGO_INCREMENTAL=0 timeout 700 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run sta_wrong_password --serial-port /dev/ttyUSB0 --companion-port /dev/ttyACM0`;
+  - result: command exited successfully;
+  - artifact: `target/wifi-hw-artifacts-20260618-sta-negative/sta_wrong_password-1781785301`;
+  - build log used `ESP8266_HAL_WIFI_SSID='esp8266-hal-sta'`, `ESP8266_HAL_WIFI_CHANNEL='6'`, `ESP8266_HAL_WIFI_PASS='esp8266-wrong-pass'`, and `ESP8266_HAL_WIFI_CONNECT_TIMEOUT_MS='30000'`;
+  - companion log showed `AP_START ssid=esp8266-hal-sta pass=esp8266-hal-pass channel=6`;
+  - DUT UART reached `wifi core initialized`, `wifi core started`, `wifi-connect-error=timeout reason=8`, and `wifi core connect err`, with no association/connected success marker.
+- First full matrix after adding `sta_wrong_password`:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-full-after-sta-negative CARGO_INCREMENTAL=0 timeout 5400 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: failed only `promisc_filters` after three attempts;
+  - failing artifacts: `promisc_filters-1781786214`, `promisc_filters-1781786305`, and `promisc_filters-1781786395`;
+  - each DUT UART reached `wifi_promisc start`, `promisc channel 6`, `promisc set channel ok`, and `promisc started`, while companion AP setup succeeded, but no `promisc-management-ok` marker arrived;
+  - adjacent `promisc_capture-1781786200` passed by seeing `promisc frame type=data ch=6 len=256`, so passive AP beacon stimulus was not deterministic enough for the management-filter scenario.
+- Promiscuous filter hardening:
+  - changed only `promisc_filters` from passive AP-beacon stimulus (`AP_START`) back to active raw beacon transmission (`RAW80211_TX kind=beacon`) while keeping broad `promisc_capture` on the passive AP path;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - focused command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-promisc-filters-active-beacon CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run promisc_filters --serial-port /dev/ttyUSB0 --companion-port /dev/ttyACM0`;
+  - result: command exited successfully with artifact `promisc_filters-1781786710`;
+  - companion log showed `RAW80211_TX kind=beacon channel=6 count=32 interval_ms=8` and `OK RAW80211_TX kind=beacon channel=6 count=32`;
+  - DUT UART reached `promisc filter management`, `promisc frame type=management ch=6 len=256`, and `promisc-management-ok`.
+- Second full matrix after the promisc stimulus change:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-full-after-sta-negative-v2 CARGO_INCREMENTAL=0 timeout 5400 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: failed only `wps_pin` after three attempts;
+  - transient retries were also seen earlier in the run (`eap_sta_assoc` failed attempts 1 and 2, `ap_sta` failed attempt 1), but those recovered inside the matrix;
+  - `wps_pin-1781787657`: DUT reached `wps pin=12345670`, disconnected with reason `8`, and ended in `wps-failed`; router status had `Last WPS result: None`;
+  - `wps_pin-1781787875`: DUT reached `wps pin=12345670`, disconnected with reason `2`, and ended in `wps-timeout`; router log showed `WPS-PIN-NEEDED` and EAP retransmits/timeouts;
+  - `wps_pin-1781788179`: DUT reached `wps pin=12345670` but no success marker before UART timeout; router log again showed the PIN enrollee not completing;
+  - post-failure router check showed the harness restored the fixture to SSID `esp8266-router-eap`, channel `11`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, and hostapd `state=ENABLED`.
+- WPS PIN router setup hardening:
+  - changed OpenWrt WPS setup to set `wireless.default_radio0.wps_label=1` and register PIN mode as `hostapd_cli ... wps_pin any "$wps_pin" 300 "$dut_mac"` instead of an unbound `wps_pin any "$wps_pin"`;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - focused command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-wps-pin-mac-bound CARGO_INCREMENTAL=0 timeout 1500 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps_pin --serial-port /dev/ttyUSB0`;
+  - result: command exited successfully with artifact `wps_pin-1781788787`;
+  - setup log recorded `wps_pin any "$wps_pin" 300 "$dut_mac"` with `dut_mac='48:3f:da:68:e3:04'`;
+  - DUT UART reached `wps max-attempts=1`, `wps pin=12345670`, and `wps-ok`;
+  - router status reported `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`.
+- Final full hardware matrix after STA negative, promisc filter, and WPS PIN setup fixes:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-full-after-sta-negative-v3 CARGO_INCREMENTAL=0 timeout 5400 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - expected rig-blocked cases only:
+    - `smartconfig`: current rig lacks a working phone-equivalent ESPTouch sender; host-Ethernet and ESP32/router sender attempts failed before DUT credentials;
+    - `promisc_control_filters`: ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames.
+  - scenario artifacts: `sta_connect-1781789036`, `sta_wrong_password-1781789052`, `sta_scan-1781789098`, `sta_dhcp-1781789114`, `sta_static_ip-1781789131`, `tcp_server-1781789148`, `tcp_client-1781789165`, `eap_sta_assoc-1781789186`, `esp_now_unicast_companion-1781789213`, `esp_now_encrypted_companion-1781789228`, `esp_now_bad_key_companion-1781789243`, `promisc_data_companion-1781789262`, `ap_start-1781789277`, `ap_station_list-1781789288`, `ap_dhcp-1781789304`, `ap_sta-1781789329`, `wps-1781789429`, `wps_pin-1781789733`, `wps_pin-1781789987`, `wps_pin-1781790359`, `esp_now_unicast-1781790551`, `esp_now_broadcast-1781790570`, `esp_now_encrypted-1781790580`, `promisc_capture-1781790598`, `promisc_filters-1781790612`, and `promisc_control_filter_api-1781790626`.
+  - representative markers:
+    - `sta_connect-1781789036`: `wifi core connected`;
+    - `sta_wrong_password-1781789052`: companion `AP_START ... pass=esp8266-hal-pass channel=6`, build `ESP8266_HAL_WIFI_PASS='esp8266-wrong-pass'`, DUT `wifi-connect-error=timeout reason=8` and `wifi core connect err`;
+    - `sta_scan-1781789098`: saw `esp8266-hal-sta` on channel `6` and `esp8266-router-eap` on channel `11`, then `scan-ok`;
+    - `sta_dhcp-1781789114`: DHCP up;
+    - `sta_static_ip-1781789131`: static IP up;
+    - `tcp_server-1781789148`: `dhcp up`, `listen 1234`, companion `OK TCP_CONNECT recv=70696e67`;
+    - `tcp_client-1781789165`: `tcp client connected`, `recv:32`;
+    - `eap_sta_assoc-1781789186`: `wifi eap associated`, `eap-ok`;
+    - `ap_station_list-1781789288`: companion `OK STA_JOIN connected=1 ch=6`;
+    - `ap_dhcp-1781789304`: `ap-dhcp-offer`, `ap-dhcp-ack`, `ap-dhcp-ok`, companion `OK STA_JOIN ip=192.168.4.2 ch=6`;
+    - `ap_sta-1781789329`: DUT reached `wifi connected`, `ap-sta-dhcp-ready`, `ap-sta-dhcp-offer`, `ap-sta-dhcp-ack`, and `ap-sta-downstream-ok` after transient companion `STA_JOIN_KEEP_AP` timeouts;
+    - `wps-1781789429`: DUT `wps max-attempts=1`, `wps-ok`; router `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, `WPS-PBC-ACTIVE`, `WPS-REG-SUCCESS`, `WPS-PBC-DISABLE`, and `WPS-SUCCESS`;
+    - `wps_pin-1781789987` failed with reason `8` and router `WPS-PIN-NEEDED`; `wps_pin-1781790359` then passed with DUT `wps pin=12345670`, `wps-ok`, router `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`;
+    - `esp_now_unicast-1781790551` and `esp_now_encrypted-1781790580`: companion `OK ESPNOW_TX status=success`, DUT `esp-now-rx-ok`;
+    - `esp_now_broadcast-1781790570`: `esp-now-tx-ok`;
+    - `esp_now_bad_key_companion-1781789243`: companion sender completed `OK ESPNOW_TX status=success` while the DUT bad-key path did not accept an encrypted payload;
+    - `promisc_capture-1781790598`: `promisc frame type=management ch=6 len=256`, `promisc-ok`;
+    - `promisc_filters-1781790612`: first raw-beacon command hit companion `ESP_ERR_NO_MEM`, harness retried, DUT then reached `promisc frame type=management ch=6 len=256` and `promisc-management-ok`;
+    - `promisc_control_filter_api-1781790626`: `promisc-control-api-ok`.
+  - post-matrix fixture check:
+    - no hardware-test, esptool, serial, `cargo run -p xtask`, or `wifi-hw` process was active;
+    - `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no owners;
+    - FreeRADIUS PID `35807` still listened on UDP `1812`/`1813`;
+    - `enp3s0` was `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` stayed up at `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+    - router status again reported SSID `esp8266-router-eap`, channel `11`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, and hostapd `state=ENABLED`.
+- Current residual status:
+  - all implemented scenarios in `wifi-hw matrix` are passing with hardware evidence as of `target/wifi-hw-artifacts-20260618-full-after-sta-negative-v3`;
+  - WPS PBC and PIN are implemented and pass, but the OpenWrt fixture remains timing/RF flaky enough that whole-scenario retries are still required and should remain part of the validation contract;
+  - SmartConfig remains blocked by the lack of a working phone-equivalent ESPTouch sender fixture;
+  - positive RF injection for promiscuous control-frame filtering remains blocked by ESP32 ESP-IDF raw TX limitations, while the control-filter API itself is green.
+
+### 2026-06-18 Post-Reboot Fixture Recovery and SmartConfig Focus
+
+- Post-reboot safety checks:
+  - `git status --short`: showed the existing dirty Wi-Fi/xtask/example edits; no files were reverted or deleted;
+  - no `hw_suite.py`, `native_suite.py`, `esptool`, serial, `cargo run -p xtask`, `wifi-hw`, or `eap_sta_assoc` process was active;
+  - `fuser -v /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyACM0`: no serial owners;
+  - `ss -lunpt | rg ':(1812|1813)\b|freeradius'`: FreeRADIUS PID `35807` still listening on UDP `1812`/`1813`;
+  - `ip -brief addr show | rg '^(enp3s0|wlp4s0)\b'`: `enp3s0` remained `10.42.0.1/24`; laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - `ping -c 1 -W 1 10.42.0.131`: router replied.
+- Repo-local fixture checks:
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list`: all non-rig-blocked scenarios remained implemented; only `smartconfig` and `promisc_control_filters` were listed as rig-blocked;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw doctor`: passed;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion doctor`: passed and identified DUT `/dev/ttyUSB0` as ESP8266EX MAC `48:3f:da:68:e3:04` and companion `/dev/ttyACM0` as ESP32-PICO-D4 MAC `4c:c3:82:82:32:80`.
+- Router access check:
+  - plain `ssh -o BatchMode=yes root@10.42.0.131 ...` failed because the router does not accept the laptop's normal SSH keys;
+  - using the fixture key worked: `ssh -i target/wifi-hw-router/id_rsa -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/esp8266-hal-openwrt-known-hosts -o StrictHostKeyChecking=no -o BatchMode=yes root@10.42.0.131 ...`;
+  - live router state via that key: SSID `esp8266-router-eap`, encryption `wpa2`, channel `11`, BSSID `a0:63:91:0f:e5:f0`, `wps_state=disabled`, `key_mgmt=WPA-EAP`, and hostapd status `ENABLED`.
+- SmartConfig state to carry forward:
+  - native ESP8266 RTOS SDK SmartConfig baseline with the ESP32 companion AP ESPTouch sender reached `SC version: V3.0.0`, `TYPE: ESPTOUCH`, `PHONE MAC`, `AP MAC`, and `Found channel`, proving the sender fixture can work with the closed SDK baseline;
+  - Rust `wifi_smartconfig` still reaches `wifi_smartconfig start`, `wifi init ok`, `smartconfig sta started`, and `smartconfig ready`; diagnostic builds may also reach `smartconfig scan done`, but have not reached `smartconfig found channel`;
+  - intrusive wrappers around SmartConfig Wi-Fi hooks (`esp_wifi_set_promiscuous*`, `esp_wifi_set_channel`) perturbed the closed library and were removed;
+  - the current next step is to inspect the SmartConfig start/task context and add only minimal diagnostics or a scoped fix.
+
+### 2026-06-18 SmartConfig WDEV RX Servicing and ESPTouch ACK
+
+- SmartConfig decode diagnosis:
+  - after starting the compat ETS timer task from Wi-Fi initialization, SmartConfig scan progressed to `smartconfig scan done`;
+  - RX tracing showed the closed SDK installed `sc_PackCallback`, but without extra WDEV servicing the callback rate was too sparse and the Rust path did not reach `smartconfig found channel`;
+  - opt-in WDEV tick polling (`ESP8266_HAL_SMARTCONFIG_POLL_WDEV=1`) produced dense SmartConfig RX callbacks and unlocked decode.
+- Focused SmartConfig decode evidence before ACK implementation:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1 ESP8266_HAL_SMARTCONFIG_SENDER=companion-ap ESP8266_HAL_SMARTCONFIG_ENABLE_LOG=1 ESP8266_HAL_SMARTCONFIG_RX_TRACE=1 ESP8266_HAL_SMARTCONFIG_RX_DIAG=1 ESP8266_HAL_SMARTCONFIG_POLL_WDEV=1 ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-smartconfig-wdev-poll CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run smartconfig --serial-port /dev/ttyUSB0 --companion-port /dev/ttyACM0`;
+  - result: DUT UART reached `smartconfig scan done`, `smartconfig found channel`, `smartconfig credentials ssid-len=17`, `smartconfig connected`, `smartconfig-credentials-ok`, and `smartconfig-ok`;
+  - artifact: `target/wifi-hw-artifacts-20260618-smartconfig-wdev-poll/smartconfig-1781807077`;
+  - companion still returned `ERR code=smartconfig-ap-provision detail=ESP_ERR_TIMEOUT step=ack-timeout errno=11`, which was expected because `esp8266-wifi-sys/build.rs` still stubs `sc_send_ack_start()`/`sc_send_ack_stop()`.
+- Implemented SmartConfig follow-up changes:
+  - SmartConfig start now enables WDEV tick polling in both the typestate backend (`src/wifi/core/target.rs`) and low-level SmartConfig API (`src/wifi/smartconfig.rs`), and stop/start failure disables it again;
+  - `examples/wifi_smartconfig.rs` now completes the provisioning flow: receive ESPTouch credentials, associate, stop SmartConfig, start the existing embassy-net STA bridge, wait for DHCP, and send ESPTouch ACK payload `[token, sta_mac[6], local_ipv4[4]]` to the phone IP on UDP port `18266`;
+  - the `wifi_smartconfig` example and xtask SmartConfig scenario now include `wifi-embassy-net`;
+  - xtask no longer treats SmartConfig companion `ack-timeout` as acceptable, so a passing run must include both DUT UART success and companion sender success.
+- Static validation after the SmartConfig ACK patch:
+  - `cargo fmt --all -- --check`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_smartconfig --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-smartconfig,wifi-embassy-net -q`: passed with the repo's existing broad warning profile.
+
+### 2026-06-18 SmartConfig Harness Promotion and Post-Restart Checkpoint
+
+- SmartConfig note correcting the previous section:
+  - the final working hardware path does not depend on `wifi-embassy-net` in the harness build;
+  - the xtask SmartConfig scenario now defaults to the ESP32 companion AP ESPTouch sender and builds the example with `ESP8266_HAL_SMARTCONFIG_STATIC_ACK=1`;
+  - the example sends a raw ESPTouch ACK frame from a fixture-only static IP path after SmartConfig credentials are decoded and the STA association succeeds.
+- Focused SmartConfig ACK failures before the final static ACK path:
+  - `target/wifi-hw-artifacts-20260618-smartconfig-ack-v6/smartconfig-1781809003`: decoded credentials and associated, then panicked during the first DHCP poll in the general network ACK path;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-ack-v7/smartconfig-1781809219`: got past the first DHCP poll but did not reach DHCP before the companion ACK timeout;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-router-sta-v1/smartconfig-1781809439`: router AP `esp8266-hal-smart` and companion STA association worked, but the DUT reached only scan/channel markers and did not decode credentials;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-static-ack-v1/smartconfig-1781809923`: delayed/static-ACK run reached only `smartconfig scan done`;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-static-ack-v2/smartconfig-1781810056`: decoded credentials and connected, but failed `smartconfig ack bssid err` because the ESPTouch payload did not include a BSSID;
+  - `target/wifi-hw-artifacts-20260618-smartconfig-static-ack-v3`: BSSID fallback allowed the DUT to print `smartconfig ack sent` and `smartconfig-ok`, but the companion still timed out because the raw ACK frame was undersized/single-send.
+- First passing SmartConfig static ACK run:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1 ESP8266_HAL_SMARTCONFIG_SENDER=companion-ap ESP8266_HAL_SMARTCONFIG_ENABLE_LOG=1 ESP8266_HAL_SMARTCONFIG_STATIC_ACK=1 ESP8266_HAL_SMARTCONFIG_START_AFTER_SCAN=1 ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-smartconfig-static-ack-v4 CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run smartconfig --serial-port /dev/ttyUSB0 --companion-port /dev/ttyACM0`;
+  - result: command exited successfully;
+  - artifact: `target/wifi-hw-artifacts-20260618-smartconfig-static-ack-v4/smartconfig-1781810437`;
+  - DUT UART reached `smartconfig scan done`, `smartconfig found channel`, `smartconfig credentials ssid-len=17`, `smartconfig connected`, `smartconfig-credentials-ok`, `smartconfig static ack bssid 4c:c3:82:82:32:5c`, `smartconfig static ack target 192.168.4.1:18266`, `smartconfig ack sent`, and `smartconfig-ok`;
+  - companion log returned `OK SMARTCONFIG_AP_PROVISION ssid=esp8266-hal-smart channel=6`.
+- Default SmartConfig run after promoting the companion AP sender:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-smartconfig-default CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run smartconfig --serial-port /dev/ttyUSB0 --companion-port /dev/ttyACM0`;
+  - result: command exited successfully;
+  - artifact: `target/wifi-hw-artifacts-20260618-smartconfig-default/smartconfig-1781810640`;
+  - build log showed `ESP8266_HAL_SMARTCONFIG_STATIC_ACK='1'`;
+  - manifest recorded `smartconfig_sender=companion-ap`, `smartconfig_static_ack=1`, `smartconfig_start_after_scan=1`, and `smartconfig_companion_ap_prestarted=1`;
+  - DUT UART reached the same decode, association, static ACK, and `smartconfig-ok` markers as the explicit static-ACK run;
+  - companion log returned `OK SMARTCONFIG_AP_PROVISION ssid=esp8266-hal-smart channel=6`.
+- Static validation before this checkpoint:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_smartconfig --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-smartconfig -q`: passed with the repo's existing broad warning profile;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now -q`: passed with the repo's existing broad warning profile.
+- Post-restart safety and fixture checks:
+  - `git status --short`: still shows the expected dirty Wi-Fi, xtask, example, companion, and `research.md` worktree; no unrelated files were reverted or deleted;
+  - no `hw_suite.py`, `native_suite.py`, `esptool`, serial, `cargo run -p xtask`, `wifi-hw`, or `eap_sta_assoc` process was active;
+  - `fuser -v /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyACM0`: no serial owners;
+  - `ss -lunpt | rg ':(1812|1813)\b|freeradius'`: FreeRADIUS PID `35807` listening on UDP `1812`/`1813`;
+  - `ip -brief addr show | rg '^(enp3s0|wlp4s0)\b'`: `enp3s0` up at `10.42.0.1/24`; laptop Wi-Fi `wlp4s0` still up at `192.168.0.221/24`;
+  - `ping -c 1 -W 1 10.42.0.131`: router replied.
+- Repo-local hardware inventory after restart:
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list`: SmartConfig is now listed as implemented with example `wifi_smartconfig`; only `promisc_control_filters` remains rig-blocked because the ESP32 ESP-IDF raw TX path cannot deterministically inject 802.11 control frames;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw doctor`: passed;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion doctor`: passed and identified DUT `/dev/ttyUSB0` as ESP8266EX MAC `48:3f:da:68:e3:04` and companion `/dev/ttyACM0` as ESP32-PICO-D4 MAC `4c:c3:82:82:32:80`.
+
+### 2026-06-18 WPS PIN Registrar Hardening and Full Matrix Refresh
+
+- Session safety checks before continuing hardware:
+  - `git status --short`: showed the existing dirty Wi-Fi, xtask, example, companion, and `research.md` worktree; no unrelated files were reverted or deleted;
+  - no stale `hw_suite.py`, `native_suite.py`, `esptool`, serial, `cargo run -p xtask`, `wifi-hw`, or `eap_sta_assoc` process was active;
+  - `fuser -v /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyACM0`: no serial owners;
+  - FreeRADIUS PID `35807` still listened on UDP `1812`/`1813`;
+  - `enp3s0` remained `10.42.0.1/24`; laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- WPS PIN failure diagnosis from `target/wifi-hw-artifacts-20260618-after-smartconfig-matrix-v3`:
+  - matrix v3 failed only `wps_pin`;
+  - failed router logs showed `WPS-PIN-NEEDED df2d477b-b793-51e8-a89b-5aec91edcbf9 48:3f:da:68:e3:04` even though setup had returned `OK` for `wps_pin any 12345670 300 48:3f:da:68:e3:04`;
+  - live router command help confirmed hostapd syntax `wps_pin <uuid> <pin> [timeout] [addr]`;
+  - conclusion: the OpenWrt registrar sometimes did not match the wildcard PIN registration to the ESP8266 enrollee UUID.
+- Implemented WPS fixture hardening in `xtask/src/wifi_hw.rs`:
+  - added overrideable `ESP8266_HAL_WPS_DUT_UUID`, defaulting to observed DUT UUID `df2d477b-b793-51e8-a89b-5aec91edcbf9`;
+  - recorded `wps_dut_uuid` in run manifests;
+  - WPS PIN setup now tries `hostapd_cli ... wps_pin "$dut_uuid" "$wps_pin" 300 "$dut_mac"` first and logs `wps_pin_uuid=...`;
+  - retained the previous `wps_pin any "$wps_pin" 300 "$dut_mac"` path as fallback;
+  - changed WPS router scenarios to arm/configure the OpenWrt AP before flashing/resetting the DUT, and still restore the router if flash/watch fails.
+- Static validation after WPS fixture changes:
+  - `cargo fmt --all -- --check`: passed after applying `cargo fmt --all` to the new closure formatting;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now -q`: passed with the repo's existing broad warning profile.
+- Focused WPS PIN UUID run before ordering change:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-wps-pin-uuid CARGO_INCREMENTAL=0 timeout 1500 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps_pin --serial-port /dev/ttyUSB0`;
+  - result: command exited successfully;
+  - artifact: `target/wifi-hw-artifacts-20260618-wps-pin-uuid/wps_pin-1781844798`;
+  - setup log showed `wps_pin_uuid=OK`;
+  - DUT UART reached `wps max-attempts=3`, `wps pin=12345670`, and `wps-ok`;
+  - router after-log reported `Last WPS result: Success`, peer `48:3f:da:68:e3:04`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`.
+- Full matrix v4 before ordering change:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-after-smartconfig-matrix-v4 CARGO_INCREMENTAL=0 timeout 7200 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - expected rig-block only: `promisc_control_filters` because ESP32 ESP-IDF raw TX cannot deterministically inject 802.11 control frames;
+  - transient retries recovered: `ap_dhcp` attempt 1, `wps_pin` attempt 1, and `smartconfig` attempt 1;
+  - artifacts included `wps_pin-1781845682` and `wps_pin-1781846045`; both setup logs showed `wps_pin_uuid=OK`, and the passing attempt reached DUT `wps-ok` plus router `WPS-REG-SUCCESS`/`WPS-SUCCESS`;
+  - passing SmartConfig artifact `smartconfig-1781846400` reached `smartconfig scan done`, `smartconfig found channel`, credentials, connection, `smartconfig ack sent`, `smartconfig-ok`, and companion `OK SMARTCONFIG_AP_PROVISION`;
+  - representative green markers included `wifi core connected`, wrong-password `wifi-connect-error=timeout reason=8`, `scan-ok`, `dhcp up`, `static ip up`, TCP server `OK TCP_CONNECT recv=70696e67`, TCP client `recv:32`, EAP `eap-ok`, AP DHCP `ap-dhcp-ok`, AP+STA `ap-sta-downstream-ok`, ESP-NOW unicast/encrypted RX success, ESP-NOW broadcast TX success, promiscuous capture/filter/control API success.
+- Focused WPS runs after router-before-DUT ordering:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-wps-router-before-dut CARGO_INCREMENTAL=0 timeout 1500 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps --serial-port /dev/ttyUSB0`;
+  - result: command exited successfully after one scenario retry;
+  - passing artifact `wps-1781847145` reached DUT `wps-ok`; router logged `WPS-PBC-ACTIVE`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`;
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-wps-router-before-dut CARGO_INCREMENTAL=0 timeout 1500 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps_pin --serial-port /dev/ttyUSB0`;
+  - result: command exited successfully on first scenario attempt;
+  - artifact `wps_pin-1781847421` showed `wps_pin_uuid=OK`, DUT `wps-ok`, and router `Last WPS result: Success`/`WPS-SUCCESS`.
+- Full matrix v5 after ordering change:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260618-after-smartconfig-matrix-v5 CARGO_INCREMENTAL=0 timeout 7200 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - expected rig-block only: `promisc_control_filters`;
+  - transient retries recovered: `eap_sta_assoc` attempt 1, `wps_pin` attempt 1, and `smartconfig` attempt 1;
+  - scenario artifacts: `sta_connect-1781847681`, `sta_wrong_password-1781847698`, `sta_scan-1781847745`, `sta_dhcp-1781847760`, `sta_static_ip-1781847777`, `tcp_server-1781847794`, `tcp_client-1781847811`, `eap_sta_assoc-1781847831`, `eap_sta_assoc-1781847965`, `esp_now_unicast_companion-1781847995`, `esp_now_encrypted_companion-1781848017`, `esp_now_bad_key_companion-1781848033`, `promisc_data_companion-1781848053`, `ap_start-1781848067`, `ap_station_list-1781848078`, `ap_dhcp-1781848102`, `ap_sta-1781848135`, `wps-1781848235`, `wps_pin-1781848439`, `wps_pin-1781848640`, `smartconfig-1781848839`, `smartconfig-1781848950`, `esp_now_unicast-1781848978`, `esp_now_broadcast-1781848992`, `esp_now_encrypted-1781849003`, `promisc_capture-1781849018`, `promisc_filters-1781849032`, and `promisc_control_filter_api-1781849046`;
+  - representative v5 markers:
+    - STA: `wifi core connected`, wrong-password `wifi-connect-error=timeout reason=8`, `scan-ok`, `dhcp up Cidr`, `static ip up`;
+    - TCP: server `listen 1234` and companion `OK TCP_CONNECT recv=70696e67`; client `tcp client connected` and `recv:32`;
+    - EAP: recovered artifact `eap_sta_assoc-1781847965` reached `wifi eap associated` and `eap-ok`;
+    - AP: `ap-start-ok`, companion `OK STA_JOIN connected=1 ch=6`, AP DHCP `ap-dhcp-offer`/`ap-dhcp-ack`/`ap-dhcp-ok`, AP+STA `ap-sta-downstream-ok`;
+    - WPS PBC: artifact `wps-1781848235` reached DUT `wps-ok`; router logged `WPS-PBC-ACTIVE`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`;
+    - WPS PIN: failed attempt `wps_pin-1781848439` showed `wps_pin_uuid=OK` but hostapd still emitted `WPS-PIN-NEEDED` and DUT ended `wps-failed`; recovered attempt `wps_pin-1781848640` showed `wps_pin_uuid=OK`, DUT `wps-ok`, router `Last WPS result: Success`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`;
+    - SmartConfig: failed attempt `smartconfig-1781848839` reached only `smartconfig scan done` before companion ACK timeout; recovered attempt `smartconfig-1781848950` reached channel decode, credentials, connected, `smartconfig ack sent`, `smartconfig-ok`, and companion `OK SMARTCONFIG_AP_PROVISION`;
+    - ESP-NOW: unicast/encrypted RX paths saw companion `OK ESPNOW_TX status=success` and DUT `esp-now-rx-ok`; broadcast reached `esp-now-tx-ok`; bad-key companion path returned `ERR code=espnow-status detail=failed` while the DUT stayed in encrypted RX readiness;
+    - Promiscuous: capture saw management frames and `promisc-ok`; data companion saw data frames and `promisc-ok`; filters reached `promisc-management-ok`; control filter API reached `promisc-control-api-ok`.
+- Post-v5 fixture state:
+  - no hardware-test, esptool, serial, `cargo run -p xtask`, or `wifi-hw` process was active;
+  - `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no owners;
+  - FreeRADIUS PID `35807` still listened on UDP `1812`/`1813`;
+  - `enp3s0` remained `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+  - router restored to SSID `esp8266-router-eap`, channel `11`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, and hostapd `state=ENABLED`.
+- Current residual status after v5:
+  - all implemented matrix scenarios are hardware-green under the harness retry policy;
+  - WPS PIN and SmartConfig are functional but still RF/timing flaky enough to require scenario retries in full-matrix conditions;
+  - `promisc_control_filters` remains rig-blocked by the ESP32 raw-TX limitation, while the exposed promiscuous control-filter API itself is hardware-green.
+
+### 2026-06-19 WPA2 Enterprise Negative-Credential Validation
+
+- Session safety and fixture refresh:
+  - `git status --short`: showed the existing dirty Wi-Fi, xtask, example, companion, and `research.md` worktree; no unrelated files were reverted or deleted;
+  - no stale `hw_suite.py`, `native_suite.py`, `esptool`, serial, `cargo run -p xtask`, `wifi-hw`, or `eap_sta_assoc` process was active;
+  - `fuser -v /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyACM0`: no serial owners;
+  - FreeRADIUS PID `35807` still listened on UDP `1812`/`1813`;
+  - `enp3s0` remained `10.42.0.1/24`; laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping;
+  - router hostapd state: SSID `esp8266-router-eap`, `key_mgmt=WPA-EAP`, channel `11`, `wps_state=disabled`, and `state=ENABLED`.
+- EAP coverage gap addressed:
+  - existing hardware matrix had positive WPA2 Enterprise association (`eap_sta_assoc`) but no explicit negative enterprise credential scenario;
+  - added `ESP8266_HAL_EAP_EXPECT_FAILURE` support to `examples/wifi_eap.rs`;
+  - when enabled, an immediate connect error or timeout before `LinkState::Up` logs `eap-negative-ok`;
+  - if the link reaches `LinkState::Up` while failure is expected, the example logs `eap-negative-unexpected-success`;
+  - added implemented xtask scenario `eap_wrong_password`, building `wifi_eap` with SSID `esp8266-router-eap`, identity/user `esp8266-user`, password `esp8266-wrong-password`, channel `11`, and `ESP8266_HAL_EAP_EXPECT_FAILURE=1`;
+  - scenario success marker is `eap-negative-ok`; failure markers include `wifi eap associated`, `eap-ok`, and `eap-negative-unexpected-success`.
+- Static validation:
+  - `cargo fmt --all -- --check`: initially requested formatting for a long xtask env string;
+  - `cargo fmt --all`: applied;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed, now with 25 xtask unit tests;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with the repo's existing broad warning profile.
+- Focused positive EAP hardware validation:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-eap-negative CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_sta_assoc --serial-port /dev/ttyUSB0`;
+  - result: command exited successfully;
+  - artifact: `target/wifi-hw-artifacts-20260619-eap-negative/eap_sta_assoc-1781849540`;
+  - build log used `ESP8266_HAL_EAP_SSID=esp8266-router-eap`, identity/user `esp8266-user`, password `esp8266-password`, and channel `11`;
+  - DUT UART reached `wifi eap initialized`, `wifi eap configured`, `wifi eap started`, `wifi eap connecting`, `wifi eap associated`, and `eap-ok`;
+  - router log around the run showed `CTRL-EVENT-EAP-SUCCESS2`, `EAPOL-4WAY-HS-COMPLETED`, `AP-STA-CONNECTED 48:3f:da:68:e3:04`, and `authenticated - EAP type: 25 (PEAP)`.
+- Focused negative EAP hardware validation:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-eap-negative CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_wrong_password --serial-port /dev/ttyUSB0`;
+  - result: command exited successfully;
+  - artifact: `target/wifi-hw-artifacts-20260619-eap-negative/eap_wrong_password-1781849579`;
+  - build log used `ESP8266_HAL_EAP_PASSWORD=esp8266-wrong-password` and `ESP8266_HAL_EAP_EXPECT_FAILURE=1`;
+  - DUT UART reached `wifi eap initialized`, `wifi eap configured`, `wifi eap started`, `wifi eap connecting`, repeated workspace progress, `wifi eap workspace timeout`, `wifi eap error detail error=timeout disconnect=23`, `wifi eap connect err`, and `eap-negative-ok`;
+  - DUT UART did not reach `wifi eap associated` or `eap-ok`;
+  - router log around the negative run showed `CTRL-EVENT-EAP-FAILURE2 48:3f:da:68:e3:04`, `IEEE 802.1X: authentication failed - EAP type: 25 (PEAP)`, and later deauthentication.
+- Post-run fixture state:
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'eap_|promisc_control_filters|smartconfig|wps'` now lists both `eap_sta_assoc` and `eap_wrong_password` as implemented, WPS and SmartConfig as implemented, and only `promisc_control_filters` as rig-blocked;
+  - no hardware-test, esptool, serial, `cargo run -p xtask`, or `wifi-hw` process was active;
+  - `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no owners;
+  - FreeRADIUS PID `35807` still listened on UDP `1812`/`1813`;
+  - `enp3s0` remained `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router remained on SSID `esp8266-router-eap`, channel `11`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, and hostapd `state=ENABLED`.
+- Current residual status after EAP negative validation:
+  - WPA2 Enterprise now has positive and wrong-password hardware evidence against the OpenWrt/RADIUS fixture;
+  - full matrix needs a refresh after adding `eap_wrong_password`;
+  - WPS PIN and SmartConfig still work but can require scenario retries in full-matrix conditions;
+  - deterministic promiscuous control-frame injection remains rig-blocked by the ESP32 raw-TX limitation.
+
+### 2026-06-19 Full Matrix Refresh After EAP Negative and WPS Ordering Revert
+
+- First full matrix after adding `eap_wrong_password`:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-after-eap-negative CARGO_INCREMENTAL=0 timeout 7200 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: failed only `wps_pin` after three attempts;
+  - positive EAP had one transient retry and recovered;
+  - WPS PIN artifacts:
+    - `wps_pin-1781850620`: setup logged `wps_pin_uuid=OK`, DUT reached `wps ready` and `wps pin=12345670`, but hostapd emitted `WPS-PIN-NEEDED` and timed out;
+    - `wps_pin-1781851067`: setup logged `wps_pin_uuid=OK`, DUT reached `wps ready` and `wps pin=12345670`, but no success marker arrived before UART timeout;
+    - `wps_pin-1781851440`: router setup failed before UART watch; restore succeeded and returned router to the EAP fixture.
+- WPS ordering diagnosis:
+  - the newer router-before-DUT ordering armed hostapd before `esptool` flashed the DUT;
+  - `esptool` can reset and boot the just-flashed DUT before `watch_uart` performs its controlled reset, so the first uncontrolled boot can disturb or consume WPS registrar state before the watched boot;
+  - reverted WPS router scenario ordering to the earlier, more reliable sequence: build/flash first, configure and arm the router second, then let `watch_uart` pulse reset for the controlled DUT run.
+- Static validation after reverting WPS ordering:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed.
+- Focused WPS PIN after ordering revert:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-wps-order-revert CARGO_INCREMENTAL=0 timeout 1500 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run wps_pin --serial-port /dev/ttyUSB0`;
+  - result: command exited successfully;
+  - artifact: `target/wifi-hw-artifacts-20260619-wps-order-revert/wps_pin-1781852126`;
+  - setup log showed `wps_pin_uuid=OK`;
+  - DUT UART reached `wps-ok`;
+  - router after-log showed `Last WPS result: Success`, `WPS-REG-SUCCESS`, and `WPS-SUCCESS`.
+- Second full matrix after EAP negative and WPS ordering revert:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-after-eap-negative-v2 CARGO_INCREMENTAL=0 timeout 7200 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - expected rig-block only: `promisc_control_filters`;
+  - transient retries recovered: `sta_dhcp` attempt 1 and `ap_station_list` attempt 1;
+  - scenario artifacts: `sta_connect-1781852345`, `sta_wrong_password-1781852361`, `sta_scan-1781852408`, `sta_dhcp-1781852423`, `sta_dhcp-1781852546`, `sta_static_ip-1781852563`, `tcp_server-1781852579`, `tcp_client-1781852596`, `eap_sta_assoc-1781852617`, `eap_wrong_password-1781852645`, `esp_now_unicast_companion-1781852790`, `esp_now_encrypted_companion-1781852805`, `esp_now_bad_key_companion-1781852820`, `promisc_data_companion-1781852839`, `ap_start-1781852853`, `ap_station_list-1781852864`, `ap_station_list-1781852915`, `ap_dhcp-1781852931`, `ap_sta-1781852955`, `wps-1781853025`, `wps_pin-1781853234`, `smartconfig-1781853533`, `esp_now_unicast-1781853560`, `esp_now_broadcast-1781853575`, `esp_now_encrypted-1781853586`, `promisc_capture-1781853601`, `promisc_filters-1781853615`, and `promisc_control_filter_api-1781853629`;
+  - representative v2 markers:
+    - STA: `wifi core connected`, wrong-password `wifi-connect-error=timeout reason=15`, `scan-ok`, and recovered DHCP `dhcp up Cidr`;
+    - TCP: server `listen 1234` and companion `OK TCP_CONNECT recv=70696e67`; client `tcp client connected` and `recv:32`;
+    - EAP positive: build log used `ESP8266_HAL_EAP_PASSWORD=esp8266-password`; DUT reached `wifi eap associated` and `eap-ok`;
+    - EAP negative: build log used `ESP8266_HAL_EAP_PASSWORD=esp8266-wrong-password` plus `ESP8266_HAL_EAP_EXPECT_FAILURE=1`; DUT reached `wifi eap connect err` and `eap-negative-ok`;
+    - AP: recovered station-list artifact had companion `OK STA_JOIN connected=1 ch=6`; AP DHCP reached `ap-dhcp-ok`; AP+STA reached `ap-sta-downstream-ok`;
+    - WPS PIN: setup logged `wps_pin_uuid=OK`, DUT reached `wps-ok`, and router after-log showed `WPS-REG-SUCCESS`/`WPS-SUCCESS`;
+    - SmartConfig: companion returned `OK SMARTCONFIG_AP_PROVISION`, DUT reached channel decode, credentials, `smartconfig ack sent`, and `smartconfig-ok`;
+    - ESP-NOW: unicast/encrypted RX paths saw companion `OK ESPNOW_TX status=success` and DUT `esp-now-rx-ok`; broadcast reached `esp-now-tx-ok`; bad-key companion path completed its negative sender check without DUT acceptance;
+    - Promiscuous: capture and data paths reached `promisc-ok`; filters reached `promisc-management-ok`; control filter API reached `promisc-control-api-ok`.
+- Post-v2 fixture state:
+  - no hardware-test, esptool, serial, `cargo run -p xtask`, or `wifi-hw` process was active;
+  - `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no owners;
+  - FreeRADIUS PID `35807` still listened on UDP `1812`/`1813`;
+  - `enp3s0` remained `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`, and router `10.42.0.131` replied to ping;
+  - router remained on SSID `esp8266-router-eap`, channel `11`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, and hostapd `state=ENABLED`.
+- Current residual status after this pass:
+  - all implemented matrix scenarios, including positive and negative WPA2 Enterprise, are hardware-green under the harness retry policy;
+  - WPS PIN is improved by the UUID registrar and the flash-first/configure/watch-reset ordering, but remains a timing-sensitive RF/hostapd path to keep in the retry contract;
+  - SmartConfig is functional with the ESP32 companion AP ESPTouch sender and static ACK path, but remains timing-sensitive;
+  - deterministic promiscuous control-frame RF injection remains rig-blocked by ESP32 ESP-IDF raw TX limitations; the public control-filter API is hardware-green.
+
+### 2026-06-19 Promiscuous Control RF Validation and All-Implemented Matrix
+
+- Live safety refresh after laptop restart:
+  - `git status --short`: dirty worktree still contained the existing Wi-Fi, companion, xtask, example, and `research.md` edits; no unrelated files were reverted;
+  - no stale hardware-test, esptool, serial, `cargo run -p xtask`, `wifi-hw`, or EAP test process was active;
+  - `/dev/ttyUSB0`, `/dev/ttyUSB1`, and `/dev/ttyACM0` had no owners;
+  - FreeRADIUS PID `35807` still listened on UDP `1812`/`1813`;
+  - `enp3s0` remained `10.42.0.1/24`; laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping;
+  - direct keyless `ssh root@10.42.0.131` returned `Permission denied`, but xtask router operations continued to work through the repo-local router identity path.
+- Promiscuous control-frame gap reassessment:
+  - before the change, `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list` showed every major Wi-Fi scenario implemented except `promisc_control_filters`, which was still marked rig-blocked;
+  - a focused diagnostic with `ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1 ESP8266_HAL_PROMISC_CTRL_FILTER=all` passed:
+    - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-promisc-control-probe ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1 ESP8266_HAL_PROMISC_CTRL_FILTER=all CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run promisc_control_filters --serial-port /dev/ttyUSB0`;
+    - artifact: `target/wifi-hw-artifacts-20260619-promisc-control-probe/promisc_control_filters-1781853886`;
+    - DUT UART reached `promisc filter control`, `promisc ctrl filter all`, `promisc frame type=control ch=6 len=0`, and `promisc-control-ok`;
+    - companion log showed repeated `OK RAW80211_TX kind=beacon channel=6 count=32` bursts addressed to DUT MAC `48:3f:da:68:e3:04`.
+- Harness refinement:
+  - promoted `promisc_control_filters` from `RigBlocked` to `Implemented`;
+  - made its build environment explicit: `ESP8266_HAL_PROMISC_FILTER=control ESP8266_HAL_PROMISC_CTRL_FILTER=all`;
+  - removed the stale rig-block reason constant;
+  - updated xtask CLI tests so `promisc_control_filters` is a required implemented matrix entry and future rig-blocked scenarios may exist but are no longer required just to satisfy the test suite.
+- Static validation after the harness change:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed, including 25 xtask unit tests;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'promisc_control|rig-blocked|implemented'`: passed and listed `promisc_control_filter_api` and `promisc_control_filters` as implemented, with no `rig-blocked` entries;
+  - `git diff --check`: passed.
+- Focused hardware validation with no external control-filter override:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-promisc-control-implemented CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run promisc_control_filters --serial-port /dev/ttyUSB0`;
+  - result: command exited successfully;
+  - artifact: `target/wifi-hw-artifacts-20260619-promisc-control-implemented/promisc_control_filters-1781854039`;
+  - build log explicitly included `ESP8266_HAL_PROMISC_FILTER=control ESP8266_HAL_PROMISC_CTRL_FILTER=all ESP8266_HAL_PROMISC_CHANNEL='6'`;
+  - DUT UART reached `promisc filter control`, `promisc ctrl filter all`, `promisc channel 6`, `promisc ctrl filter ok`, `promisc frame type=control ch=6 len=0`, and `promisc-control-ok`;
+  - companion log showed `OK RAW80211_TX kind=beacon channel=6 count=32`.
+- Full matrix with all registered non-manual scenarios implemented:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-all-implemented-matrix CARGO_INCREMENTAL=0 timeout 7200 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - no rig-blocked scenario lines were printed;
+  - transient retries recovered: `sta_dhcp` attempt 1, WPS PBC attempt 1, WPS PIN attempt 1, and SmartConfig attempt 1;
+  - scenario artifacts:
+    - STA/TCP/EAP: `sta_connect-1781854069`, `sta_wrong_password-1781854086`, `sta_scan-1781854132`, `sta_dhcp-1781854147`, recovered `sta_dhcp-1781854271`, `sta_static_ip-1781854288`, `tcp_server-1781854304`, `tcp_client-1781854321`, `eap_sta_assoc-1781854342`, `eap_wrong_password-1781854370`;
+    - companion/AP/ESP-NOW/promiscuous: `esp_now_unicast_companion-1781854514`, `esp_now_encrypted_companion-1781854530`, `esp_now_bad_key_companion-1781854548`, `promisc_data_companion-1781854568`, `ap_start-1781854582`, `ap_station_list-1781854593`, `ap_dhcp-1781854610`, `ap_sta-1781854638`, `esp_now_unicast-1781855967`, `esp_now_broadcast-1781855982`, `esp_now_encrypted-1781855993`, `promisc_capture-1781856008`, `promisc_filters-1781856022`, `promisc_control_filter_api-1781856035`, `promisc_control_filters-1781856046`;
+    - WPS/SmartConfig: failed/retried `wps-1781854738`, recovered `wps-1781854934`, failed/retried `wps_pin-1781855139`, recovered `wps_pin-1781855628`, failed/retried `smartconfig-1781855829`, recovered `smartconfig-1781855940`.
+  - representative green markers:
+    - recovered `sta_dhcp-1781854271` reached `dhcp up Cidr`;
+    - TCP server reached companion `OK TCP_CONNECT recv=70696e67`; TCP client reached `tcp client connected` and `recv:32`;
+    - EAP positive built with `ESP8266_HAL_EAP_PASSWORD=esp8266-password` and reached `wifi eap associated`/`eap-ok`;
+    - EAP negative built with `ESP8266_HAL_EAP_PASSWORD=esp8266-wrong-password ESP8266_HAL_EAP_EXPECT_FAILURE=1` and reached `wifi eap connect err`/`eap-negative-ok`;
+    - recovered WPS PIN showed `wps_pin_uuid=OK`, DUT `wps-ok`, router `WPS-REG-SUCCESS`, and router `WPS-SUCCESS`;
+    - recovered SmartConfig showed companion `OK SMARTCONFIG_AP_PROVISION`, DUT channel decode, credentials, static ACK send, and `smartconfig-ok`;
+    - promoted `promisc_control_filters-1781856046` built with `ESP8266_HAL_PROMISC_CTRL_FILTER=all`, saw companion `OK RAW80211_TX kind=beacon channel=6 count=32`, and DUT reached `promisc frame type=control ch=6 len=0` plus `promisc-control-ok`.
+- Post-matrix fixture state:
+  - no hardware-test, esptool, serial, `cargo run -p xtask`, or `wifi-hw` process was active;
+  - serial ports had no owners;
+  - FreeRADIUS remained listening on UDP `1812`/`1813`;
+  - `enp3s0` stayed `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` stayed up at `192.168.0.221/24`, and router `10.42.0.131` replied to ping.
+- Current residual status:
+  - current `wifi-hw list` has no rig-blocked entries; all registered non-manual hardware scenarios are implemented and have a green full-matrix run under the harness retry policy;
+  - WPS PBC, WPS PIN, SmartConfig, and DHCP still show occasional first-attempt RF/timing flakiness and should remain covered by the retry contract;
+  - remaining work is no longer a missing major scenario, but refinement: reduce retry incidence, broaden negative/edge cases, and continue warning/API polish without weakening hardware evidence requirements.
+- Final validation and fixture doctors after appending this log:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw doctor`: `wifi-hw doctor: ok`;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion doctor`: `wifi-hw companion doctor: ok`, DUT `/dev/ttyUSB0` `ESP8266EX` MAC `48:3f:da:68:e3:04`, companion `/dev/ttyACM0` `ESP32-PICO-D4` MAC `4c:c3:82:82:32:80`;
+  - final process/serial/network safety check: no stale hardware-test/esptool/serial/xtask process, no serial owners, FreeRADIUS still listening on UDP `1812`/`1813`, `enp3s0` still `10.42.0.1/24`, `wlp4s0` still up at `192.168.0.221/24`, and router `10.42.0.131` replied to ping.
+
+### 2026-06-19 AP Companion Diagnostics Promoted and Expanded Matrix
+
+- Manual registry cleanup:
+  - noticed `wifi-hw list` still exposed six `manual` AP companion scenarios even though the runner already had implementations for them;
+  - focused hardware command:
+    - `source .envrc && export ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-manual-ap-promotion CARGO_INCREMENTAL=0 && for scenario in ap_station_list_companion ap_attach_companion ap_net_attach_companion ap_dhcp_bind_companion ap_dhcp_companion ap_sta_downstream_companion; do timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run "$scenario" --serial-port /dev/ttyUSB0; done`;
+  - result: all six focused runs exited successfully;
+  - focused artifacts:
+    - `ap_station_list_companion-1781856251`: DUT `ap stations:1`, `ap-deauth-ok`, `ap-station-list-ok`; companion retried once after reason `4`, then `OK STA_JOIN connected=1 ch=6`;
+    - `ap_attach_companion-1781856271`: DUT `ap-link-ready`; companion `OK STA_JOIN connected=1 ch=6`;
+    - `ap_net_attach_companion-1781856290`: DUT `ap-net-attach-ready`; companion `OK STA_JOIN connected=1 ch=6`;
+    - `ap_dhcp_bind_companion-1781856309`: DUT `ap-dhcp-bind-ready`; companion `OK STA_JOIN connected=1 ch=6`;
+    - `ap_dhcp_companion-1781856327`: DUT `ap-dhcp-offer`, `ap-dhcp-ack`, `ap-dhcp-ok`; companion `OK STA_JOIN ip=192.168.4.2 ch=6`;
+    - `ap_sta_downstream_companion-1781856355`: DUT `ap-sta-dhcp-offer`, `ap-sta-dhcp-ack`, `ap-sta-downstream-ok`; companion join attempts timed out waiting for IP, but the DUT-side DHCP/ACK/downstream success marker completed and the scenario returned success.
+- Harness change:
+  - promoted `ap_station_list_companion`, `ap_attach_companion`, `ap_net_attach_companion`, `ap_dhcp_bind_companion`, `ap_dhcp_companion`, and `ap_sta_downstream_companion` from `Manual` to `Implemented`;
+  - added tests that no registered scenario remains `Manual`;
+  - updated the companion CLI tests so the AP companion diagnostics are expected in the implemented matrix rather than treated as manual-only diagnostics.
+- Static validation after promotion:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed, including 27 xtask CLI tests;
+  - `git diff --check`: passed;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'manual|rig-blocked|ap_.*companion|promisc_control_filters|smartconfig|wps|eap_'`: no `manual` or `rig-blocked` lines; AP companion diagnostics, EAP, WPS, SmartConfig, and promiscuous control capture all listed as implemented.
+- Expanded full matrix with AP companion diagnostics included:
+  - command: `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-expanded-ap-matrix CARGO_INCREMENTAL=0 timeout 9000 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix`;
+  - result: `wifi-hw matrix: pass`;
+  - transient retries recovered: `ap_dhcp_companion` attempt 1, WPS PBC attempt 1, WPS PIN attempt 1, and SmartConfig attempt 1;
+  - scenario artifacts now include the promoted AP companion diagnostics:
+    - `ap_station_list_companion-1781856924`, `ap_attach_companion-1781856943`, `ap_net_attach_companion-1781856961`, `ap_dhcp_bind_companion-1781856979`, failed/retried `ap_dhcp_companion-1781856996`, recovered `ap_dhcp_companion-1781857053`, and `ap_sta_downstream_companion-1781857077`;
+    - representative markers included `ap-link-ready`, `ap-net-attach-ready`, `ap-dhcp-bind-ready`, companion `OK STA_JOIN connected=1 ch=6`, recovered AP DHCP companion lease success, and AP+STA downstream success;
+  - WPS/SmartConfig timing-sensitive paths again recovered under retry policy: `wps-1781857392`/`wps-1781857585`, `wps_pin-1781857797`/`wps_pin-1781858181`, `smartconfig-1781858374`/`smartconfig-1781858484`;
+  - promoted promiscuous control capture remained green in the expanded matrix at `promisc_control_filters-1781858592`, with build env `ESP8266_HAL_PROMISC_CTRL_FILTER=all`, companion `OK RAW80211_TX kind=beacon channel=6 count=32`, and DUT `promisc frame type=control ch=6 len=0`/`promisc-control-ok`.
+- User-facing runtime note:
+  - the full matrix is slow because it serializes flashing, reset, UART waits, ESP32 companion operations, OpenWrt router mutations, WPS windows, SmartConfig ACK waits, and retry budgets;
+  - the two ESP8266 boards can reduce wall time only with resource-aware scheduling, not naive parallel full matrices, because `/dev/ttyACM0` and the OpenWrt router are shared single-owner fixtures.
+
+### 2026-06-19 Reduced Flash Cadence and Host-Only Parallel Matrix Cleanup
+
+- User direction:
+  - reduce hardware-test frequency to preserve ESP8266 flash endurance;
+  - batch fixes, run fast host/static tests while iterating, and reserve focused hardware or full matrix runs for larger milestones or hardware-sensitive changes;
+  - do not keep reflashing chips for every small warning, parser, or harness cleanup.
+- Post-reboot fixture safety check before any work:
+  - `ps -eo pid,ppid,pgid,stat,cmd | rg 'hw_suite.py|native_suite.py|esptool|serial|cargo run -p xtask|wifi-hw|eap_sta_assoc' | rg -v rg || true`: no stale hardware-test, serial, esptool, or xtask process;
+  - `fuser -v /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyACM0 2>&1 || true`: no serial port owners;
+  - `ss -lunpt | rg ':(1812|1813)\b|freeradius' || true`: FreeRADIUS process `35807` listening on UDP `1812`/`1813`;
+  - `ip -brief addr show | rg '^(enp3s0|wlp4s0)\b' || true`: `enp3s0` up at `10.42.0.1/24`, `wlp4s0` up at `192.168.0.221/24`;
+  - `ping -c 1 -W 1 10.42.0.131 || true`: OpenWrt router responded, `0%` loss.
+- Host-only harness changes completed after the interrupted parallel-runner edit:
+  - kept `wifi-hw matrix --jobs N --secondary-serial-port PATH` opt-in;
+  - limited the secondary lane to WPA2 Enterprise scenarios for now (`eap_sta_assoc`, `eap_wrong_password`), because those can use the router/RADIUS fixture without the ESP32 companion;
+  - added router and companion mutexes inside the matrix scheduler so shared fixtures are not driven concurrently;
+  - kept WPS, SmartConfig, AP companion, ESP-NOW, and promiscuous companion paths on the primary lane because they share timing-sensitive router state or the single `/dev/ttyACM0` ESP32 companion;
+  - allowed an unused matching secondary serial path in single-lane mode so an environment variable cannot break normal `matrix` runs when `--jobs 1` is in effect;
+  - removed the obsolete `run_scenario_with_matrix_retries` wrapper left behind by the scheduler refactor;
+  - added host unit coverage for matrix option parsing, invalid parallel options, single-lane secondary-port handling, secondary-lane scenario selection, and shared-fixture classification.
+- Fast validation only; no ESP8266 or router flashing in this pass:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `14`, `5`, and `27` tests in the xtask-related test binaries; no dead-code warning after cleanup.
+- Deferred hardware checkpoint:
+  - do not run another full matrix for this host-only runner cleanup alone;
+  - at the next hardware milestone, validate `/dev/ttyUSB1` as the secondary ESP8266 first, then run a focused opt-in parallel smoke or matrix only if the code changes justify the flash cycles.
+
+### 2026-06-19 Host-Only Station Edge-Case Expansion
+
+- Scope and cadence:
+  - continued the reduced-flash workflow: no ESP8266 flashing, no router reconfiguration, and no full hardware matrix in this pass;
+  - batched harness/example-fixture improvements that can be hardware-validated later in one checkpoint.
+- Added two station edge scenarios to the repo-local `wifi-hw` harness:
+  - `sta_stale_channel_hint`: starts the ESP32 companion AP on the normal channel but builds `wifi_core_connect` with a deliberately different `ESP8266_HAL_WIFI_CHANNEL`; hardware evidence later showed the SDK treats this as advisory, so the scenario now expects `wifi core connected`;
+  - `sta_hidden_ssid`: starts a WPA2 companion AP with a non-broadcast SSID and builds `wifi_core_connect` with explicit SSID/password/channel; expected result is `wifi core connected`.
+- Companion fixture support:
+  - added optional `hidden=0|1` handling to the ESP32 companion `AP_START` command;
+  - `AP_START` now reports `hidden=...` in the OK line;
+  - the `sta_hidden_ssid` harness path requires the companion to echo `hidden=1`, preventing a false pass against stale companion firmware that ignores the new flag;
+  - all existing companion AP users continue to request visible APs by default.
+- Harness scheduling:
+  - marked both new scenarios `Implemented`;
+  - classified both as ESP32-companion-resource users so they are protected by the matrix companion mutex and are not eligible for the secondary ESP8266 lane;
+  - added host tests for required scenario registration, stale-channel runtime markers, hidden-SSID runtime markers, companion-resource classification, and valid/different stale-channel hint selection.
+- Fast validation only:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `15`, `5`, and `29` tests in the xtask-related test binaries;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion build`: passed, `wifi-hw companion build: ok`, build dir `target/esp32-companion`;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'sta_wrong|sta_stale|sta_hidden|manual|rig-blocked'`: listed `sta_wrong_password`, `sta_stale_channel_hint`, and `sta_hidden_ssid` as implemented, with no `manual` or `rig-blocked` matches.
+- Deferred hardware validation:
+  - next hardware checkpoint should flash/build the updated ESP32 companion first, then run focused `sta_stale_channel_hint` and `sta_hidden_ssid` scenarios before considering a broader matrix;
+  - this pass intentionally does not claim those two scenarios green on hardware yet.
+
+### 2026-06-19 Host-Only Station Scan-Connect Edge Scenario
+
+- Scope and cadence:
+  - stayed in reduced-flash mode: no ESP8266 flashing, no ESP32 companion flashing, no router reconfiguration, and no hardware matrix;
+  - added one more station edge scenario that can be validated together with the hidden/stale-channel batch at the next hardware checkpoint.
+- Harness change:
+  - added `sta_scan_connect`, an implemented `wifi_core_connect` scenario that starts the ESP32 companion AP but removes `ESP8266_HAL_WIFI_CHANNEL` from the DUT build environment;
+  - expected success marker is the exact example log `wifi core connected`;
+  - failure markers include `wifi core connect err`, disconnect reason output, panic, and Guru Meditation;
+  - tightened the existing `sta_connect` success marker from broad substring matching to the exact `wifi core connected` marker;
+  - classified `sta_scan_connect` as an ESP32-companion-resource scenario so it remains protected by the matrix companion mutex and is not eligible for the secondary ESP8266 lane.
+- Fast validation only:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `15`, `5`, and `30` tests in the xtask-related test binaries;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'sta_connect|sta_scan_connect|sta_wrong|sta_stale|sta_hidden|manual|rig-blocked'`: listed `sta_connect`, `sta_wrong_password`, `sta_stale_channel_hint`, `sta_hidden_ssid`, and `sta_scan_connect` as implemented, with no `manual` or `rig-blocked` matches.
+- Deferred hardware validation:
+  - next station-edge hardware checkpoint should include focused `sta_scan_connect`, `sta_stale_channel_hint`, and `sta_hidden_ssid` runs after flashing the updated ESP32 companion firmware;
+  - this pass intentionally does not claim `sta_scan_connect` green on hardware yet.
+
+### 2026-06-19 Host-Only AP Rejoin Edge Scenario
+
+- Scope and cadence:
+  - stayed in reduced-flash mode: no ESP8266 flashing, no ESP32 companion flashing, no router reconfiguration, and no hardware matrix;
+  - added AP-side edge coverage that can be validated with the same future ESP32 companion firmware checkpoint as the station edge cases.
+- Harness change:
+  - added `ap_rejoin_companion`, an implemented `wifi_ap` scenario that uses the existing AP station-list/deauth example path;
+  - the runner first waits for the DUT AP to report `ap stations:0`, joins the ESP32 companion STA, waits for DUT-side station-list/deauth completion via `ap-station-list-ok`, then issues a second companion `STA_JOIN` to verify the AP accepts a client again after DUT-initiated deauth;
+  - `ap_station_list_companion` remains the same public scenario and now calls the shared station-list helper with rejoin disabled;
+  - `ap_rejoin_companion` uses the same `ESP8266_HAL_AP_WAIT_CLIENT=1 ESP8266_HAL_AP_RX_FRAME_BYTES=640` build flags as station-list validation;
+  - added the scenario to the AP companion diagnostic test lists.
+- Fast validation only:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `15`, `5`, and `30` tests in the xtask-related test binaries;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'ap_station_list_companion|ap_rejoin_companion|manual|rig-blocked'`: listed `ap_station_list_companion` and `ap_rejoin_companion` as implemented, with no `manual` or `rig-blocked` matches.
+- Deferred hardware validation:
+  - next AP/station-edge hardware checkpoint should include focused `ap_rejoin_companion` after flashing the updated ESP32 companion firmware;
+  - this pass intentionally does not claim `ap_rejoin_companion` green on hardware yet.
+
+### 2026-06-19 Host-Only Visible WPA2 Station Edge Scenario
+
+- Scope and cadence:
+  - stayed in reduced-flash mode: no ESP8266 flashing, no ESP32 companion flashing, no router reconfiguration, and no hardware matrix;
+  - added a focused positive WPA2-PSK station scenario so the basic visible secured-AP path is covered separately from hidden SSID and wrong-password cases.
+- Harness change:
+  - added `sta_wpa2_connect`, an implemented `wifi_core_connect` scenario that starts the ESP32 companion AP as visible WPA2-PSK with SSID `esp8266-hal-wpa2` and passphrase `esp8266-hal-pass`;
+  - expected success marker is the exact example log `wifi core connected`;
+  - failure markers include `wifi core connect err`, disconnect reason output, panic, and Guru Meditation;
+  - classified `sta_wpa2_connect` as an ESP32-companion-resource scenario so it remains protected by the matrix companion mutex and is not eligible for the secondary ESP8266 lane.
+- Fast validation only:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `15`, `5`, and `31` tests in the xtask-related test binaries;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'sta_connect|sta_scan_connect|sta_wpa2_connect|sta_wrong|sta_stale|sta_hidden|manual|rig-blocked'`: listed `sta_connect`, `sta_wrong_password`, `sta_wpa2_connect`, `sta_stale_channel_hint`, `sta_hidden_ssid`, and `sta_scan_connect` as implemented, with no `manual` or `rig-blocked` matches.
+- Deferred hardware validation:
+  - next station-edge hardware checkpoint should include focused `sta_wpa2_connect` alongside `sta_scan_connect`, `sta_stale_channel_hint`, and `sta_hidden_ssid` after flashing the updated ESP32 companion firmware;
+  - this pass intentionally does not claim `sta_wpa2_connect` green on hardware yet.
+
+### 2026-06-19 Focused Station/AP Edge Hardware Checkpoint
+
+- Scope and flash cadence:
+  - ran a focused checkpoint for the newly batched edge scenarios only, not a full matrix;
+  - flashed the ESP32 companion once because `sta_hidden_ssid` depends on the new `AP_START hidden=1` response;
+  - then flashed/reran only the new DUT edge scenarios needed for this checkpoint.
+- Pre-check safety:
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP process was active;
+  - no serial owners on `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS remained listening on UDP `1812`/`1813`;
+  - `enp3s0` stayed up at `10.42.0.1/24`;
+  - laptop Wi-Fi `wlp4s0` stayed up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Companion firmware update:
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion build`: passed, build dir `target/esp32-companion`;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion flash --serial-port /dev/ttyACM0`: passed;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw companion command --serial-port /dev/ttyACM0 PING`: companion printed `READY companion esp32-pico-d4 mac=4c:c3:82:82:32:80` and `OK PONG`.
+- Initial focused run command:
+  - `source .envrc && export ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-edge-checkpoint CARGO_INCREMENTAL=0 && scenarios='sta_wpa2_connect sta_scan_connect sta_wrong_channel sta_hidden_ssid ap_rejoin_companion' && status=0 && for scenario in $scenarios; do echo "==== wifi-hw run $scenario ===="; if ! timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run "$scenario" --serial-port /dev/ttyUSB0 --companion-port /dev/ttyACM0; then echo "==== wifi-hw run $scenario FAILED ===="; status=1; break; fi; done; exit $status`;
+  - `sta_wpa2_connect` passed at `target/wifi-hw-artifacts-20260619-edge-checkpoint/sta_wpa2_connect-1781860277`;
+  - `sta_scan_connect` passed at `target/wifi-hw-artifacts-20260619-edge-checkpoint/sta_scan_connect-1781860297`;
+  - old negative `sta_wrong_channel` failed as a test-design issue at `target/wifi-hw-artifacts-20260619-edge-checkpoint/sta_wrong_channel-1781860315`: build env used `ESP8266_HAL_WIFI_CHANNEL='11'`, companion AP was `channel=6`, but the DUT still reached `wifi core associated`; this confirmed the channel value behaves as an advisory hint rather than a strict negative filter.
+- Harness correction after hardware evidence:
+  - renamed/reframed `sta_wrong_channel` to `sta_stale_channel_hint`;
+  - new expectation is successful connection with a stale channel hint, proving recovery/fallback rather than failure;
+  - `cargo fmt --all -- --check`: passed after the correction;
+  - `git diff --check`: passed after the correction;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `15`, `5`, and `31` tests in the xtask-related test binaries;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'sta_connect|sta_scan_connect|sta_wpa2_connect|sta_wrong|sta_stale|sta_hidden|ap_rejoin|manual|rig-blocked'`: listed the implemented station/AP edge scenarios including `sta_stale_channel_hint` and `ap_rejoin_companion`, with no `manual` or `rig-blocked` matches in the filtered output.
+- Resumed focused hardware command:
+  - `source .envrc && export ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-edge-checkpoint CARGO_INCREMENTAL=0 && scenarios='sta_stale_channel_hint sta_hidden_ssid ap_rejoin_companion' && status=0 && for scenario in $scenarios; do echo "==== wifi-hw run $scenario ===="; if ! timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run "$scenario" --serial-port /dev/ttyUSB0 --companion-port /dev/ttyACM0; then echo "==== wifi-hw run $scenario FAILED ===="; status=1; break; fi; done; exit $status`;
+  - result: command exited successfully.
+- Focused hardware artifacts and markers:
+  - `sta_wpa2_connect-1781860277`: build env used `ESP8266_HAL_WIFI_SSID='esp8266-hal-wpa2'`, `ESP8266_HAL_WIFI_PASS='esp8266-hal-pass'`, `ESP8266_HAL_WIFI_CHANNEL='6'`; companion log showed `AP_START ssid=esp8266-hal-wpa2 pass=esp8266-hal-pass channel=6 hidden=0`; DUT UART reached `wifi core initialized`, `wifi core started`, `wifi core associated`, and `wifi core connected`;
+  - `sta_scan_connect-1781860297`: build env omitted `ESP8266_HAL_WIFI_CHANNEL`; companion log showed open AP `esp8266-hal-sta` on channel `6`; DUT UART reached `wifi core initialized`, `wifi core started`, `wifi core associated`, and `wifi core connected`;
+  - `sta_stale_channel_hint-1781860508`: build env used `ESP8266_HAL_WIFI_CHANNEL='11'`; companion log showed open AP `esp8266-hal-sta` on channel `6`; DUT UART reached `wifi core initialized`, `wifi core started`, `wifi core associated`, and `wifi core connected`;
+  - `sta_hidden_ssid-1781860527`: build env used `ESP8266_HAL_WIFI_SSID='esp8266-hal-hidden'`, `ESP8266_HAL_WIFI_PASS='esp8266-hal-pass'`, `ESP8266_HAL_WIFI_CHANNEL='6'`; companion log confirmed `AP_START ssid=esp8266-hal-hidden pass=esp8266-hal-pass channel=6 hidden=1` and `OK AP_START ... hidden=1`; DUT UART reached `wifi core initialized`, `wifi core started`, `wifi core associated`, and `wifi core connected`;
+  - `ap_rejoin_companion-1781860548`: build env used `ESP8266_HAL_AP_WAIT_CLIENT=1 ESP8266_HAL_AP_RX_FRAME_BYTES=640`; DUT UART reached `ap stations:0`, `ap stations:1`, `ap-deauth-ok`, and `ap-station-list-ok`; companion first join had one transient `ERR code=sta-join detail=reason=4`, then `OK STA_JOIN connected=1 ch=6`; after DUT deauth/station-list success, the second companion `STA_JOIN` also returned `OK STA_JOIN connected=1 ch=6`.
+- Final post-check state:
+  - `cargo fmt --all -- --check && git diff --check`: passed;
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, EAP, or rustfmt process remained;
+  - no serial owners remained on `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS still listened on UDP `1812`/`1813`;
+  - `enp3s0` remained up at `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`, and router `10.42.0.131` replied to ping.
+
+### 2026-06-19 Opt-In Flash Wear Reduction for Hardware Harness
+
+- User direction:
+  - test less often to avoid unnecessary ESP8266 flash wear;
+  - batch fixes, run fast host/static checks during iteration, and reserve focused hardware or full matrix runs for larger milestones.
+- Live safety check before the host-only harness work:
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP test process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS PID `35807` was listening on UDP `1812`/`1813`;
+  - `enp3s0` was up at `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` was up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Harness change:
+  - added opt-in unchanged-image flash skipping behind `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1`;
+  - the harness fingerprints the generated split ESP8266 flash images by address, length, and contents;
+  - after a successful flash with the opt-in enabled, the fingerprint is stored under `target/wifi-hw-flash-cache/<serial>.fingerprint`;
+  - future runs on the same serial port skip `esptool write-flash` only when the newly generated image fingerprint matches the cached fingerprint;
+  - every run records `flash_image_fingerprint` and `flash_action=written` or `flash_action=skipped-unchanged` in the run manifest, and `flash.log` records the cache path and skip setting;
+  - default behavior remains conservative: if the environment variable is not set, the harness still flashes normally and does not update the skip cache.
+- Scope:
+  - host-only harness refinement;
+  - no ESP8266 flash, no ESP32 companion flash, no router mutation, and no hardware matrix.
+- Fast validation:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `17`, `5`, and `31` tests in the non-empty xtask test binaries;
+  - `git diff --check`: passed.
+- Usage note for future hardware checkpoints:
+  - enable `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1` only when the harness is controlling the DUT contents for the current session;
+  - if a board may have been flashed outside the harness, leave the opt-in disabled for the first run so the cache is re-established from a known write.
+
+### 2026-06-19 Host-Only Xtensa Warning Cleanup
+
+- Scope and cadence:
+  - continued the reduced-flash workflow;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - targeted only local dead-code/warning cleanup that did not change hardware scenario behavior or the public typestate Wi-Fi API.
+- Baseline non-flashing Xtensa check before cleanup:
+  - command: `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise --message-format short`;
+  - result: passed;
+  - warning count: `esp8266-hal` library generated `113` warnings;
+  - warning profile included many expected backend/API dead-code warnings plus clear leftovers in the stale `wifi::phy` module, compat debug probes, unused FFI declarations, and internal `xTaskIncrementTick_impl` naming.
+- Cleanup:
+  - stopped compiling the stale `src/wifi/phy.rs` module by removing the `wifi::phy` module declaration; the active PHY/RF path remains `src/wifi/sdk/phy_init.rs`;
+  - removed unused compat scheduler debug statics, unused stack-frame constants, an unused frame-restore helper, and an unused retire wrapper;
+  - renamed the internal tick helper from `xTaskIncrementTick_impl` to `x_task_increment_tick_impl`, while preserving the exported `xTaskIncrementTick` symbol;
+  - removed an unused ROM/NMI import from `compat::timer`; the real NMI call site remains in `compat::port`;
+  - removed unused `ranges_overlap`;
+  - removed unused SDK FFI declarations for `esp_newlib_init`, `esp_crc8` in `phy_init`, `wifi_menuconfig_init`, and `tcpip_adapter_set_default_wifi_handlers`;
+  - gated the `esp_reset_reason` FFI declaration behind `wifi-debug-log`, matching its only diagnostic use.
+- Validation:
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed all host Wi-Fi-core test groups (`43`, `2`, `11`, `17`, `9`, `6`, `2`, `6`, `3`, `8`, `3`, `2`, `2`, and `3` tests);
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed (`17`, `5`, and `31` tests in non-empty xtask test binaries);
+  - `git diff --check`: passed;
+  - final Xtensa all-WiFi check command repeated from the baseline: passed;
+  - warning count after cleanup: `esp8266-hal` library generated `76` warnings.
+- Remaining warning profile:
+  - the remaining warnings are mostly backend/API surface that is intentionally compiled as crate-internal plumbing while examples exercise it through the typestate public API;
+  - did not add a broad `allow(dead_code)` because that would hide useful signal during ongoing Wi-Fi backend refinement;
+  - the recurring host Cargo warning `profile package spec compiler_builtins in profile dev did not match any packages` was left alone because it belongs to the build-std/LTO workaround and should not be removed just to quiet host xtask output without proving the Xtensa dev-profile link behavior.
+
+### 2026-06-19 Host-Only Scenario Runtime Metadata Hardening
+
+- Scope and cadence:
+  - host-only harness correctness pass;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to make `wifi-hw list`/registry metadata better evidence of what is actually runnable.
+- Problem found:
+  - all currently registered scenarios were marked implemented, but ESP32-companion-assisted scenarios still used `RuntimePlan::Pending` as a placeholder because they dispatch through custom companion-rig runners by scenario name;
+  - this was functionally working but weakened the registry invariant: a future scenario could be marked implemented while still carrying the pending runtime placeholder.
+- Harness change:
+  - added explicit `RuntimePlan::CompanionRig`;
+  - changed all ESP32-companion-assisted implemented scenarios to use `CompanionRig` instead of `Pending`:
+    - AP companion diagnostics;
+    - ESP-NOW companion paths;
+    - promiscuous data companion path;
+  - kept a defensive error if a `CompanionRig` scenario ever reaches the generic runtime dispatcher instead of the companion-rig dispatcher;
+  - added an xtask unit invariant that every `ScenarioState::Implemented` scenario must not use `RuntimePlan::Pending`;
+  - updated companion CLI tests to expect `CompanionRig` for those scenario classes.
+- Fast validation:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `17`, `5`, and `32` tests in the non-empty xtask test binaries;
+  - `git diff --check`: passed;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'manual|rig-blocked|pending|_companion|promisc_data_companion'`: listed only implemented companion scenarios; no `manual`, `rig-blocked`, or `pending` state lines appeared.
+
+### 2026-06-19 Host-Only Runtime Metadata Visibility
+
+- Scope and cadence:
+  - continued the reduced-flash workflow requested for ESP8266 wear control;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to make `wifi-hw list` output and per-run manifests show which runtime harness path each scenario uses.
+- Live safety check before host-only validation:
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP test process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS PID `35807` was listening on UDP `1812`/`1813`;
+  - `enp3s0` was up at `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` was up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Harness change:
+  - added stable `RuntimePlan::label()` values:
+    - `uart-watch`;
+    - `tcp-echo`;
+    - `tcp-client`;
+    - `companion-rig`;
+    - `pending`;
+  - text `wifi-hw list` output now includes `runtime=<label>`;
+  - JSON `wifi-hw list --format json` output now includes a `runtime` field;
+  - per-run manifests now record `runtime=<label>`;
+  - added an xtask test that pins representative runtime labels for audit output stability.
+- Fast validation:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `17`, `5`, and `33` tests in the non-empty xtask test binaries;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'runtime=' | sed -n '1,12p'`: showed runtime labels in text output for STA, TCP, and EAP scenarios;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list --format json | rg '"runtime":"(uart-watch|tcp-echo|tcp-client|companion-rig)"' | sed -n '1,12p'`: showed runtime labels in JSON output;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list | rg 'manual|rig-blocked|pending' || true`: produced no output;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list | rg 'companion-rig|tcp-echo|tcp-client|uart-watch' | wc -l`: reported `38`;
+  - `git diff --check`: passed.
+
+### 2026-06-19 Host-Only SmartConfig Documentation Alignment
+
+- Scope and cadence:
+  - continued the reduced-flash workflow;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to align public SmartConfig wording with the current implemented ESPTouch-compatible sender fixture instead of the older phone-app-only/manual framing.
+- Documentation and harness metadata changes:
+  - updated `src/wifi/smartconfig.rs` to describe SmartConfig as receiving credentials from an ESPTouch/AirKiss-compatible sender;
+  - documented that the repo-local hardware harness uses an ESP32 companion ESPTouch sender, while phone apps remain useful for interoperability checks outside the automated matrix;
+  - changed the SmartConfig event docs to describe `SC_EVENT_SEND_ACK_DONE` as acknowledgement to the sender instead of phone-only wording;
+  - updated the `smartconfig` hardware scenario description to say "ESPTouch-compatible sender";
+  - added an xtask test assertion pinning that scenario description so the registry does not drift back to phone-app-only wording.
+- Fast validation:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `17`, `5`, and `33` tests in the non-empty xtask test binaries;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list | rg '^smartconfig|manual|rig-blocked|pending' || true`: listed `smartconfig` as implemented with `runtime=uart-watch` and produced no manual/rig-blocked/pending lines;
+  - `rg -n "phone app|sent to phone|ESP32 companion diagnostic is not a reliability gate|SmartConfig provisioning from a phone app" src/wifi/smartconfig.rs xtask/src/wifi_hw.rs xtask/tests/wifi_hw_cli.rs || true`: only found the intentional note that phone apps remain useful interoperability checks;
+  - `git diff --check`: passed.
+
+### 2026-06-19 Host-Only Scenario Registry Guardrail Expansion
+
+- Scope and cadence:
+  - host-only xtask test hardening;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to prevent future harness edits from quietly dropping scenarios that now represent closed coverage gaps.
+- Guardrail changes:
+  - expanded the required scenario registry test to include the current implemented coverage set:
+    - station connect/negative/hidden/stale-channel/scan/DHCP/static-IP;
+    - TCP server and TCP client;
+    - EAP positive and wrong-password negative;
+    - AP UART and companion stages;
+    - WPS PBC and fixed PIN;
+    - SmartConfig;
+    - ESP-NOW UART and companion paths, including bad-key;
+    - promiscuous data/capture/filter/control API/control-frame paths;
+  - added a duplicate-name check for scenario registry entries.
+- Fast validation:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `17`, `5`, and `34` tests in the non-empty xtask test binaries;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list | wc -l`: reported `38`;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list | rg 'manual|rig-blocked|pending' || true`: produced no output;
+  - `git diff --check`: passed.
+
+### 2026-06-19 Host-Only WPA2 Enterprise API Contract Tightening
+
+- Scope and cadence:
+  - host-only EAP/API accuracy pass under the reduced-flash workflow;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to tighten the public Enterprise credential contract without claiming new hardware coverage.
+- Live safety check before host-only work:
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP test process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS PID `35807` was listening on UDP `1812`/`1813`;
+  - `enp3s0` was up at `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` was up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- API/documentation changes:
+  - documented Enterprise identity, username, and password wrapper roles;
+  - documented `Wpa2EnterpriseCredentials::new` as the username/password path validated by the OpenWrt/RADIUS hardware fixture;
+  - documented optional CA/client-certificate material as SDK supplicant pass-through that still needs a dedicated EAP-TLS fixture before being treated as hardware-green;
+  - added host tests for username/password empty and maximum-length boundaries;
+  - added a host test proving optional CA cert, client cert, private key, and private-key password material are preserved by the typed API.
+- Fast validation:
+  - `cargo fmt --all -- --check`: initially failed only on formatting of the new test import and certificate builder expression;
+  - `cargo fmt --all`: applied mechanical formatting;
+  - `cargo fmt --all -- --check`: passed after formatting;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --test wifi_core_config -q`: passed, `19` tests;
+  - `git diff --check`: passed.
+
+### 2026-06-19 Host-Only WPS Config Guardrail
+
+- Scope and cadence:
+  - host-only WPS API contract pass;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to protect the typestate WPS configuration shape that the hardware harness depends on for PBC/PIN validation.
+- Test changes:
+  - added a host test proving `WpsConfig::with_fixed_pin` switches a PBC config into PIN mode and preserves the checksum-validated PIN;
+  - added assertions that `with_target_ssid` preserves the target SSID used by the WPS example/harness;
+  - added assertions that WPS factory info fields truncate to SDK-sized buffers rather than overflowing.
+- Fast validation:
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --test wifi_core_config -q`: passed, `20` tests;
+  - `git diff --check`: passed.
+
+### 2026-06-19 Host-Only Hardware Harness Wear/Artifact Defaults
+
+- Scope and cadence:
+  - host-only hardware harness usability pass under the reduced-flash workflow;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to make the lower-wear hardware workflow harder to miss before a real hardware run.
+- Harness changes:
+  - `wifi-hw doctor` now prints the current unchanged-image flash-skip state and the controlling `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH` environment variable;
+  - `wifi-hw --help` now documents `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1` and states that it only skips unchanged ESP8266 images after a known harness flash;
+  - the default artifact root changed from `/tmp/esp8266-hal-wifi-hw` to repo-local `target/wifi-hw-artifacts`;
+  - explicit `--root PATH` and `ESP8266_HAL_WIFI_HW_ROOT` still take precedence over the default;
+  - added an xtask unit test for accepted truthy flash-skip values;
+  - updated the xtask integration test to require the repo-local default artifact root.
+- Fast validation:
+  - `cargo fmt --all -- --check`: passed after a one-line import formatting fix;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `18`, `5`, and `34` tests in the non-empty xtask test binaries;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw doctor`: passed and printed default artifact root `/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts` plus `flash skip unchanged: disabled (ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH)`;
+  - `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1 target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw doctor | rg 'flash skip|default artifacts root'`: printed the same repo-local root plus `flash skip unchanged: enabled`;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw --help | rg 'skip|ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH|usage'`: showed the new environment-variable help line;
+  - `git diff --check`: passed.
+
+### 2026-06-19 Host-Only Hardware Doctor Readiness Output
+
+- Scope and cadence:
+  - host-only hardware harness readiness pass;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to make `wifi-hw doctor` more useful after laptop restarts without opening serial ports or changing router state.
+- Live safety check before host-only work:
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP test process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS PID `35807` was listening on UDP `1812`/`1813`;
+  - `enp3s0` was up at `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` was up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Harness changes:
+  - `wifi-hw doctor` now reports whether the default DUT serial node `/dev/ttyUSB0` exists;
+  - `wifi-hw doctor` now reports whether the default ESP32 companion serial node `/dev/ttyACM0` exists;
+  - `wifi-hw doctor` now prints the default router target `root@10.42.0.131` and hostapd interface `phy0-ap0`;
+  - added a pure unit test for the path-presence helper using a temporary file, without touching real serial devices.
+- Fast validation:
+  - `cargo fmt --all -- --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `19`, `5`, and `34` tests in the non-empty xtask test binaries;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw doctor`: passed and printed repo-local artifact root, `/dev/ttyUSB0 (present)`, `/dev/ttyACM0 (present)`, router default, and flash-skip state;
+  - `git diff --check`: passed.
+
+### 2026-06-19 Host-Only Scenario Audit and Parallel-Lane Metadata
+
+- Scope and cadence:
+  - host-only hardware harness auditability pass under the reduced-flash workflow;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to make the current two-ESP8266 parallel matrix contract and shared fixture usage visible before any long hardware run.
+- Live safety check before host-only work:
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP test process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS PID `35807` was listening on UDP `1812`/`1813`;
+  - `enp3s0` was up at `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` was up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Harness changes:
+  - `wifi-hw list` text output now includes `matrix_lane=...`, `resources=...`, `profile=...`, and `description=...`;
+  - `wifi-hw list --format json` now includes `matrix_lane`, `resources`, `profile`, and `description` fields per scenario;
+  - run manifests now record `profile`, `matrix_lane`, and `resources` in addition to the existing scenario/example/features/runtime/serial data;
+  - `wifi-hw --help` now documents that the matrix scheduler uses at most two lanes and that the secondary lane is limited to scenarios marked `matrix_lane=secondary-candidate`;
+  - added host tests pinning the resource labels and secondary-lane classification for the current matrix contract.
+- Fast validation:
+  - `cargo fmt --all -- --check`: initially failed only on new wrapping, then passed after `cargo fmt --all`;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `20`, `5`, and `35` tests in the non-empty xtask test binaries;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list | sed -n '1,8p'`: showed primary scenarios with `resources=esp32-companion`, `profile=release`, and descriptions;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list --format json | sed -n '1,8p'`: showed valid-looking JSON entries with the new audit fields;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw --help | rg 'matrix|ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH|secondary'`: showed the new secondary-lane help line and the flash-skip environment variable;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list | rg 'eap_|wps|smartconfig|promisc_control_filters'`: showed `eap_sta_assoc` and `eap_wrong_password` as `matrix_lane=secondary-candidate resources=router`, WPS as primary router scenarios, SmartConfig as `resources=router,esp32-companion`, and promiscuous control capture as `resources=esp32-companion`;
+  - `cargo fmt --all -- --check && git diff --check`: passed.

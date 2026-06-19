@@ -1,8 +1,8 @@
 //! SmartConfig provisioning.
 //!
-//! SmartConfig allows a station to receive WiFi credentials from a phone app
-//! over the air without a pre-existing connection. Requires the `wifi-smartconfig`
-//! feature flag.
+//! SmartConfig allows a station to receive WiFi credentials from an
+//! ESPTouch/AirKiss-compatible sender over the air without a pre-existing
+//! connection. Requires the `wifi-smartconfig` feature flag.
 //!
 //! # Supported protocols
 //!
@@ -20,9 +20,9 @@
 //!    credentials, then connect.
 //! 5. Call [`stop`] to release resources.
 //!
-//! Hardware validation also needs a real SmartConfig sender, such as a phone app
-//! or injection-capable WiFi setup. The ESP32 companion diagnostic is not a
-//! reliability gate for credential provisioning.
+//! Hardware validation needs a real SmartConfig sender. The repo-local hardware
+//! harness currently uses an ESP32 companion ESPTouch sender; phone apps remain
+//! useful for interoperability checks outside the automated matrix.
 
 use esp8266_wifi_sys as sys;
 
@@ -76,15 +76,19 @@ impl Default for SmartConfigStartConfig {
 
 /// Start SmartConfig with the given configuration.
 ///
-/// The WiFi driver must be in station mode. The phone app broadcasts SSID and
-/// password which the device captures from the air.
+/// The WiFi driver must be in station mode. The sender broadcasts SSID and
+/// password data which the device captures from the air.
 ///
 /// Progress is reported via the event system (`SC_EVENT` base):
 /// - `SC_EVENT_SCAN_DONE` — channel scanning complete.
 /// - `SC_EVENT_FOUND_CHANNEL` — target AP channel found.
 /// - `SC_EVENT_GOT_SSID_PSWD` — credentials received.
-/// - `SC_EVENT_SEND_ACK_DONE` — acknowledgement sent to phone.
+/// - `SC_EVENT_SEND_ACK_DONE` — acknowledgement sent to sender.
 pub fn start(config: &SmartConfigStartConfig) -> Result<(), WifiError> {
+    if unsafe { super::compat::timer::start_ets_timer_task() } != 1 {
+        return Err(WifiError::Internal(EspError(sys::ESP_ERR_NO_MEM)));
+    }
+
     // If a V2 key is provided, we need to keep it alive for the duration of
     // the call. The SDK copies the pointer contents internally.
     let mut key_buf: [u8; 17] = [0; 17]; // 16 bytes + null terminator
@@ -102,7 +106,11 @@ pub fn start(config: &SmartConfigStartConfig) -> Result<(), WifiError> {
         esp_touch_v2_key: key_ptr as *mut core::ffi::c_char,
     };
 
-    EspError::check(unsafe { sys::esp_smartconfig_start(&raw) })?;
+    super::compat::port::set_wdev_tick_poll_enabled(true);
+    if let Err(error) = EspError::check(unsafe { sys::esp_smartconfig_start(&raw) }) {
+        super::compat::port::set_wdev_tick_poll_enabled(false);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -111,8 +119,9 @@ pub fn start(config: &SmartConfigStartConfig) -> Result<(), WifiError> {
 /// Must be called after provisioning completes (whether successful or not)
 /// to free memory allocated by [`start`].
 pub fn stop() -> Result<(), WifiError> {
-    EspError::check(unsafe { sys::esp_smartconfig_stop() })?;
-    Ok(())
+    let result = EspError::check(unsafe { sys::esp_smartconfig_stop() }).map_err(WifiError::from);
+    super::compat::port::set_wdev_tick_poll_enabled(false);
+    result
 }
 
 /// Set the SmartConfig protocol type.
@@ -135,7 +144,7 @@ pub fn set_timeout(time_s: u8) -> Result<(), WifiError> {
 
 /// Enable or disable SmartConfig fast mode.
 ///
-/// Fast mode requires a compatible phone app. Both modes are interoperable.
+/// Fast mode requires a compatible sender. Both modes are interoperable.
 /// Must be called before [`start`].
 pub fn set_fast_mode(enable: bool) -> Result<(), WifiError> {
     EspError::check(unsafe { sys::esp_smartconfig_fast_mode(enable) })?;
@@ -145,7 +154,7 @@ pub fn set_fast_mode(enable: bool) -> Result<(), WifiError> {
 /// Get reserved data from ESPTouch V2.
 ///
 /// Reads up to `buf.len()` bytes of application-specific reserved data
-/// transmitted by the phone app during ESPTouch V2 provisioning.
+/// transmitted by the sender during ESPTouch V2 provisioning.
 pub fn get_rvd_data(buf: &mut [u8]) -> Result<(), WifiError> {
     if buf.is_empty() || buf.len() > 255 {
         return Err(WifiError::InvalidArgument);

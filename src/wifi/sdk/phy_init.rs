@@ -53,7 +53,6 @@ extern "C" {
     fn uart_tx_wait_idle(uart_no: u8);
     fn uart_div_modify(uart_no: u8, divisor: u32);
 
-    fn esp_crc8(data: *const u8, len: u32) -> u8;
     fn nvs_open(name: *const u8, mode: u32, handle: *mut u32) -> i32;
     fn nvs_close(handle: u32);
     fn nvs_get_blob(handle: u32, key: *const u8, out: *mut c_void, len: *mut usize) -> i32;

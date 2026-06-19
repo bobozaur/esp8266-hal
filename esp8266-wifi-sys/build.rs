@@ -3169,10 +3169,11 @@ fn emit_link_directives(sdk: &Path) {
     println!("cargo:rustc-link-arg=-Wl,--wrap=nvs_open"); // NVS RAM stub
     println!("cargo:rustc-link-arg=-Wl,--wrap=nvs_get_blob"); // NVS RAM stub
     println!("cargo:rustc-link-arg=-Wl,--wrap=ets_printf"); // no-op (ppTask stack overflow prevention)
-                                                            // Diagnostic timer/connect wrappers removed. The current goal is to match
-                                                            // the SDK station/tcp_server runtime shape as closely as possible, and the
-                                                            // remaining active investigation wraps were still changing that path.
-                                                            // REMOVED: --wrap=uart_tx_wait_idle (trace_char disrupts PHY calibration timing)
+
+    // Diagnostic timer/connect wrappers removed. The current goal is to match
+    // the SDK station/tcp_server runtime shape as closely as possible, and the
+    // remaining active investigation wraps were still changing that path.
+    // REMOVED: --wrap=uart_tx_wait_idle (trace_char disrupts PHY calibration timing)
 }
 
 // ===========================================================================

@@ -104,8 +104,6 @@ unsafe extern "C" fn empty_callback(_: *mut c_void) {}
 extern "C" {
     /// ROM-based ETS timer processing.
     fn ets_timer_proc();
-    /// WiFi blob NMI handler — processes received frames.
-    fn wDev_ProcessFiq();
 }
 
 /// Dedicated task for processing ROM ETS timers.

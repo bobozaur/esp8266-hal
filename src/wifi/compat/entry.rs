@@ -82,11 +82,11 @@ extern "C" {
     fn base_gpio_init() -> i32;
     fn esp_mac_init() -> i32;
     fn esp_reset_reason_early() -> u32;
+    #[cfg(feature = "wifi-debug-log")]
     fn esp_reset_reason() -> u32;
     fn esp_reset_reason_init();
     fn esp_task_wdt_init() -> i32;
     fn esp_pthread_init() -> i32;
-    fn esp_newlib_init() -> i32;
     fn __init_array_start();
     fn __init_array_end();
     // C BSS boundaries (from SDK linker symbols, provided by our link.x)

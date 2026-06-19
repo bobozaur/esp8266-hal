@@ -63,6 +63,7 @@ impl Passphrase {
     }
 }
 
+/// Outer/anonymous identity used by the WPA2 Enterprise supplicant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnterpriseIdentity(Vec<u8, 127>);
 
@@ -101,6 +102,7 @@ impl TryFrom<&str> for EnterpriseIdentity {
     }
 }
 
+/// Inner username used by password-based WPA2 Enterprise methods.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnterpriseUsername(Vec<u8, 127>);
 
@@ -139,6 +141,7 @@ impl TryFrom<&str> for EnterpriseUsername {
     }
 }
 
+/// Inner password used by password-based WPA2 Enterprise methods.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnterprisePassword(Vec<u8, 128>);
 
@@ -561,6 +564,12 @@ pub enum Credential {
     Wpa2Enterprise(Wpa2EnterpriseCredentials),
 }
 
+/// Optional client certificate material forwarded to the SDK supplicant.
+///
+/// The repo-local hardware matrix currently validates the username/password
+/// Enterprise path. Client certificate fields are preserved by the typed API and
+/// forwarded to the SDK when supplied, but they need a dedicated EAP-TLS fixture
+/// before they should be treated as hardware-green.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Wpa2EnterpriseClientCertificate {
     client_cert: &'static [u8],
@@ -595,6 +604,12 @@ impl Wpa2EnterpriseClientCertificate {
     }
 }
 
+/// WPA2 Enterprise station credentials.
+///
+/// `new` covers the validated username/password path used by the OpenWrt/RADIUS
+/// hardware fixture. Optional CA and client certificate fields expose the
+/// corresponding ESP8266 RTOS SDK supplicant hooks for deployments that require
+/// certificate validation or EAP-TLS-style client material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wpa2EnterpriseCredentials {
     identity: EnterpriseIdentity,

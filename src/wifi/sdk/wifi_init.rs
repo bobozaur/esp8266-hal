@@ -74,10 +74,8 @@ extern "C" {
     fn esp_wifi_deinit_internal() -> i32;
     fn esp_supplicant_init() -> i32;
     fn esp_supplicant_deinit();
-    fn wifi_menuconfig_init(config: *const sys::wifi_init_config_t);
     fn esp_wifi_internal_set_log_level(level: u32);
     fn esp_wifi_internal_set_log_mod(module: u32);
-    fn tcpip_adapter_set_default_wifi_handlers() -> i32;
 
     // TX path
     fn ieee80211_output_pbuf(aio: *mut EspAio) -> i32;

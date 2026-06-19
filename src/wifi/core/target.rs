@@ -1,3 +1,5 @@
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+use portable_atomic::AtomicPtr;
 use portable_atomic::{AtomicU32, Ordering};
 
 use super::target_callback::CallbackRegistration;
@@ -6,10 +8,10 @@ use super::{
     AccessPointConfig, AccessPointRecord, ApStationInfo, Channel, ClientConfig, ConnectError,
     Credential, Deadline, DisconnectError, DriverError, EspNowPeerConfig, EspNowRxFrame,
     EspNowSendStatus, EspNowTxStatus, InitConfig, InitError, PromiscuousControlFilter,
-    PromiscuousFilter, PromiscuousFrameInfo, PromiscuousRxFrame, RawMode, RawRxRecord, ScanOptions,
-    StationPowerSave, WifiApBackend, WifiEvent, WifiFeatureBackend, WifiLifecycleBackend,
-    WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
-    Wpa2EnterpriseCredentials, WpsConfig, WpsPin, PROMISCUOUS_MAX_PAYLOAD_PREFIX,
+    PromiscuousFilter, PromiscuousFrameInfo, PromiscuousPacketType, PromiscuousRxFrame, RawMode,
+    RawRxRecord, ScanOptions, StationPowerSave, WifiApBackend, WifiEvent, WifiFeatureBackend,
+    WifiLifecycleBackend, WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend,
+    WifiStaBackend, Wpa2EnterpriseCredentials, WpsConfig, WpsPin, PROMISCUOUS_MAX_PAYLOAD_PREFIX,
 };
 #[cfg(feature = "wifi-debug-trace")]
 use super::{DeliverDataDebugSnapshot, RxCallbackDebugSnapshot};
@@ -104,6 +106,323 @@ static g_ap_rx_expected_slot: AtomicU32 = AtomicU32::new(0);
 static PROMISCUOUS_FILTER_BITS: AtomicU32 = AtomicU32::new(0);
 static PROMISCUOUS_CHANNEL: AtomicU32 = AtomicU32::new(0);
 static CORE_STA_START_SEQ: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_sniffer_trace))]
+#[no_mangle]
+pub static mut g_smartconfig_sniffer_calls: u32 = 0;
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_sniffer_trace))]
+#[no_mangle]
+pub static mut g_smartconfig_sniffer_last_type: u32 = 0;
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_sniffer_trace))]
+#[no_mangle]
+pub static mut g_smartconfig_sniffer_last_len: u32 = 0;
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_sniffer_trace))]
+#[no_mangle]
+pub static mut g_smartconfig_sniffer_last_channel: u32 = 0;
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_sniffer_trace))]
+#[no_mangle]
+pub static mut g_smartconfig_sniffer_last_rssi: u32 = 0;
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_sniffer_trace))]
+extern "C" {
+    fn __real_sc_sniffer_cb(
+        buffer: *mut core::ffi::c_void,
+        packet_type: esp8266_wifi_sys::wifi_promiscuous_pkt_type_t,
+    );
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_sniffer_trace))]
+#[no_mangle]
+unsafe extern "C" fn __wrap_sc_sniffer_cb(
+    buffer: *mut core::ffi::c_void,
+    packet_type: esp8266_wifi_sys::wifi_promiscuous_pkt_type_t,
+) {
+    unsafe {
+        g_smartconfig_sniffer_calls = g_smartconfig_sniffer_calls.wrapping_add(1);
+        g_smartconfig_sniffer_last_type = packet_type;
+        if !buffer.is_null() {
+            let packet = &*(buffer as *const esp8266_wifi_sys::wifi_promiscuous_pkt_t);
+            g_smartconfig_sniffer_last_len = if packet.rx_ctrl.sig_mode() != 0 {
+                packet.rx_ctrl.ht_length() as u32
+            } else {
+                packet.rx_ctrl.legacy_length() as u32
+            };
+            g_smartconfig_sniffer_last_channel = packet.rx_ctrl.channel() as u32;
+            g_smartconfig_sniffer_last_rssi = packet.rx_ctrl.rssi() as i32 as u32;
+        }
+        __real_sc_sniffer_cb(buffer, packet_type);
+    }
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_CHANNEL_CALLS: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_LAST_CHANNEL: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_LAST_CHANNEL_RET: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_FILTER_CALLS: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_LAST_FILTER: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_LAST_FILTER_RET: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_RX_CB_CALLS: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_LAST_RX_CB: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_LAST_RX_CB_RET: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_PROMISC_CALLS: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_LAST_PROMISC_ENABLE: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+static SC_WIFI_TRACE_LAST_PROMISC_RET: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+static SC_RX_TRACE_SET_CALLS: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+static SC_RX_TRACE_LAST_SET_CB: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+static SC_RX_TRACE_LAST_SET_RET: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+static SC_RX_TRACE_CALLBACK_CALLS: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+static SC_RX_TRACE_LAST_TYPE: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+static SC_RX_TRACE_LAST_LEN: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+static SC_RX_TRACE_LAST_CHANNEL: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+static SC_RX_TRACE_LAST_RSSI: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+static SC_RX_TRACE_ORIGINAL_CB: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_event_trace))]
+static SC_EVENT_TRACE_CALLS: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_event_trace))]
+static SC_EVENT_TRACE_NULL_RESOURCES: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_event_trace))]
+static SC_EVENT_TRACE_LAST_ID: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_event_trace))]
+static SC_EVENT_TRACE_LAST_DATA: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_event_trace))]
+static SC_EVENT_TRACE_PUBLISHED: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_event_trace))]
+static SC_EVENT_TRACE_GOT_CALLS: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_event_trace))]
+static SC_EVENT_TRACE_GOT_ACCEPTED: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_event_trace))]
+static SC_EVENT_TRACE_GOT_REJECTED: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+extern "C" {
+    fn __real_esp_wifi_set_channel(
+        primary: u8,
+        second: esp8266_wifi_sys::wifi_second_chan_t,
+    ) -> esp8266_wifi_sys::esp_err_t;
+    fn __real_esp_wifi_set_promiscuous_filter(
+        filter: *const esp8266_wifi_sys::wifi_promiscuous_filter_t,
+    ) -> esp8266_wifi_sys::esp_err_t;
+    fn __real_esp_wifi_set_promiscuous_rx_cb(
+        cb: esp8266_wifi_sys::wifi_promiscuous_cb_t,
+    ) -> esp8266_wifi_sys::esp_err_t;
+    fn __real_esp_wifi_set_promiscuous(en: bool) -> esp8266_wifi_sys::esp_err_t;
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+extern "C" {
+    fn __real_esp_wifi_set_promiscuous_rx_cb(
+        cb: esp8266_wifi_sys::wifi_promiscuous_cb_t,
+    ) -> esp8266_wifi_sys::esp_err_t;
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+#[no_mangle]
+pub unsafe extern "C" fn esp8266_hal_sc_wifi_trace_snapshot(out: *mut u32, len: usize) {
+    if out.is_null() {
+        return;
+    }
+
+    let values = [
+        SC_WIFI_TRACE_CHANNEL_CALLS.load(Ordering::Acquire),
+        SC_WIFI_TRACE_LAST_CHANNEL.load(Ordering::Acquire),
+        SC_WIFI_TRACE_LAST_CHANNEL_RET.load(Ordering::Acquire),
+        SC_WIFI_TRACE_FILTER_CALLS.load(Ordering::Acquire),
+        SC_WIFI_TRACE_LAST_FILTER.load(Ordering::Acquire),
+        SC_WIFI_TRACE_LAST_FILTER_RET.load(Ordering::Acquire),
+        SC_WIFI_TRACE_RX_CB_CALLS.load(Ordering::Acquire),
+        SC_WIFI_TRACE_LAST_RX_CB.load(Ordering::Acquire),
+        SC_WIFI_TRACE_LAST_RX_CB_RET.load(Ordering::Acquire),
+        SC_WIFI_TRACE_PROMISC_CALLS.load(Ordering::Acquire),
+        SC_WIFI_TRACE_LAST_PROMISC_ENABLE.load(Ordering::Acquire),
+        SC_WIFI_TRACE_LAST_PROMISC_RET.load(Ordering::Acquire),
+    ];
+
+    for (idx, value) in values.iter().copied().enumerate().take(len) {
+        unsafe {
+            out.add(idx).write_volatile(value);
+        }
+    }
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+#[no_mangle]
+pub unsafe extern "C" fn esp8266_hal_sc_rx_trace_snapshot(out: *mut u32, len: usize) {
+    if out.is_null() {
+        return;
+    }
+
+    let values = [
+        SC_RX_TRACE_SET_CALLS.load(Ordering::Acquire),
+        SC_RX_TRACE_LAST_SET_CB.load(Ordering::Acquire),
+        SC_RX_TRACE_LAST_SET_RET.load(Ordering::Acquire),
+        SC_RX_TRACE_CALLBACK_CALLS.load(Ordering::Acquire),
+        SC_RX_TRACE_LAST_TYPE.load(Ordering::Acquire),
+        SC_RX_TRACE_LAST_LEN.load(Ordering::Acquire),
+        SC_RX_TRACE_LAST_CHANNEL.load(Ordering::Acquire),
+        SC_RX_TRACE_LAST_RSSI.load(Ordering::Acquire),
+    ];
+
+    for (idx, value) in values.iter().copied().enumerate().take(len) {
+        unsafe {
+            out.add(idx).write_volatile(value);
+        }
+    }
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_event_trace))]
+#[no_mangle]
+pub unsafe extern "C" fn esp8266_hal_sc_event_trace_snapshot(out: *mut u32, len: usize) {
+    if out.is_null() {
+        return;
+    }
+
+    let values = [
+        SC_EVENT_TRACE_CALLS.load(Ordering::Acquire),
+        SC_EVENT_TRACE_NULL_RESOURCES.load(Ordering::Acquire),
+        SC_EVENT_TRACE_LAST_ID.load(Ordering::Acquire),
+        SC_EVENT_TRACE_LAST_DATA.load(Ordering::Acquire),
+        SC_EVENT_TRACE_PUBLISHED.load(Ordering::Acquire),
+        SC_EVENT_TRACE_GOT_CALLS.load(Ordering::Acquire),
+        SC_EVENT_TRACE_GOT_ACCEPTED.load(Ordering::Acquire),
+        SC_EVENT_TRACE_GOT_REJECTED.load(Ordering::Acquire),
+    ];
+
+    for (idx, value) in values.iter().copied().enumerate().take(len) {
+        unsafe {
+            out.add(idx).write_volatile(value);
+        }
+    }
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+#[no_mangle]
+unsafe extern "C" fn __wrap_esp_wifi_set_channel(
+    primary: u8,
+    second: esp8266_wifi_sys::wifi_second_chan_t,
+) -> esp8266_wifi_sys::esp_err_t {
+    SC_WIFI_TRACE_CHANNEL_CALLS.fetch_add(1, Ordering::AcqRel);
+    SC_WIFI_TRACE_LAST_CHANNEL.store(primary as u32, Ordering::Release);
+    let ret = unsafe { __real_esp_wifi_set_channel(primary, second) };
+    SC_WIFI_TRACE_LAST_CHANNEL_RET.store(ret as u32, Ordering::Release);
+    ret
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+#[no_mangle]
+unsafe extern "C" fn __wrap_esp_wifi_set_promiscuous_filter(
+    filter: *const esp8266_wifi_sys::wifi_promiscuous_filter_t,
+) -> esp8266_wifi_sys::esp_err_t {
+    SC_WIFI_TRACE_FILTER_CALLS.fetch_add(1, Ordering::AcqRel);
+    let mask = if filter.is_null() {
+        0
+    } else {
+        unsafe { (*filter).filter_mask }
+    };
+    SC_WIFI_TRACE_LAST_FILTER.store(mask, Ordering::Release);
+    let ret = unsafe { __real_esp_wifi_set_promiscuous_filter(filter) };
+    SC_WIFI_TRACE_LAST_FILTER_RET.store(ret as u32, Ordering::Release);
+    ret
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+#[no_mangle]
+unsafe extern "C" fn __wrap_esp_wifi_set_promiscuous_rx_cb(
+    cb: esp8266_wifi_sys::wifi_promiscuous_cb_t,
+) -> esp8266_wifi_sys::esp_err_t {
+    SC_WIFI_TRACE_RX_CB_CALLS.fetch_add(1, Ordering::AcqRel);
+    SC_WIFI_TRACE_LAST_RX_CB.store(cb.map_or(0, |f| f as usize as u32), Ordering::Release);
+    let ret = unsafe { __real_esp_wifi_set_promiscuous_rx_cb(cb) };
+    SC_WIFI_TRACE_LAST_RX_CB_RET.store(ret as u32, Ordering::Release);
+    ret
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+unsafe extern "C" fn sc_rx_trace_cb(
+    buffer: *mut core::ffi::c_void,
+    packet_type: esp8266_wifi_sys::wifi_promiscuous_pkt_type_t,
+) {
+    SC_RX_TRACE_CALLBACK_CALLS.fetch_add(1, Ordering::AcqRel);
+    SC_RX_TRACE_LAST_TYPE.store(packet_type, Ordering::Release);
+
+    if !buffer.is_null() {
+        let packet = unsafe { &*(buffer as *const esp8266_wifi_sys::wifi_promiscuous_pkt_t) };
+        let len = if packet.rx_ctrl.sig_mode() != 0 {
+            packet.rx_ctrl.ht_length() as u32
+        } else {
+            packet.rx_ctrl.legacy_length() as u32
+        };
+        SC_RX_TRACE_LAST_LEN.store(len, Ordering::Release);
+        SC_RX_TRACE_LAST_CHANNEL.store(packet.rx_ctrl.channel() as u32, Ordering::Release);
+        SC_RX_TRACE_LAST_RSSI.store(packet.rx_ctrl.rssi() as i32 as u32, Ordering::Release);
+    }
+
+    let original = SC_RX_TRACE_ORIGINAL_CB.load(Ordering::Acquire);
+    if !original.is_null() {
+        let original: unsafe extern "C" fn(
+            *mut core::ffi::c_void,
+            esp8266_wifi_sys::wifi_promiscuous_pkt_type_t,
+        ) = unsafe { core::mem::transmute(original) };
+        unsafe {
+            original(buffer, packet_type);
+        }
+    }
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_rx_trace))]
+#[no_mangle]
+unsafe extern "C" fn __wrap_esp_wifi_set_promiscuous_rx_cb(
+    cb: esp8266_wifi_sys::wifi_promiscuous_cb_t,
+) -> esp8266_wifi_sys::esp_err_t {
+    SC_RX_TRACE_SET_CALLS.fetch_add(1, Ordering::AcqRel);
+    SC_RX_TRACE_LAST_SET_CB.store(cb.map_or(0, |f| f as usize as u32), Ordering::Release);
+
+    let traced_cb: esp8266_wifi_sys::wifi_promiscuous_cb_t = match cb {
+        Some(callback) => {
+            SC_RX_TRACE_ORIGINAL_CB.store(callback as *mut (), Ordering::Release);
+            Some(sc_rx_trace_cb)
+        }
+        None => {
+            SC_RX_TRACE_ORIGINAL_CB.store(core::ptr::null_mut(), Ordering::Release);
+            None
+        }
+    };
+
+    let ret = unsafe { __real_esp_wifi_set_promiscuous_rx_cb(traced_cb) };
+    SC_RX_TRACE_LAST_SET_RET.store(ret as u32, Ordering::Release);
+    ret
+}
+
+#[cfg(all(feature = "wifi-smartconfig", esp8266_hal_smartconfig_wifi_trace))]
+#[no_mangle]
+unsafe extern "C" fn __wrap_esp_wifi_set_promiscuous(en: bool) -> esp8266_wifi_sys::esp_err_t {
+    SC_WIFI_TRACE_PROMISC_CALLS.fetch_add(1, Ordering::AcqRel);
+    SC_WIFI_TRACE_LAST_PROMISC_ENABLE.store(en as u32, Ordering::Release);
+    let ret = unsafe { __real_esp_wifi_set_promiscuous(en) };
+    SC_WIFI_TRACE_LAST_PROMISC_RET.store(ret as u32, Ordering::Release);
+    ret
+}
 
 #[cfg(feature = "wifi-debug-trace")]
 macro_rules! rx_debug {
@@ -858,6 +1177,7 @@ impl<
             crate::wifi::WifiMode::Sta | crate::wifi::WifiMode::ApSta
         );
         let sta_start_seq = CORE_STA_START_SEQ.load(Ordering::Acquire);
+        self.apply_station_power_save_for_mode()?;
         self.register_event_handler()?;
         crate::wifi::event::disable_sdk_sta_auto_connect();
 
@@ -880,12 +1200,6 @@ impl<
                 }
                 self.spin_once();
             }
-        }
-
-        if let Err(error) = self.apply_station_power_save_for_mode() {
-            let _ = self.controller_mut()?.stop().map_err(map_wifi_driver_error);
-            self.unregister_event_handler();
-            return Err(error);
         }
 
         Ok(())
@@ -1418,11 +1732,16 @@ impl<
         .map_err(|_| DriverError::BackendRejected)?;
         PROMISCUOUS_FILTER_BITS.store(0, Ordering::Release);
 
+        crate::wifi::compat::port::set_wdev_tick_poll_enabled(true);
+        for _ in 0..4 {
+            self.spin_once();
+        }
         if let Err(error) = crate::wifi::EspError::check(unsafe {
             esp8266_wifi_sys::esp_wifi_set_promiscuous(true)
         })
         .map_err(|_| DriverError::BackendRejected)
         {
+            crate::wifi::compat::port::set_wdev_tick_poll_enabled(false);
             PROMISCUOUS_FILTER_BITS.store(0, Ordering::Release);
             return Err(error);
         }
@@ -1444,6 +1763,7 @@ impl<
         .map_err(|_| DriverError::BackendRejected)
         {
             let _ = unsafe { esp8266_wifi_sys::esp_wifi_set_promiscuous(false) };
+            crate::wifi::compat::port::set_wdev_tick_poll_enabled(false);
             PROMISCUOUS_FILTER_BITS.store(0, Ordering::Release);
             return Err(error);
         }
@@ -1477,6 +1797,7 @@ impl<
             esp8266_wifi_sys::esp_wifi_set_promiscuous(false)
         })
         .map_err(|_| DriverError::BackendRejected);
+        crate::wifi::compat::port::set_wdev_tick_poll_enabled(false);
 
         clear_result.and(disable_result)
     }
@@ -1646,6 +1967,10 @@ impl<
     #[cfg(feature = "wifi-smartconfig")]
     fn start_smartconfig(&mut self, config: &SmartConfigStartConfig) -> Result<(), DriverError> {
         self.register_smartconfig_event_handler()?;
+        if unsafe { crate::wifi::compat::timer::start_ets_timer_task() } != 1 {
+            self.unregister_smartconfig_event_handler();
+            return Err(DriverError::OutOfMemory);
+        }
         let mut key = [0_i8; 17];
         if let Some(value) = config.esp_touch_v2_key_value() {
             for (dst, src) in key[..16].iter_mut().zip(value) {
@@ -1662,8 +1987,14 @@ impl<
             },
         };
 
-        crate::wifi::EspError::check(unsafe { esp8266_wifi_sys::esp_smartconfig_start(&raw) })
-            .map_err(|_| DriverError::BackendRejected)
+        crate::wifi::compat::port::set_wdev_tick_poll_enabled(true);
+        if crate::wifi::EspError::check(unsafe { esp8266_wifi_sys::esp_smartconfig_start(&raw) })
+            .is_err()
+        {
+            crate::wifi::compat::port::set_wdev_tick_poll_enabled(false);
+            return Err(DriverError::BackendRejected);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "wifi-smartconfig")]
@@ -1671,6 +2002,7 @@ impl<
         let stop_result =
             crate::wifi::EspError::check(unsafe { esp8266_wifi_sys::esp_smartconfig_stop() })
                 .map_err(|_| DriverError::BackendRejected);
+        crate::wifi::compat::port::set_wdev_tick_poll_enabled(false);
         self.unregister_smartconfig_event_handler();
         stop_result
     }
@@ -1867,6 +2199,17 @@ unsafe extern "C" fn smartconfig_event_trampoline<
     event_id: i32,
     event_data: *mut core::ffi::c_void,
 ) {
+    let raw_event_id = event_id as u32;
+    #[cfg(esp8266_hal_smartconfig_event_trace)]
+    {
+        SC_EVENT_TRACE_CALLS.fetch_add(1, Ordering::AcqRel);
+        SC_EVENT_TRACE_LAST_ID.store(raw_event_id, Ordering::Release);
+        SC_EVENT_TRACE_LAST_DATA.store(event_data as u32, Ordering::Release);
+        if raw_event_id == esp8266_wifi_sys::SC_EVENT_GOT_SSID_PSWD {
+            SC_EVENT_TRACE_GOT_CALLS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
     let resources = unsafe {
         super::target_callback::active_resources::<
             EVENTS,
@@ -1880,11 +2223,13 @@ unsafe extern "C" fn smartconfig_event_trampoline<
         >()
     };
     if resources.is_null() {
+        #[cfg(esp8266_hal_smartconfig_event_trace)]
+        SC_EVENT_TRACE_NULL_RESOURCES.fetch_add(1, Ordering::AcqRel);
         return;
     }
     let resources = unsafe { &*resources };
 
-    let event = match event_id as u32 {
+    let event = match raw_event_id {
         esp8266_wifi_sys::SC_EVENT_SCAN_DONE => Some(WifiEvent::SmartConfigScanDone),
         esp8266_wifi_sys::SC_EVENT_FOUND_CHANNEL => Some(WifiEvent::SmartConfigFoundChannel),
         esp8266_wifi_sys::SC_EVENT_SEND_ACK_DONE => Some(WifiEvent::SmartConfigSendAckDone),
@@ -1923,7 +2268,21 @@ unsafe extern "C" fn smartconfig_event_trampoline<
     };
 
     if let Some(event) = event {
+        #[cfg(esp8266_hal_smartconfig_event_trace)]
+        {
+            SC_EVENT_TRACE_PUBLISHED.fetch_add(1, Ordering::AcqRel);
+            if raw_event_id == esp8266_wifi_sys::SC_EVENT_GOT_SSID_PSWD {
+                SC_EVENT_TRACE_GOT_ACCEPTED.fetch_add(1, Ordering::AcqRel);
+            }
+        }
         let _ = resources.publish_event(event);
+    } else {
+        #[cfg(esp8266_hal_smartconfig_event_trace)]
+        {
+            if raw_event_id == esp8266_wifi_sys::SC_EVENT_GOT_SSID_PSWD {
+                SC_EVENT_TRACE_GOT_REJECTED.fetch_add(1, Ordering::AcqRel);
+            }
+        }
     }
 }
 
@@ -2058,7 +2417,10 @@ unsafe extern "C" fn promiscuous_callback<
     }
 
     let packet = unsafe { &*(buffer as *const esp8266_wifi_sys::wifi_promiscuous_pkt_t) };
-    let payload_len = if packet.rx_ctrl.sig_mode() != 0 {
+    let packet_type = map_promiscuous_packet_type(packet_type);
+    let payload_len = if packet_type == PromiscuousPacketType::Control {
+        0
+    } else if packet.rx_ctrl.sig_mode() != 0 {
         packet.rx_ctrl.ht_length() as usize
     } else {
         packet.rx_ctrl.legacy_length() as usize
@@ -2070,7 +2432,6 @@ unsafe extern "C" fn promiscuous_callback<
     } else {
         unsafe { core::slice::from_raw_parts(packet.payload.as_ptr(), payload_len) }
     };
-    let packet_type = map_promiscuous_packet_type(packet_type);
     let active_filter = PromiscuousFilter::from_bits_truncate(
         PROMISCUOUS_FILTER_BITS.load(Ordering::Acquire) as u8,
     );

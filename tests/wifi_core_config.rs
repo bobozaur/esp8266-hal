@@ -1,7 +1,8 @@
 use esp8266_hal::wifi_core::{
     AccessPointConfig, ApClientLimit, BeaconInterval, Channel, ClientConfig, ConfigError,
     Credential, EnterpriseIdentity, EnterprisePassword, EnterpriseUsername, InitConfig, Passphrase,
-    SmartConfigTimeout, Ssid, StationPowerSave, Wpa2EnterpriseCredentials, WpsPin,
+    SmartConfigTimeout, Ssid, StationPowerSave, Wpa2EnterpriseClientCertificate,
+    Wpa2EnterpriseCredentials, WpsConfig, WpsFactoryInfo, WpsMode, WpsPin,
 };
 
 #[test]
@@ -62,6 +63,41 @@ fn enterprise_credentials_validate_documented_identity_limits() {
 }
 
 #[test]
+fn enterprise_credentials_validate_username_and_password_limits() {
+    assert_eq!(
+        EnterpriseUsername::new(""),
+        Err(ConfigError::EnterpriseUsernameEmpty)
+    );
+    assert_eq!(
+        EnterpriseUsername::from_bytes(&[b'u'; EnterpriseUsername::MAX_LEN + 1]),
+        Err(ConfigError::EnterpriseUsernameTooLong)
+    );
+    assert_eq!(
+        EnterpriseUsername::from_bytes(&[b'u'; EnterpriseUsername::MAX_LEN])
+            .unwrap()
+            .as_bytes()
+            .len(),
+        EnterpriseUsername::MAX_LEN
+    );
+
+    assert_eq!(
+        EnterprisePassword::new(""),
+        Err(ConfigError::EnterprisePasswordEmpty)
+    );
+    assert_eq!(
+        EnterprisePassword::from_bytes(&[b'p'; EnterprisePassword::MAX_LEN + 1]),
+        Err(ConfigError::EnterprisePasswordTooLong)
+    );
+    assert_eq!(
+        EnterprisePassword::from_bytes(&[b'p'; EnterprisePassword::MAX_LEN])
+            .unwrap()
+            .as_bytes()
+            .len(),
+        EnterprisePassword::MAX_LEN
+    );
+}
+
+#[test]
 fn enterprise_credentials_preserve_username_password_and_defaults() {
     let credentials = Wpa2EnterpriseCredentials::new(
         EnterpriseIdentity::new("anonymous").unwrap(),
@@ -84,6 +120,25 @@ fn enterprise_credentials_preserve_username_password_and_defaults() {
         Credential::Wpa2Enterprise(credentials)
             if credentials.username().as_bytes() == b"esp8266-user"
     ));
+}
+
+#[test]
+fn enterprise_credentials_preserve_optional_certificate_material() {
+    let certificate = Wpa2EnterpriseClientCertificate::new(b"client-cert", b"client-key")
+        .with_private_key_password(b"key-pass");
+    let credentials = Wpa2EnterpriseCredentials::new(
+        EnterpriseIdentity::new("anonymous").unwrap(),
+        EnterpriseUsername::new("esp8266-user").unwrap(),
+        EnterprisePassword::new("esp8266-password").unwrap(),
+    )
+    .with_ca_cert(b"ca-cert")
+    .with_client_certificate(certificate);
+
+    assert_eq!(credentials.ca_cert(), Some(&b"ca-cert"[..]));
+    let stored = credentials.client_certificate().unwrap();
+    assert_eq!(stored.client_cert(), b"client-cert");
+    assert_eq!(stored.private_key(), b"client-key");
+    assert_eq!(stored.private_key_password(), Some(&b"key-pass"[..]));
 }
 
 #[test]
@@ -184,6 +239,30 @@ fn wps_pin_requires_exactly_eight_ascii_digits_with_valid_checksum() {
         WpsPin::try_from("12345670").unwrap().as_bytes(),
         b"12345670"
     );
+}
+
+#[test]
+fn wps_config_preserves_pin_target_ssid_and_truncates_factory_info() {
+    let pin = WpsPin::try_from("12345670").unwrap();
+    let target = Ssid::try_from("esp8266-hal-wps").unwrap();
+    let factory = WpsFactoryInfo::empty()
+        .manufacturer(&[b'm'; 65])
+        .model_number(&[b'n'; 33])
+        .model_name(&[b'o'; 33])
+        .device_name(&[b'd'; 33]);
+
+    let config = WpsConfig::pbc()
+        .with_fixed_pin(pin)
+        .with_target_ssid(target.clone())
+        .with_factory_info(factory);
+
+    assert_eq!(config.mode(), WpsMode::Pin);
+    assert_eq!(config.pin_override(), Some(pin));
+    assert_eq!(config.target_ssid().unwrap().as_bytes(), target.as_bytes());
+    assert_eq!(config.factory_info().manufacturer_bytes().len(), 64);
+    assert_eq!(config.factory_info().model_number_bytes().len(), 32);
+    assert_eq!(config.factory_info().model_name_bytes().len(), 32);
+    assert_eq!(config.factory_info().device_name_bytes().len(), 32);
 }
 
 #[test]

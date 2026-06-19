@@ -106,16 +106,22 @@ pub fn enable(
 
     EspError::check(unsafe { sys::esp_wifi_set_promiscuous_filter(&raw_filter) })?;
     EspError::check(unsafe { sys::esp_wifi_set_promiscuous_rx_cb(Some(promisc_trampoline)) })?;
-    EspError::check(unsafe { sys::esp_wifi_set_promiscuous(true) })?;
+    super::compat::port::set_wdev_tick_poll_enabled(true);
+    if let Err(error) = EspError::check(unsafe { sys::esp_wifi_set_promiscuous(true) }) {
+        super::compat::port::set_wdev_tick_poll_enabled(false);
+        return Err(error.into());
+    }
 
     Ok(())
 }
 
 /// Disable promiscuous mode.
 pub fn disable() -> Result<(), WifiError> {
-    EspError::check(unsafe { sys::esp_wifi_set_promiscuous(false) })?;
+    let result =
+        EspError::check(unsafe { sys::esp_wifi_set_promiscuous(false) }).map_err(WifiError::from);
+    super::compat::port::set_wdev_tick_poll_enabled(false);
     PROMISC_HANDLER.store(core::ptr::null_mut(), Ordering::Release);
-    Ok(())
+    result
 }
 
 /// Set the control-frame subtype filter.
@@ -149,15 +155,18 @@ unsafe extern "C" fn promisc_trampoline(
 
     let pkt = unsafe { &*(buf as *const sys::wifi_promiscuous_pkt_t) };
 
+    let packet_type = PacketType::from_raw(pkt_type);
     let info = RxPacketInfo {
         rssi: pkt.rx_ctrl.rssi(),
         channel: pkt.rx_ctrl.channel(),
-        packet_type: PacketType::from_raw(pkt_type),
+        packet_type,
     };
 
     // Determine payload length from the rx_ctrl metadata.
     // For 11n (sig_mode != 0): use HT length, otherwise: use legacy length.
-    let payload_len = if pkt.rx_ctrl.sig_mode() != 0 {
+    let payload_len = if packet_type == PacketType::Control {
+        0
+    } else if pkt.rx_ctrl.sig_mode() != 0 {
         pkt.rx_ctrl.ht_length() as usize
     } else {
         pkt.rx_ctrl.legacy_length() as usize
@@ -166,9 +175,11 @@ unsafe extern "C" fn promisc_trampoline(
     // Limit to a sane maximum to avoid reading garbage.
     let payload_len = payload_len.min(2500);
 
-    if payload_len > 0 {
+    let payload = if payload_len == 0 {
+        &[]
+    } else {
         let payload_ptr = pkt.payload.as_ptr();
-        let payload = unsafe { core::slice::from_raw_parts(payload_ptr, payload_len) };
-        handler(info, payload);
-    }
+        unsafe { core::slice::from_raw_parts(payload_ptr, payload_len) }
+    };
+    handler(info, payload);
 }

@@ -108,6 +108,7 @@ static bool s_wps_ap_pin_mode;
 static unsigned char s_wps_ap_pin[9];
 static const char *s_last_smartconfig_step = "none";
 static int s_last_smartconfig_errno;
+static int s_last_smartconfig_reason;
 
 static void write_line(const char *prefix, const char *fmt, ...) {
     char line[RESPONSE_BUFFER_SIZE];
@@ -759,7 +760,7 @@ static esp_err_t set_softap_mac_for_ssid(const char *ssid) {
     return esp_wifi_set_mac(WIFI_IF_AP, mac);
 }
 
-static esp_err_t start_softap(const char *ssid, const char *pass, uint8_t channel) {
+static esp_err_t start_softap(const char *ssid, const char *pass, uint8_t channel, bool hidden) {
     if (ssid == NULL || ssid[0] == '\0' || channel == 0 || channel > 14) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -788,6 +789,7 @@ static esp_err_t start_softap(const char *ssid, const char *pass, uint8_t channe
     config.ap.channel = channel;
     config.ap.max_connection = 4;
     config.ap.beacon_interval = 100;
+    config.ap.ssid_hidden = hidden ? 1 : 0;
 
     bool open = pass == NULL || strcmp(pass, "open") == 0 || pass[0] == '\0';
     if (open) {
@@ -817,7 +819,7 @@ static esp_err_t start_softap(const char *ssid, const char *pass, uint8_t channe
     return ESP_OK;
 }
 
-static bool softap_matches(const char *ssid, const char *pass, uint8_t channel) {
+static bool softap_matches(const char *ssid, const char *pass, uint8_t channel, bool hidden) {
     if (!s_wifi_started || ssid == NULL) {
         return false;
     }
@@ -829,6 +831,9 @@ static bool softap_matches(const char *ssid, const char *pass, uint8_t channel) 
 
     wifi_config_t config = {0};
     if (esp_wifi_get_config(WIFI_IF_AP, &config) != ESP_OK || config.ap.channel != channel) {
+        return false;
+    }
+    if ((config.ap.ssid_hidden != 0) != hidden) {
         return false;
     }
 
@@ -846,7 +851,9 @@ static bool softap_matches(const char *ssid, const char *pass, uint8_t channel) 
 }
 
 static esp_err_t ensure_softap(const char *ssid, const char *pass, uint8_t channel) {
-    return softap_matches(ssid, pass, channel) ? ESP_OK : start_softap(ssid, pass, channel);
+    return softap_matches(ssid, pass, channel, false)
+               ? ESP_OK
+               : start_softap(ssid, pass, channel, false);
 }
 
 static esp_err_t wait_for_sta_ip(uint32_t timeout_ms) {
@@ -1126,7 +1133,7 @@ static bool esptouch_build_lengths(
 
     size_t bssid_insert_index = ESPTOUCH_EXTRA_HEAD_LEN;
     for (size_t index = 0; index < 6; index++) {
-        size_t position = bssid_insert_index + 1;
+        size_t position = bssid_insert_index;
         if (position > code_count) {
             position = code_count;
         }
@@ -1190,30 +1197,14 @@ static esp_err_t smartconfig_fail(const char *step, esp_err_t err) {
     return err;
 }
 
-static esp_err_t smartconfig_ap_provision(
+static esp_err_t smartconfig_send_esptouch(
     const char *ssid,
     const char *pass,
-    uint8_t channel,
+    const uint8_t bssid[6],
+    esp_ip4_addr_t phone_ip,
+    esp_netif_t *netif,
     uint32_t timeout_ms
 ) {
-    s_last_smartconfig_step = "start";
-    s_last_smartconfig_errno = 0;
-    esp_err_t err = start_softap(ssid, pass, channel);
-    if (err != ESP_OK) {
-        return smartconfig_fail("start-softap", err);
-    }
-
-    uint8_t bssid[6];
-    err = esp_wifi_get_mac(WIFI_IF_AP, bssid);
-    if (err != ESP_OK) {
-        return smartconfig_fail("ap-mac", err);
-    }
-
-    esp_ip4_addr_t phone_ip;
-    if (!parse_ipv4("192.168.4.1", &phone_ip)) {
-        return smartconfig_fail("phone-ip", ESP_ERR_INVALID_ARG);
-    }
-
     uint16_t data_lengths[ESPTOUCH_MAX_LENGTH_CODES];
     size_t data_length_count = 0;
     if (!esptouch_build_lengths(
@@ -1243,11 +1234,17 @@ static esp_err_t smartconfig_ap_provision(
     int enabled = 1;
     (void)setsockopt(tx_fd, SOL_SOCKET, SO_BROADCAST, &enabled, sizeof(enabled));
     (void)setsockopt(rx_fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
-    err = bind_socket_to_netif(tx_fd, s_ap_netif);
+    esp_err_t err = bind_socket_to_netif(tx_fd, netif);
     if (err != ESP_OK) {
         close(rx_fd);
         close(tx_fd);
         return smartconfig_fail("bind-tx-netif", err);
+    }
+    err = bind_socket_to_netif(rx_fd, netif);
+    if (err != ESP_OK) {
+        close(rx_fd);
+        close(tx_fd);
+        return smartconfig_fail("bind-rx-netif", err);
     }
 
     struct timeval rx_timeout = {
@@ -1285,10 +1282,8 @@ static esp_err_t smartconfig_ap_provision(
             for (size_t index = 0; index < sizeof(guide_lengths) / sizeof(guide_lengths[0]); index++) {
                 err = send_udp_payload_len(tx_fd, &remote, guide_lengths[index]);
                 if (err != ESP_OK) {
-                    close(rx_fd);
-                    close(tx_fd);
-                    smartconfig_fail("send-guide", err);
-                    return err;
+                    vTaskDelay(pdMS_TO_TICKS(ESPTOUCH_INTERVAL_MS));
+                    continue;
                 }
                 vTaskDelay(pdMS_TO_TICKS(ESPTOUCH_INTERVAL_MS));
             }
@@ -1296,10 +1291,8 @@ static esp_err_t smartconfig_ap_provision(
             for (size_t sent = 0; sent < 3; sent++) {
                 err = send_udp_payload_len(tx_fd, &remote, data_lengths[data_index]);
                 if (err != ESP_OK) {
-                    close(rx_fd);
-                    close(tx_fd);
-                    smartconfig_fail("send-data", err);
-                    return err;
+                    vTaskDelay(pdMS_TO_TICKS(ESPTOUCH_INTERVAL_MS));
+                    continue;
                 }
                 data_index = (data_index + 1) % data_length_count;
                 vTaskDelay(pdMS_TO_TICKS(ESPTOUCH_INTERVAL_MS));
@@ -1319,6 +1312,76 @@ static esp_err_t smartconfig_ap_provision(
     close(rx_fd);
     close(tx_fd);
     return smartconfig_fail("ack-timeout", ESP_ERR_TIMEOUT);
+}
+
+static esp_err_t smartconfig_ap_provision(
+    const char *ssid,
+    const char *pass,
+    uint8_t channel,
+    uint32_t timeout_ms
+) {
+    s_last_smartconfig_step = "start";
+    s_last_smartconfig_errno = 0;
+    s_last_smartconfig_reason = 0;
+    esp_err_t err = ensure_softap(ssid, pass, channel);
+    if (err != ESP_OK) {
+        return smartconfig_fail("start-softap", err);
+    }
+
+    uint8_t bssid[6];
+    err = esp_wifi_get_mac(WIFI_IF_AP, bssid);
+    if (err != ESP_OK) {
+        return smartconfig_fail("ap-mac", err);
+    }
+
+    esp_ip4_addr_t phone_ip;
+    if (!parse_ipv4("192.168.4.1", &phone_ip)) {
+        return smartconfig_fail("phone-ip", ESP_ERR_INVALID_ARG);
+    }
+
+    return smartconfig_send_esptouch(ssid, pass, bssid, phone_ip, s_ap_netif, timeout_ms);
+}
+
+static esp_err_t smartconfig_sta_provision(
+    const char *ssid,
+    const char *pass,
+    const uint8_t bssid[6],
+    const char *sender_ssid,
+    const char *sender_pass,
+    uint8_t channel,
+    uint32_t timeout_ms
+) {
+    s_last_smartconfig_step = "start";
+    s_last_smartconfig_errno = 0;
+    s_last_smartconfig_reason = 0;
+    uint32_t join_timeout_ms = timeout_ms < 45000 ? timeout_ms : 45000;
+
+    esp_err_t err = join_station_with_mode(
+        sender_ssid,
+        sender_pass,
+        join_timeout_ms,
+        channel,
+        true,
+        false
+    );
+    if (err != ESP_OK) {
+        wifi_event_sta_disconnected_t disconnect;
+        portENTER_CRITICAL(&s_state_lock);
+        disconnect = s_last_disconnect;
+        portEXIT_CRITICAL(&s_state_lock);
+        s_last_smartconfig_reason = disconnect.reason;
+        return smartconfig_fail("join-sender-ap", err);
+    }
+
+    esp_ip4_addr_t phone_ip;
+    portENTER_CRITICAL(&s_state_lock);
+    phone_ip = s_last_ipv4;
+    portEXIT_CRITICAL(&s_state_lock);
+    if (phone_ip.addr == 0) {
+        return smartconfig_fail("sender-ip", ESP_FAIL);
+    }
+
+    return smartconfig_send_esptouch(ssid, pass, bssid, phone_ip, s_sta_netif, timeout_ms);
 }
 
 static size_t build_raw80211_beacon(uint8_t *frame, size_t capacity, const uint8_t mac[6], uint8_t channel) {
@@ -2316,7 +2379,9 @@ static void handle_ap_start(const arg_pair_t *args, size_t arg_count) {
     const char *ssid = find_arg(args, arg_count, "ssid");
     const char *pass = find_arg(args, arg_count, "pass");
     const char *channel_text = find_arg(args, arg_count, "channel");
+    const char *hidden_text = find_arg(args, arg_count, "hidden");
     uint32_t channel = 6;
+    uint32_t hidden = 0;
     if (channel_text != NULL && !parse_u32(channel_text, &channel)) {
         reply_err("invalid-channel", "%s", channel_text);
         return;
@@ -2325,10 +2390,14 @@ static void handle_ap_start(const arg_pair_t *args, size_t arg_count) {
         reply_err("invalid-channel", "%" PRIu32, channel);
         return;
     }
+    if (hidden_text != NULL && (!parse_u32(hidden_text, &hidden) || hidden > 1)) {
+        reply_err("invalid-hidden", "%s", hidden_text);
+        return;
+    }
 
-    esp_err_t err = start_softap(ssid, pass, (uint8_t)channel);
+    esp_err_t err = start_softap(ssid, pass, (uint8_t)channel, hidden != 0);
     if (err == ESP_OK) {
-        reply_ok("AP_START ssid=%s ch=%" PRIu32, ssid, channel);
+        reply_ok("AP_START ssid=%s ch=%" PRIu32 " hidden=%" PRIu32, ssid, channel, hidden);
     } else {
         reply_err("ap-start", "%s", esp_err_to_name(err));
     }
@@ -2441,9 +2510,12 @@ static void handle_scan_find(const arg_pair_t *args, size_t arg_count) {
         return;
     }
 
+    char bssid_text[18];
+    format_mac(best.bssid, bssid_text, sizeof(bssid_text));
     reply_ok(
-        "SCAN_FIND found=1 ssid=%s ch=%u rssi=%d auth=%s total=%u",
+        "SCAN_FIND found=1 ssid=%s bssid=%s ch=%u rssi=%d auth=%s total=%u",
         ssid,
+        bssid_text,
         (unsigned)best.primary,
         best.rssi,
         auth_mode_name(best.authmode),
@@ -2661,7 +2733,7 @@ static void handle_wps_ap_start(const arg_pair_t *args, size_t arg_count) {
     bool reuse_ap = reuse_ap_text != NULL && strcmp(reuse_ap_text, "1") == 0;
     esp_err_t err = ESP_OK;
     if (!reuse_ap) {
-        err = start_softap(ssid, pass, (uint8_t)channel);
+        err = start_softap(ssid, pass, (uint8_t)channel, false);
         if (err != ESP_OK) {
             reply_err("wps-ap-start", "%s", esp_err_to_name(err));
             return;
@@ -2835,6 +2907,51 @@ static void handle_smartconfig_ap_provision(const arg_pair_t *args, size_t arg_c
             "%s step=%s errno=%d",
             esp_err_to_name(err),
             s_last_smartconfig_step,
+            s_last_smartconfig_errno
+        );
+    }
+}
+
+static void handle_smartconfig_sta_provision(const arg_pair_t *args, size_t arg_count) {
+    const char *ssid = find_arg(args, arg_count, "ssid");
+    const char *pass = find_arg(args, arg_count, "pass");
+    const char *bssid_text = find_arg(args, arg_count, "bssid");
+    const char *sender_ssid = find_arg(args, arg_count, "sender_ssid");
+    const char *sender_pass = find_arg(args, arg_count, "sender_pass");
+    const char *channel_text = find_arg(args, arg_count, "channel");
+    const char *timeout_text = find_arg(args, arg_count, "timeout_ms");
+    uint8_t bssid[6];
+    uint32_t channel = 0;
+    uint32_t timeout_ms = DEFAULT_SMARTCONFIG_SEND_TIMEOUT_MS;
+    if (ssid == NULL || pass == NULL || bssid_text == NULL || sender_ssid == NULL ||
+        sender_pass == NULL || !parse_mac(bssid_text, bssid) ||
+        (channel_text != NULL && (!parse_u32(channel_text, &channel) || channel > 14)) ||
+        (timeout_text != NULL && !parse_u32(timeout_text, &timeout_ms))) {
+        reply_err(
+            "invalid-smartconfig-sta-provision",
+            "expected ssid/pass/bssid/sender_ssid/sender_pass"
+        );
+        return;
+    }
+
+    esp_err_t err = smartconfig_sta_provision(
+        ssid,
+        pass,
+        bssid,
+        sender_ssid,
+        sender_pass,
+        (uint8_t)channel,
+        timeout_ms
+    );
+    if (err == ESP_OK) {
+        reply_ok("SMARTCONFIG_STA_PROVISION ssid=%s channel=%" PRIu32, ssid, channel);
+    } else {
+        reply_err(
+            "smartconfig-sta-provision",
+            "%s step=%s reason=%d errno=%d",
+            esp_err_to_name(err),
+            s_last_smartconfig_step,
+            s_last_smartconfig_reason,
             s_last_smartconfig_errno
         );
     }
@@ -3073,6 +3190,8 @@ static void dispatch_command(char *line) {
         handle_wps_ap_wait(args, arg_count);
     } else if (strcmp(command, "SMARTCONFIG_AP_PROVISION") == 0) {
         handle_smartconfig_ap_provision(args, arg_count);
+    } else if (strcmp(command, "SMARTCONFIG_STA_PROVISION") == 0) {
+        handle_smartconfig_sta_provision(args, arg_count);
     } else if (strcmp(command, "ESPNOW_TX") == 0) {
         handle_espnow_tx(args, arg_count);
     } else if (strcmp(command, "ESPNOW_RX") == 0) {

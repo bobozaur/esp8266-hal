@@ -14,7 +14,7 @@ use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
 type WpsResources = WifiResources<8, 4, 2, 0, 0, 0>;
-const MAX_WPS_ATTEMPTS: u8 = 5;
+const DEFAULT_MAX_WPS_ATTEMPTS: u8 = 8;
 
 static WIFI_RESOURCES: StaticCell<WpsResources> = StaticCell::new();
 
@@ -35,7 +35,21 @@ fn log_runtime_headroom() {
 }
 
 const fn should_retry_wps_disconnect(reason: Option<u8>) -> bool {
-    matches!(reason, Some(2 | 4) | None)
+    matches!(reason, Some(2 | 4 | 8 | 23 | 201) | None)
+}
+
+fn selected_max_wps_attempts() -> u8 {
+    match option_env!("ESP8266_HAL_WPS_MAX_ATTEMPTS") {
+        Some("1") => 1,
+        Some("2") => 2,
+        Some("3") => 3,
+        Some("4") => 4,
+        Some("5") => 5,
+        Some("6") => 6,
+        Some("7") => 7,
+        Some("8") => 8,
+        _ => DEFAULT_MAX_WPS_ATTEMPTS,
+    }
 }
 
 #[esp8266_hal::main]
@@ -78,6 +92,10 @@ async fn main(_spawner: Spawner) {
         None => WpsConfig::pbc().with_target_ssid(target_ssid),
     };
     let mut wps_attempt = 1_u8;
+    let max_wps_attempts = selected_max_wps_attempts();
+    esp8266_hal::logger::write_bytes(b"wps max-attempts=");
+    esp8266_hal::logger::write_dec_u32(max_wps_attempts as u32);
+    esp8266_hal::logger::write_newline();
     if let Err(error) = session.start(&config, 0) {
         esp8266_hal::logger::write_bytes(b"wps start detail");
         match error {
@@ -117,8 +135,22 @@ async fn main(_spawner: Spawner) {
                 esp8266_hal::logger::write_bytes(b"wps-ok");
                 log_runtime_headroom();
                 esp8266_hal::logger::write_newline();
+                loop {
+                    Timer::after(Duration::from_secs(60)).await;
+                }
             }
             Some(WifiEvent::WpsFailed { reason }) => {
+                if wps_attempt < max_wps_attempts {
+                    let _ = session.stop();
+                    Timer::after(Duration::from_millis(1000)).await;
+                    wps_attempt += 1;
+                    esp8266_hal::logger::write_bytes(b"wps-fail-retry attempt=");
+                    esp8266_hal::logger::write_dec_u32(wps_attempt as u32);
+                    esp8266_hal::logger::write_newline();
+                    if session.start(&config, 0).is_ok() {
+                        continue;
+                    }
+                }
                 esp8266_hal::logger::write_bytes(b"wps-fail-detail");
                 if let Some(reason) = reason {
                     esp8266_hal::logger::write_bytes(b" reason=");
@@ -130,7 +162,7 @@ async fn main(_spawner: Spawner) {
                 esp8266_hal::logger::write_newline();
             }
             Some(WifiEvent::WpsTimedOut) => {
-                if wps_attempt < MAX_WPS_ATTEMPTS {
+                if wps_attempt < max_wps_attempts {
                     let _ = session.stop();
                     Timer::after(Duration::from_millis(750)).await;
                     wps_attempt += 1;
@@ -159,7 +191,7 @@ async fn main(_spawner: Spawner) {
                     esp8266_hal::logger::write_dec_u32(reason as u32);
                 }
                 esp8266_hal::logger::write_newline();
-                if should_retry_wps_disconnect(reason) && wps_attempt < MAX_WPS_ATTEMPTS {
+                if should_retry_wps_disconnect(reason) && wps_attempt < max_wps_attempts {
                     let _ = session.stop();
                     Timer::after(Duration::from_millis(750)).await;
                     wps_attempt += 1;

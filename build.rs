@@ -4,10 +4,22 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const IROM_FLASH_OFFSET_ENV: &str = "ESP8266_HAL_IROM_FLASH_OFFSET";
+const SMARTCONFIG_EVENT_TRACE_ENV: &str = "ESP8266_HAL_SMARTCONFIG_EVENT_TRACE";
+const SMARTCONFIG_SNIFFER_TRACE_ENV: &str = "ESP8266_HAL_SMARTCONFIG_SNIFFER_TRACE";
+const SMARTCONFIG_WIFI_TRACE_ENV: &str = "ESP8266_HAL_SMARTCONFIG_WIFI_TRACE";
+const SMARTCONFIG_RX_TRACE_ENV: &str = "ESP8266_HAL_SMARTCONFIG_RX_TRACE";
+const SMARTCONFIG_RX_DIAG_ENV: &str = "ESP8266_HAL_SMARTCONFIG_RX_DIAG";
+const WIFI_START_TRACE_ENV: &str = "ESP8266_HAL_WIFI_START_TRACE";
 const DEFAULT_IROM_ORIGIN: u32 = 0x4021_0000;
 const IROM_FLASH_BASE: u32 = 0x4020_0000;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_smartconfig_sniffer_trace)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_smartconfig_event_trace)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_smartconfig_wifi_trace)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_smartconfig_rx_trace)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_wifi_start_trace)");
+
     // Put the linker script somewhere the linker can find it
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let memory_x = memory_x();
@@ -49,6 +61,45 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,--wrap=nvs_open"); // NVS stub (functional)
         println!("cargo:rustc-link-arg=-Wl,--wrap=nvs_get_blob"); // NVS stub (functional)
         println!("cargo:rustc-link-arg=-Wl,--wrap=ieee80211_deliver_data"); // functional STA RX fast-path
+
+        if env::var_os(WIFI_START_TRACE_ENV).is_some() {
+            println!("cargo:rustc-cfg=esp8266_hal_wifi_start_trace");
+        }
+
+        if env::var_os("CARGO_FEATURE_WIFI_SMARTCONFIG").is_some()
+            && env::var_os(SMARTCONFIG_EVENT_TRACE_ENV).is_some()
+        {
+            println!("cargo:rustc-cfg=esp8266_hal_smartconfig_event_trace");
+        }
+
+        if env::var_os("CARGO_FEATURE_WIFI_SMARTCONFIG").is_some()
+            && env::var_os(SMARTCONFIG_SNIFFER_TRACE_ENV).is_some()
+        {
+            println!("cargo:rustc-cfg=esp8266_hal_smartconfig_sniffer_trace");
+            println!("cargo:rustc-link-arg=-Wl,--wrap=sc_sniffer_cb");
+        }
+
+        let smartconfig_enabled = env::var_os("CARGO_FEATURE_WIFI_SMARTCONFIG").is_some();
+        let smartconfig_wifi_trace = env::var_os(SMARTCONFIG_WIFI_TRACE_ENV).is_some();
+        let smartconfig_rx_trace = env::var_os(SMARTCONFIG_RX_TRACE_ENV).is_some();
+
+        if smartconfig_enabled && smartconfig_wifi_trace {
+            println!("cargo:rustc-cfg=esp8266_hal_smartconfig_wifi_trace");
+            println!("cargo:rustc-link-arg=-Wl,--wrap=esp_wifi_set_channel");
+            println!("cargo:rustc-link-arg=-Wl,--wrap=esp_wifi_set_promiscuous_filter");
+            println!("cargo:rustc-link-arg=-Wl,--wrap=esp_wifi_set_promiscuous_rx_cb");
+            println!("cargo:rustc-link-arg=-Wl,--wrap=esp_wifi_set_promiscuous");
+        }
+
+        if smartconfig_enabled && smartconfig_rx_trace {
+            if smartconfig_wifi_trace {
+                panic!(
+                    "{SMARTCONFIG_RX_TRACE_ENV} and {SMARTCONFIG_WIFI_TRACE_ENV} both wrap esp_wifi_set_promiscuous_rx_cb; enable only one"
+                );
+            }
+            println!("cargo:rustc-cfg=esp8266_hal_smartconfig_rx_trace");
+            println!("cargo:rustc-link-arg=-Wl,--wrap=esp_wifi_set_promiscuous_rx_cb");
+        }
 
         if env::var_os("CARGO_FEATURE_WIFI_DEBUG_TRACE").is_some() {
             // Signal-0x05 RX-path stage wrappers. These wrappers only drive
@@ -103,6 +154,12 @@ fn main() {
     println!("cargo:rerun-if-changed=ld/rom.x");
     println!("cargo:rerun-if-changed=ld/ram.x");
     println!("cargo:rerun-if-env-changed={IROM_FLASH_OFFSET_ENV}");
+    println!("cargo:rerun-if-env-changed={SMARTCONFIG_EVENT_TRACE_ENV}");
+    println!("cargo:rerun-if-env-changed={SMARTCONFIG_SNIFFER_TRACE_ENV}");
+    println!("cargo:rerun-if-env-changed={SMARTCONFIG_WIFI_TRACE_ENV}");
+    println!("cargo:rerun-if-env-changed={SMARTCONFIG_RX_TRACE_ENV}");
+    println!("cargo:rerun-if-env-changed={SMARTCONFIG_RX_DIAG_ENV}");
+    println!("cargo:rerun-if-env-changed={WIFI_START_TRACE_ENV}");
 }
 
 fn alias_x() -> &'static str {

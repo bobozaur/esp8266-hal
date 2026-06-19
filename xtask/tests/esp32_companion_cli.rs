@@ -57,14 +57,15 @@ fn stable_companion_scenarios_are_in_the_matrix() {
     ] {
         let scenario = scenario_by_name(name).expect("companion scenario");
         assert_eq!(scenario.state, ScenarioState::Implemented);
-        assert!(matches!(scenario.runtime, RuntimePlan::Pending));
+        assert!(matches!(scenario.runtime, RuntimePlan::CompanionRig));
     }
 }
 
 #[test]
-fn diagnostic_companion_scenarios_are_manual() {
+fn diagnostic_companion_scenarios_are_in_the_matrix() {
     for name in [
         "ap_station_list_companion",
+        "ap_rejoin_companion",
         "ap_attach_companion",
         "ap_net_attach_companion",
         "ap_dhcp_bind_companion",
@@ -72,7 +73,7 @@ fn diagnostic_companion_scenarios_are_manual() {
         "ap_sta_downstream_companion",
     ] {
         let scenario = scenario_by_name(name).expect("companion scenario");
-        assert_eq!(scenario.state, ScenarioState::Manual);
-        assert!(matches!(scenario.runtime, RuntimePlan::Pending));
+        assert_eq!(scenario.state, ScenarioState::Implemented);
+        assert!(matches!(scenario.runtime, RuntimePlan::CompanionRig));
     }
 }

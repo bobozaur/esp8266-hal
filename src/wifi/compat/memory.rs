@@ -306,10 +306,6 @@ pub(crate) unsafe fn monitor_task3_stack(
     }
 }
 
-fn ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> bool {
-    a_start < b_end && b_start < a_end
-}
-
 fn trace_task3_overlap(_start: usize, _size: usize, _frame_tag: u8, _stack_tag: u8) {
     // Removed: trace bytes for task3 stack/frame overlap monitoring.
 }

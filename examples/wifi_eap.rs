@@ -30,6 +30,10 @@ const EAP_CHANNEL: &str = match option_env!("ESP8266_HAL_EAP_CHANNEL") {
     Some(channel) => channel,
     None => "11",
 };
+const EAP_EXPECT_FAILURE: bool = match option_env!("ESP8266_HAL_EAP_EXPECT_FAILURE") {
+    Some(_) => true,
+    None => false,
+};
 
 type EapResources = WifiResources<0, 0, 1>;
 
@@ -106,6 +110,9 @@ fn main() -> ! {
                 driver_error_from_connect(error),
                 resources,
             );
+            if EAP_EXPECT_FAILURE {
+                log_line(b"eap-negative-ok");
+            }
             loop_delay();
         }
 
@@ -132,8 +139,16 @@ fn main() -> ! {
                 esp8266_hal::wifi::DriverError::Timeout,
                 resources,
             );
+            if EAP_EXPECT_FAILURE {
+                log_line(b"eap-negative-ok");
+            }
             loop_delay();
         }
+    }
+
+    if EAP_EXPECT_FAILURE {
+        log_line(b"eap-negative-unexpected-success");
+        loop_delay();
     }
 
     log_line(b"wifi eap associated");

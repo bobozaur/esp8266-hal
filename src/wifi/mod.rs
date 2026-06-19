@@ -53,7 +53,6 @@
 #[allow(clippy::missing_safety_doc, clippy::needless_range_loop)]
 #[doc(hidden)]
 pub mod compat;
-pub(crate) mod phy;
 pub(crate) mod timer_driver;
 
 #[cfg(feature = "wifi-ap")]

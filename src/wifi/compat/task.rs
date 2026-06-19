@@ -279,11 +279,8 @@ pub static mut g_deleted_task_queue_len_dbg: u32 = 0;
 static mut FIRST_DELETE_TRACE_DONE: bool = false;
 static mut FIRST_CLEANUP_TRACE_DONE: bool = false;
 static mut FIRST_UI_TICK_DECISION_TRACE_DONE: bool = false;
-static mut FIRST_ZERO_PC_RESTORE_TRACE_DONE: bool = false;
 static mut FIRST_PENDING_READY_LEN_CLAMP_TRACE_DONE: bool = false;
 static mut FIRST_DELETED_QUEUE_LEN_CLAMP_TRACE_DONE: bool = false;
-static mut FIRST_IDLE_ZERO_A0_SAVE_TRACE_DONE: bool = false;
-static mut FIRST_UI_RESTORE_TRACE_DONE: bool = false;
 
 // ---------------------------------------------------------------------------
 // Stack initialisation
@@ -295,8 +292,6 @@ pub(crate) const XT_STK_PS: usize = 0x04;
 pub(crate) const XT_STK_A0: usize = 0x08;
 pub(crate) const XT_STK_A1: usize = 0x0C;
 pub(crate) const XT_STK_A2: usize = 0x10;
-pub(crate) const XT_STK_A14: usize = 0x40;
-pub(crate) const XT_STK_A15: usize = 0x44;
 pub(crate) const XT_STK_FRMSZ: usize = 0x100;
 /// ESP8266 RTOS SDK call0 interrupt/task frame size from
 /// `freertos/xtensa_context.h` with the ESP8266 config headers.
@@ -777,24 +772,6 @@ pub(crate) unsafe fn save_current_frame(frame: *mut u8) {
     }
 }
 
-/// Copy the selected task's saved frame into the current live interrupt frame
-/// so the outer `xtensa-lx-rt` restore returns into the chosen task.
-#[ram]
-pub(crate) unsafe fn restore_current_frame_into(frame: *mut u8) {
-    unsafe {
-        if frame.is_null() || CURRENT_TASK >= MAX_TASKS {
-            return;
-        }
-
-        let saved_frame = TASKS[CURRENT_TASK].stack_top;
-        if saved_frame.is_null() {
-            return;
-        }
-
-        core::ptr::copy_nonoverlapping(saved_frame, frame, XT_STK_FRMSZ);
-    }
-}
-
 /// Mirror the SDK `_xt_int_enter` contract for ordinary interrupts:
 /// `pxCurrentTCB->stack_top` tracks the live interrupt frame base even when
 /// no compat task switch is requested in that interrupt.
@@ -1011,10 +988,6 @@ unsafe fn retire_current_unowned_task_inner(request_switch: bool) {
             super::port::PendSV(1);
         }
     }
-}
-
-pub(crate) unsafe fn retire_current_unowned_task() {
-    unsafe { retire_current_unowned_task_inner(true) }
 }
 
 pub(crate) unsafe fn retire_current_unowned_task_for_first_switch() {
@@ -1516,11 +1489,11 @@ pub unsafe extern "C" fn vTaskSetThreadLocalStoragePointer(
 #[inline(never)]
 #[no_mangle]
 pub unsafe extern "C" fn xTaskIncrementTick() -> i32 {
-    unsafe { xTaskIncrementTick_impl() }
+    unsafe { x_task_increment_tick_impl() }
 }
 
 #[inline(never)]
-unsafe fn xTaskIncrementTick_impl() -> i32 {
+unsafe fn x_task_increment_tick_impl() -> i32 {
     unsafe {
         g_tick_stage = b'i' as u32;
         if SCHEDULER_SUSPENDED > 0 {
@@ -1822,8 +1795,12 @@ pub(crate) unsafe fn scheduler_is_suspended() -> bool {
     unsafe { SCHEDULER_SUSPENDED > 0 }
 }
 
-pub(crate) unsafe fn debug_scheduler_suspended_count() -> u32 {
+pub unsafe fn debug_scheduler_suspended_count() -> u32 {
     unsafe { SCHEDULER_SUSPENDED }
+}
+
+pub unsafe fn debug_pended_ticks_count() -> u32 {
+    unsafe { PENDED_TICKS }
 }
 
 /// Get the current task index.

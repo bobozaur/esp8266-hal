@@ -356,6 +356,15 @@ impl WifiController {
             return Err(e.into());
         }
 
+        // SmartConfig uses the SDK's ROM ETS timer list for channel-scanning
+        // progress. Start the compat task early for SmartConfig builds only;
+        // normal STA/AP/TCP builds do not need this extra SDK task.
+        #[cfg(feature = "wifi-smartconfig")]
+        if unsafe { super::compat::timer::start_ets_timer_task() } != 1 {
+            INITIALIZED.store(false, Ordering::Release);
+            return Err(WifiError::Internal(EspError(sys::ESP_ERR_NO_MEM)));
+        }
+
         // Switch ets_delay_us from broken CCOUNT-based (init mode) to accurate
         // FRC2-based (runtime mode). This is needed for scan/auth to have proper
         // dwell timing. Must be AFTER esp_wifi_init since register_chipv6_phy
@@ -452,13 +461,28 @@ impl WifiController {
     /// Start the WiFi driver according to the current mode and configuration.
     pub fn start(&mut self) -> Result<(), WifiError> {
         crate::wifi::event::ensure_trampoline_registered()?;
-        EspError::check(unsafe { sys::esp_wifi_start() })?;
+        let ret = unsafe { sys::esp_wifi_start() };
+        #[cfg(esp8266_hal_wifi_start_trace)]
+        {
+            crate::logger::write_bytes(b"wifi start ret ");
+            if ret < 0 {
+                crate::logger::write_byte(b'-');
+                crate::logger::write_dec_u32(ret.unsigned_abs());
+            } else {
+                crate::logger::write_dec_u32(ret as u32);
+            }
+            crate::logger::write_bytes(b" 0x");
+            crate::logger::write_hex_u32(ret as u32);
+            crate::logger::write_newline();
+        }
+        EspError::check(ret)?;
         Ok(())
     }
 
     /// Stop the WiFi driver.
     pub fn stop(&mut self) -> Result<(), WifiError> {
         EspError::check(unsafe { sys::esp_wifi_stop() })?;
+        super::compat::port::set_wdev_tick_poll_enabled(false);
         log::info!("WiFi stopped");
         Ok(())
     }
