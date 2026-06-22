@@ -52,17 +52,54 @@ static mut TASK3_STACK_START: usize = 0;
 static mut TASK3_STACK_END: usize = 0;
 static mut TASK3_FRAME_START: usize = 0;
 static mut TASK3_FRAME_END: usize = 0;
-static mut FIRST_ALLOC_FAIL_KIND: u8 = 0;
-static mut FIRST_ALLOC_FAIL_TASK: u8 = 0;
-static mut FIRST_ALLOC_FAIL_SIZE: usize = 0;
-static mut FIRST_ALLOC_FAIL_FREE: usize = 0;
 static mut ALLOC_FAIL_COUNT: u32 = 0;
 static mut FIRST_EVENT_LOOP_CALLOC_TRACE_DONE: bool = false;
-static mut EAP_RSA_WORKSPACE_ACTIVE: bool = false;
+static mut EAP_RSA_WORKSPACE_ACTIVE_COUNT: u32 = 0;
 static mut EAP_RSA_WORKSPACE_RESERVE_ATTEMPTS: u32 = 0;
 static mut EAP_RSA_WORKSPACE_RESERVED: u32 = 0;
 static mut EAP_RSA_WORKSPACE_USED: u32 = 0;
 static mut EAP_RSA_WORKSPACE_RELEASED: u32 = 0;
+const EAP_RSA_WORKSPACE_SLOTS: usize = 3;
+const EAP_RSA_WORKSPACE_USABLE_BYTES: usize = 1024;
+static mut EAP_RSA_WORKSPACE_PTRS: [*mut c_void; EAP_RSA_WORKSPACE_SLOTS] =
+    [ptr::null_mut(); EAP_RSA_WORKSPACE_SLOTS];
+static mut EAP_RSA_WORKSPACE_USABLE: [usize; EAP_RSA_WORKSPACE_SLOTS] =
+    [0; EAP_RSA_WORKSPACE_SLOTS];
+static mut EAP_RSA_WORKSPACE_IN_USE: [bool; EAP_RSA_WORKSPACE_SLOTS] =
+    [false; EAP_RSA_WORKSPACE_SLOTS];
+static mut FIRST_ALLOC_FAIL: AllocFailureSnapshot = AllocFailureSnapshot::empty();
+static mut LAST_ALLOC_FAIL: AllocFailureSnapshot = AllocFailureSnapshot::empty();
+
+#[derive(Clone, Copy)]
+pub(crate) struct AllocFailureSnapshot {
+    pub kind: u8,
+    pub requested_bytes: usize,
+    pub free_bytes: usize,
+    pub task_marker: u8,
+    pub count: u32,
+    pub eap_active_count: u32,
+    pub eap_reserved: bool,
+    pub eap_usable_bytes: usize,
+    pub eap_in_use: bool,
+    pub eap_reserve_available: bool,
+}
+
+impl AllocFailureSnapshot {
+    const fn empty() -> Self {
+        Self {
+            kind: 0,
+            requested_bytes: 0,
+            free_bytes: 0,
+            task_marker: 0,
+            count: 0,
+            eap_active_count: 0,
+            eap_reserved: false,
+            eap_usable_bytes: 0,
+            eap_in_use: false,
+            eap_reserve_available: false,
+        }
+    }
+}
 
 /// Initialize the heap from linker-provided symbols if not already done.
 unsafe fn ensure_init() {
@@ -164,22 +201,19 @@ fn total_free() -> usize {
     HEAP_HI.free() + HEAP_LO.free()
 }
 
-fn take_eap_rsa_workspace(size: usize) -> *mut c_void {
-    let _ = size;
-    ptr::null_mut()
-}
-
 pub(crate) fn reserve_eap_rsa_workspace() {
     critical_section::with(|_| unsafe {
         ensure_init();
         EAP_RSA_WORKSPACE_RESERVE_ATTEMPTS = EAP_RSA_WORKSPACE_RESERVE_ATTEMPTS.saturating_add(1);
-        EAP_RSA_WORKSPACE_ACTIVE = true;
+        EAP_RSA_WORKSPACE_ACTIVE_COUNT = EAP_RSA_WORKSPACE_ACTIVE_COUNT.saturating_add(1);
+        ensure_eap_rsa_workspace_reserved();
     });
 }
 
 pub(crate) fn release_eap_rsa_workspace() {
     critical_section::with(|_| unsafe {
-        EAP_RSA_WORKSPACE_ACTIVE = false;
+        EAP_RSA_WORKSPACE_ACTIVE_COUNT = EAP_RSA_WORKSPACE_ACTIVE_COUNT.saturating_sub(1);
+        release_eap_rsa_workspace_if_idle();
     });
 }
 
@@ -193,26 +227,179 @@ pub unsafe extern "C" fn esp8266_hal_eap_rsa_release() {
     release_eap_rsa_workspace();
 }
 
-pub fn debug_eap_rsa_workspace() -> (bool, u32, u32, u32, u32) {
+pub fn debug_eap_rsa_workspace() -> (u32, u32, u32, u32, u32, usize, bool) {
     critical_section::with(|_| unsafe {
         (
-            EAP_RSA_WORKSPACE_ACTIVE,
+            EAP_RSA_WORKSPACE_ACTIVE_COUNT,
             EAP_RSA_WORKSPACE_RESERVE_ATTEMPTS,
             EAP_RSA_WORKSPACE_RESERVED,
             EAP_RSA_WORKSPACE_USED,
             EAP_RSA_WORKSPACE_RELEASED,
+            eap_workspace_max_usable(),
+            eap_workspace_any_in_use(),
         )
     })
 }
 
+unsafe fn eap_workspace_reserved_count() -> usize {
+    unsafe {
+        let mut count = 0;
+        for index in 0..EAP_RSA_WORKSPACE_SLOTS {
+            if !EAP_RSA_WORKSPACE_PTRS[index].is_null() {
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
+unsafe fn eap_workspace_any_in_use() -> bool {
+    unsafe {
+        for index in 0..EAP_RSA_WORKSPACE_SLOTS {
+            if EAP_RSA_WORKSPACE_IN_USE[index] {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+unsafe fn eap_workspace_max_usable() -> usize {
+    unsafe {
+        let mut usable = 0;
+        for index in 0..EAP_RSA_WORKSPACE_SLOTS {
+            if !EAP_RSA_WORKSPACE_PTRS[index].is_null() {
+                usable = usable.max(EAP_RSA_WORKSPACE_USABLE[index]);
+            }
+        }
+        usable
+    }
+}
+
+unsafe fn eap_workspace_reserve_available(size: usize) -> bool {
+    unsafe {
+        if EAP_RSA_WORKSPACE_ACTIVE_COUNT == 0 {
+            return false;
+        }
+
+        for index in 0..EAP_RSA_WORKSPACE_SLOTS {
+            if !EAP_RSA_WORKSPACE_PTRS[index].is_null()
+                && !EAP_RSA_WORKSPACE_IN_USE[index]
+                && size <= EAP_RSA_WORKSPACE_USABLE[index]
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+unsafe fn ensure_eap_rsa_workspace_reserved() {
+    unsafe {
+        for index in 0..EAP_RSA_WORKSPACE_SLOTS {
+            if !EAP_RSA_WORKSPACE_PTRS[index].is_null() {
+                continue;
+            }
+
+            let total = EAP_RSA_WORKSPACE_USABLE_BYTES + HEADER_SIZE;
+            let layout = Layout::from_size_align_unchecked(total, 4);
+            let raw = alloc_raw(layout);
+            if raw.is_null() {
+                return;
+            }
+
+            let header = raw as *mut u32;
+            header.write(total as u32);
+            header.add(1).write(FREED_MAGIC);
+            EAP_RSA_WORKSPACE_PTRS[index] = raw.add(HEADER_SIZE) as *mut c_void;
+            EAP_RSA_WORKSPACE_USABLE[index] = EAP_RSA_WORKSPACE_USABLE_BYTES;
+            EAP_RSA_WORKSPACE_IN_USE[index] = false;
+            EAP_RSA_WORKSPACE_RESERVED = EAP_RSA_WORKSPACE_RESERVED.saturating_add(1);
+        }
+    }
+}
+
+unsafe fn release_eap_rsa_workspace_if_idle() {
+    unsafe {
+        if EAP_RSA_WORKSPACE_ACTIVE_COUNT != 0 || eap_workspace_any_in_use() {
+            return;
+        }
+
+        for index in 0..EAP_RSA_WORKSPACE_SLOTS {
+            let ptr = EAP_RSA_WORKSPACE_PTRS[index];
+            if ptr.is_null() {
+                continue;
+            }
+
+            let raw = (ptr as usize - HEADER_SIZE) as *mut u8;
+            let total = EAP_RSA_WORKSPACE_USABLE[index] + HEADER_SIZE;
+            let layout = Layout::from_size_align_unchecked(total, 4);
+            EAP_RSA_WORKSPACE_PTRS[index] = ptr::null_mut();
+            EAP_RSA_WORKSPACE_USABLE[index] = 0;
+            EAP_RSA_WORKSPACE_IN_USE[index] = false;
+            dealloc_raw(raw, layout);
+        }
+    }
+}
+
+fn take_eap_rsa_workspace(size: usize) -> *mut c_void {
+    unsafe {
+        if EAP_RSA_WORKSPACE_ACTIVE_COUNT == 0 {
+            return ptr::null_mut();
+        }
+
+        for index in 0..EAP_RSA_WORKSPACE_SLOTS {
+            let ptr = EAP_RSA_WORKSPACE_PTRS[index];
+            if EAP_RSA_WORKSPACE_IN_USE[index]
+                || ptr.is_null()
+                || size > EAP_RSA_WORKSPACE_USABLE[index]
+            {
+                continue;
+            }
+
+            let raw = (ptr as usize - HEADER_SIZE) as *mut u32;
+            raw.write((EAP_RSA_WORKSPACE_USABLE[index] + HEADER_SIZE) as u32);
+            raw.add(1).write(ALLOC_MAGIC);
+            EAP_RSA_WORKSPACE_IN_USE[index] = true;
+            EAP_RSA_WORKSPACE_USED = EAP_RSA_WORKSPACE_USED.saturating_add(1);
+            return ptr;
+        }
+
+        ptr::null_mut()
+    }
+}
+
 fn eap_rsa_workspace_usable(ptr: *mut c_void) -> Option<usize> {
-    let _ = ptr;
-    None
+    unsafe {
+        for index in 0..EAP_RSA_WORKSPACE_SLOTS {
+            if ptr == EAP_RSA_WORKSPACE_PTRS[index] && EAP_RSA_WORKSPACE_IN_USE[index] {
+                return Some(EAP_RSA_WORKSPACE_USABLE[index]);
+            }
+        }
+        None
+    }
 }
 
 unsafe fn free_eap_rsa_workspace(ptr: *mut c_void) -> bool {
-    let _ = ptr;
-    false
+    unsafe {
+        for index in 0..EAP_RSA_WORKSPACE_SLOTS {
+            if ptr != EAP_RSA_WORKSPACE_PTRS[index] {
+                continue;
+            }
+            if !EAP_RSA_WORKSPACE_IN_USE[index] {
+                return false;
+            }
+
+            let header = (ptr as usize - HEADER_SIZE) as *mut u32;
+            header.add(1).write(FREED_MAGIC);
+            EAP_RSA_WORKSPACE_IN_USE[index] = false;
+            EAP_RSA_WORKSPACE_RELEASED = EAP_RSA_WORKSPACE_RELEASED.saturating_add(1);
+            release_eap_rsa_workspace_if_idle();
+            return true;
+        }
+
+        false
+    }
 }
 
 pub fn debug_region_info() -> (usize, usize, usize, usize, usize, usize) {
@@ -313,12 +500,24 @@ fn trace_task3_overlap(_start: usize, _size: usize, _frame_tag: u8, _stack_tag: 
 unsafe fn record_alloc_failure(kind: u8, size: usize) {
     unsafe {
         let free = HEAP_HI.free() + HEAP_LO.free();
+        let task = super::task::debug_current_task_marker();
+        let count = ALLOC_FAIL_COUNT.saturating_add(1);
+        let snapshot = AllocFailureSnapshot {
+            kind,
+            requested_bytes: size,
+            free_bytes: free,
+            task_marker: task,
+            count,
+            eap_active_count: EAP_RSA_WORKSPACE_ACTIVE_COUNT,
+            eap_reserved: eap_workspace_reserved_count() != 0,
+            eap_usable_bytes: eap_workspace_max_usable(),
+            eap_in_use: eap_workspace_any_in_use(),
+            eap_reserve_available: eap_workspace_reserve_available(size),
+        };
         if ALLOC_FAIL_COUNT == 0 {
-            FIRST_ALLOC_FAIL_KIND = kind;
-            FIRST_ALLOC_FAIL_TASK = super::task::debug_current_task_marker();
-            FIRST_ALLOC_FAIL_SIZE = size;
-            FIRST_ALLOC_FAIL_FREE = free;
+            FIRST_ALLOC_FAIL = snapshot;
         }
+        LAST_ALLOC_FAIL = snapshot;
         ALLOC_FAIL_COUNT = ALLOC_FAIL_COUNT.saturating_add(1);
     }
 }
@@ -427,6 +626,9 @@ fn c_realloc(ptr: *mut c_void, new_size: usize) -> *mut c_void {
         let old_total = unsafe { *((ptr as usize - HEADER_SIZE) as *const u32) } as usize;
         old_total.saturating_sub(HEADER_SIZE)
     };
+    if new_size <= old_usable {
+        return ptr;
+    }
 
     let new_ptr = c_malloc_inner(b'R', new_size);
     if !new_ptr.is_null() {
@@ -474,26 +676,32 @@ pub unsafe fn zalloc(size: usize) -> *mut c_void {
 
 pub fn clear_alloc_failure_debug() {
     critical_section::with(|_| unsafe {
-        FIRST_ALLOC_FAIL_KIND = 0;
-        FIRST_ALLOC_FAIL_TASK = 0;
-        FIRST_ALLOC_FAIL_SIZE = 0;
-        FIRST_ALLOC_FAIL_FREE = 0;
+        FIRST_ALLOC_FAIL = AllocFailureSnapshot::empty();
+        LAST_ALLOC_FAIL = AllocFailureSnapshot::empty();
         ALLOC_FAIL_COUNT = 0;
     });
 }
 
-pub fn debug_last_alloc_failure() -> Option<(u8, usize, usize, u8, u32)> {
+pub(crate) fn debug_first_alloc_failure() -> Option<AllocFailureSnapshot> {
     critical_section::with(|_| unsafe {
         if ALLOC_FAIL_COUNT == 0 {
             None
         } else {
-            Some((
-                FIRST_ALLOC_FAIL_KIND,
-                FIRST_ALLOC_FAIL_SIZE,
-                FIRST_ALLOC_FAIL_FREE,
-                FIRST_ALLOC_FAIL_TASK,
-                ALLOC_FAIL_COUNT,
-            ))
+            let mut snapshot = FIRST_ALLOC_FAIL;
+            snapshot.count = ALLOC_FAIL_COUNT;
+            Some(snapshot)
+        }
+    })
+}
+
+pub(crate) fn debug_last_alloc_failure() -> Option<AllocFailureSnapshot> {
+    critical_section::with(|_| unsafe {
+        if ALLOC_FAIL_COUNT == 0 {
+            None
+        } else {
+            let mut snapshot = LAST_ALLOC_FAIL;
+            snapshot.count = ALLOC_FAIL_COUNT;
+            Some(snapshot)
         }
     })
 }

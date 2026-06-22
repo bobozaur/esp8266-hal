@@ -1977,6 +1977,9 @@ void __atomic_store_4(volatile void *p, uint32_t v, int mo) {
             {
                 wpa_build.file(patch_esp_wpa2_eap_trace_source(&comp(src), out_dir));
             }
+            "components/wpa_supplicant/src/esp_supplicant/esp_wpa2.c" => {
+                wpa_build.file(patch_esp_wpa2_source(&comp(src), out_dir));
+            }
             "components/wpa_supplicant/src/esp_supplicant/esp_wps.c" => {
                 wpa_build.file(patch_esp_wps_source(&comp(src), out_dir));
             }
@@ -2155,6 +2158,12 @@ fn patch_esp_wpa2_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
     );
     let patched_text = replace_required(
         &patched_text,
+        "    if (!sm) {\n        esp8266_hal_eap_trace_code('m');\n        return ESP_FAIL;\n    }\n#ifdef USE_WPA2_TASK\n    {",
+        "    if (!sm) {\n        esp8266_hal_eap_trace_code('m');\n        return ESP_FAIL;\n    }\n#ifdef USE_WPA2_TASK\n    if (len > 384) {\n        esp8266_hal_eap_trace_code('L');\n        ret = eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);\n        esp8266_hal_eap_trace_code('d');\n        esp8266_hal_eap_trace_hex32((unsigned int)ret);\n        return ret;\n    }\n    {",
+        "esp_wpa2.c direct large EAPOL RX trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
         "        if (!param) {\n            return ESP_ERR_NO_MEM;\n        }\n\n        param->buf = (u8 *)os_zalloc(len);   /* free in task */\n        if (!param->buf) {\n            os_free(param);\n            return ESP_ERR_NO_MEM;\n        }",
         "        if (!param) {\n            esp8266_hal_eap_trace_code('4');\n            ret = eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);\n            esp8266_hal_eap_trace_code('d');\n            esp8266_hal_eap_trace_hex32((unsigned int)ret);\n            return ret;\n        }\n\n        param->buf = (u8 *)os_zalloc(len);   /* free in task */\n        if (!param->buf) {\n            esp8266_hal_eap_trace_code('5');\n            os_free(param);\n            ret = eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);\n            esp8266_hal_eap_trace_code('d');\n            esp8266_hal_eap_trace_hex32((unsigned int)ret);\n            return ret;\n        }",
         "esp_wpa2.c EAPOL rx queue allocation trace",
@@ -2206,6 +2215,55 @@ fn patch_esp_wpa2_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
         "        req = wpabuf_alloc_copy((u8 *)ehdr, len - sizeof(*hdr));\n        ret = eap_sm_process_request(sm, req);\n        break;",
         "        req = wpabuf_alloc_copy((u8 *)ehdr, len - sizeof(*hdr));\n        esp8266_hal_eap_trace_code(req ? 'q' : 'Q');\n        if (!req) {\n            wpabuf_set(&stack_req, (u8 *)ehdr, len - sizeof(*hdr));\n            req = &stack_req;\n            stack_req_used = 1;\n            esp8266_hal_eap_trace_code('v');\n        }\n        ret = eap_sm_process_request(sm, req);\n        esp8266_hal_eap_trace_code('r');\n        esp8266_hal_eap_trace_hex32((unsigned int)ret);\n        break;",
         "esp_wpa2.c EAP request allocation/process trace",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "_out:\n    wpabuf_free(req);",
+        "_out:\n    if (!stack_req_used) {\n        wpabuf_free(req);\n    }",
+        "esp_wpa2.c EAP stack request free guard",
+    );
+    fs::write(&patched, patched_text).expect("failed to write patched esp_wpa2.c");
+    patched
+}
+
+fn patch_esp_wpa2_source(source: &Path, out_dir: &Path) -> PathBuf {
+    let patched = out_dir.join("esp_wpa2_patched.c");
+    let source_text = fs::read_to_string(source).expect("failed to read esp_wpa2.c");
+    let patched_text = replace_required(
+        &source_text,
+        "int eap_sm_send_eapol(struct eap_sm *sm, struct wpabuf *resp)\n{\n    size_t outlen;\n    int ret;\n    u8 *outbuf = NULL;",
+        "int eap_sm_send_eapol(struct eap_sm *sm, struct wpabuf *resp)\n{\n    size_t outlen;\n    int ret;\n    u8 *outbuf = NULL;\n    int stack_backed = 0;\n    u8 stack_eapol[sizeof(struct l2_ethhdr) + sizeof(struct ieee802_1x_hdr) + 256];",
+        "esp_wpa2.c EAPOL send stack fallback locals",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    outbuf = wpa2_sm_alloc_eapol(sm, IEEE802_1X_TYPE_EAP_PACKET,\n                                 wpabuf_head_u8(resp), wpabuf_len(resp),\n                                 &outlen, NULL);\n    if (!outbuf) {\n        return ESP_ERR_NO_MEM;\n    }\n\n    ret = wpa2_sm_ether_send(sm, bssid, ETH_P_EAPOL, outbuf, outlen);\n    wpa2_sm_free_eapol(outbuf);",
+        "    outbuf = wpa2_sm_alloc_eapol(sm, IEEE802_1X_TYPE_EAP_PACKET,\n                                 wpabuf_head_u8(resp), wpabuf_len(resp),\n                                 &outlen, NULL);\n    if (!outbuf && wpabuf_len(resp) <= 256) {\n        struct ieee802_1x_hdr *hdr;\n        hdr = (struct ieee802_1x_hdr *)(stack_eapol + sizeof(struct l2_ethhdr));\n        outlen = sizeof(struct ieee802_1x_hdr) + wpabuf_len(resp);\n        hdr->version = 0x01;\n        hdr->type = IEEE802_1X_TYPE_EAP_PACKET;\n        hdr->length = host_to_be16(wpabuf_len(resp));\n        memcpy(hdr + 1, wpabuf_head_u8(resp), wpabuf_len(resp));\n        outbuf = (u8 *)hdr;\n        stack_backed = 1;\n    }\n    if (!outbuf) {\n        return ESP_ERR_NO_MEM;\n    }\n\n    ret = wpa2_sm_ether_send(sm, bssid, ETH_P_EAPOL, outbuf, outlen);\n    if (!stack_backed) {\n        wpa2_sm_free_eapol(outbuf);\n    }",
+        "esp_wpa2.c EAPOL send stack fallback",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int eap_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)\n{\n    struct eap_sm *sm = gEapSm;\n\n    if (!sm) {\n        return ESP_FAIL;\n    }\n#ifdef USE_WPA2_TASK\n    {",
+        "static int eap_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)\n{\n    struct eap_sm *sm = gEapSm;\n\n    if (!sm) {\n        return ESP_FAIL;\n    }\n#ifdef USE_WPA2_TASK\n    if (len > 384) {\n        return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);\n    }\n    {",
+        "esp_wpa2.c direct large EAPOL RX",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        if (!param) {\n            return ESP_ERR_NO_MEM;\n        }\n\n        param->buf = (u8 *)os_zalloc(len);   /* free in task */\n        if (!param->buf) {\n            os_free(param);\n            return ESP_ERR_NO_MEM;\n        }",
+        "        if (!param) {\n            return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);\n        }\n\n        param->buf = (u8 *)os_zalloc(len);   /* free in task */\n        if (!param->buf) {\n            os_free(param);\n            return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);\n        }",
+        "esp_wpa2.c EAPOL rx allocation fallback",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    struct wpabuf *req = NULL;\n    u8 *tmp;\n    int ret = ESP_FAIL;",
+        "    struct wpabuf *req = NULL;\n    struct wpabuf stack_req;\n    int stack_req_used = 0;\n    u8 *tmp;\n    int ret = ESP_FAIL;",
+        "esp_wpa2.c EAPOL internal stack request locals",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "        req = wpabuf_alloc_copy((u8 *)ehdr, len - sizeof(*hdr));\n        ret = eap_sm_process_request(sm, req);\n        break;",
+        "        req = wpabuf_alloc_copy((u8 *)ehdr, len - sizeof(*hdr));\n        if (!req) {\n            wpabuf_set(&stack_req, (u8 *)ehdr, len - sizeof(*hdr));\n            req = &stack_req;\n            stack_req_used = 1;\n        }\n        ret = eap_sm_process_request(sm, req);\n        break;",
+        "esp_wpa2.c EAP request allocation fallback",
     );
     let patched_text = replace_required(
         &patched_text,
@@ -2405,6 +2463,24 @@ fn patch_tls_mbedtls_source(source: &Path, out_dir: &Path) -> PathBuf {
     );
     let patched_text = replace_required(
         &patched_text,
+        "static int set_pki_context(tls_context_t *tls, const struct tls_connection_params *cfg)",
+        "static int esp8266_hal_x509_blob_is_pem(const unsigned char *blob, size_t len)\n{\n\treturn len >= 10 && os_memcmp(blob, \"-----BEGIN\", 10) == 0;\n}\n\nstatic int esp8266_hal_x509_crt_parse_blob(mbedtls_x509_crt *crt,\n\t\t\t\t\t    const unsigned char *blob,\n\t\t\t\t\t    size_t len)\n{\n\tif (esp8266_hal_x509_blob_is_pem(blob, len))\n\t\treturn mbedtls_x509_crt_parse(crt, blob, len);\n\n\treturn mbedtls_x509_crt_parse_der(crt, blob, len);\n}\n\nstatic int set_pki_context(tls_context_t *tls, const struct tls_connection_params *cfg)",
+        "tls_mbedtls.c DER/PEM certificate parser",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tret = mbedtls_x509_crt_parse(&tls->clientcert,\n\t\t\t\t     cfg->client_cert_blob, cfg->client_cert_blob_len);",
+        "\tret = esp8266_hal_x509_crt_parse_blob(&tls->clientcert,\n\t\t\t\t\t\t cfg->client_cert_blob,\n\t\t\t\t\t\t cfg->client_cert_blob_len);",
+        "tls_mbedtls.c parse client cert DER/PEM blob",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tint ret = mbedtls_x509_crt_parse(tls->cacert_ptr, cacert, cacert_len);",
+        "\tint ret = esp8266_hal_x509_crt_parse_blob(tls->cacert_ptr,\n\t\t\t\t\t\t  cacert, cacert_len);",
+        "tls_mbedtls.c parse CA cert DER/PEM blob",
+    );
+    let patched_text = replace_required(
+        &patched_text,
         "static int tls_mbedtls_read(void *ctx, unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\tstruct wpabuf *local_buf;\n\tsize_t data_len = len;\n\n\tif (len > wpabuf_len(data->in_data)) {\n\t\twpa_printf(MSG_ERROR, \"don't have suffient data\\n\");\n\t\tdata_len = wpabuf_len(data->in_data);\n\t}\n\n\tos_memcpy(buf, wpabuf_head(data->in_data), data_len);\n\t/* adjust buffer */\n\tif (len < wpabuf_len(data->in_data)) {\n\t\tlocal_buf = wpabuf_alloc_copy(wpabuf_head(data->in_data) + len,\n\t\t\t\t\t      wpabuf_len(data->in_data) - len);\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = local_buf;\n\t} else {\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = NULL;\n\t}\n\n\treturn data_len;\n}",
         "static int tls_mbedtls_read(void *ctx, unsigned char *buf, size_t len)\n{\n\tstruct tls_connection *conn = (struct tls_connection *)ctx;\n\tstruct tls_data *data = &conn->tls_io_data;\n\tstruct wpabuf *local_buf;\n\tsize_t data_len = len;\n\n\tif (data->in_ext_data) {\n\t\tsize_t available = data->in_ext_len - data->in_ext_pos;\n\t\tif (len > available) {\n\t\t\twpa_printf(MSG_ERROR, \"don't have suffient data\\n\");\n\t\t\tdata_len = available;\n\t\t}\n\t\tos_memcpy(buf, data->in_ext_data + data->in_ext_pos, data_len);\n\t\tdata->in_ext_pos += data_len;\n\t\tif (data->in_ext_pos >= data->in_ext_len) {\n\t\t\tdata->in_ext_data = NULL;\n\t\t\tdata->in_ext_len = 0;\n\t\t\tdata->in_ext_pos = 0;\n\t\t\twpabuf_free(data->in_ext_owner);\n\t\t\tdata->in_ext_owner = NULL;\n\t\t}\n\t\treturn data_len;\n\t}\n\n\tif (!data->in_data) {\n\t\treturn MBEDTLS_ERR_SSL_WANT_READ;\n\t}\n\tif (len > wpabuf_len(data->in_data)) {\n\t\twpa_printf(MSG_ERROR, \"don't have suffient data\\n\");\n\t\tdata_len = wpabuf_len(data->in_data);\n\t}\n\n\tos_memcpy(buf, wpabuf_head(data->in_data), data_len);\n\t/* adjust buffer */\n\tif (len < wpabuf_len(data->in_data)) {\n\t\tlocal_buf = wpabuf_alloc_copy(wpabuf_head(data->in_data) + len,\n\t\t\t\t\t      wpabuf_len(data->in_data) - len);\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = local_buf;\n\t} else {\n\t\twpabuf_free(data->in_data);\n\t\tdata->in_data = NULL;\n\t}\n\n\treturn data_len;\n}",
         "tls_mbedtls.c external input cursor read",
@@ -2475,6 +2551,24 @@ fn patch_tls_mbedtls_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf 
         "struct tls_data {\n\t/* Data for mbedlts */\n\tstruct wpabuf *in_data;\n\t/* Data from mbedtls */\n\tstruct wpabuf *out_data;\n};",
         "struct tls_data {\n\t/* Data for mbedlts */\n\tstruct wpabuf *in_data;\n\tconst u8 *in_ext_data;\n\tsize_t in_ext_len;\n\tsize_t in_ext_pos;\n\tstruct wpabuf *in_ext_owner;\n\t/* Data from mbedtls */\n\tstruct wpabuf *out_data;\n};",
         "tls_mbedtls.c external input cursor fields",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int set_pki_context(tls_context_t *tls, const struct tls_connection_params *cfg)",
+        "static int esp8266_hal_x509_blob_is_pem(const unsigned char *blob, size_t len)\n{\n\treturn len >= 10 && os_memcmp(blob, \"-----BEGIN\", 10) == 0;\n}\n\nstatic int esp8266_hal_x509_crt_parse_blob(mbedtls_x509_crt *crt,\n\t\t\t\t\t    const unsigned char *blob,\n\t\t\t\t\t    size_t len)\n{\n\tif (esp8266_hal_x509_blob_is_pem(blob, len))\n\t\treturn mbedtls_x509_crt_parse(crt, blob, len);\n\n\treturn mbedtls_x509_crt_parse_der(crt, blob, len);\n}\n\nstatic int set_pki_context(tls_context_t *tls, const struct tls_connection_params *cfg)",
+        "tls_mbedtls.c DER/PEM certificate parser",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tret = mbedtls_x509_crt_parse(&tls->clientcert,\n\t\t\t\t     cfg->client_cert_blob, cfg->client_cert_blob_len);",
+        "\tret = esp8266_hal_x509_crt_parse_blob(&tls->clientcert,\n\t\t\t\t\t\t cfg->client_cert_blob,\n\t\t\t\t\t\t cfg->client_cert_blob_len);",
+        "tls_mbedtls.c parse client cert DER/PEM blob",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "\tint ret = mbedtls_x509_crt_parse(tls->cacert_ptr, cacert, cacert_len);",
+        "\tint ret = esp8266_hal_x509_crt_parse_blob(tls->cacert_ptr,\n\t\t\t\t\t\t  cacert, cacert_len);",
+        "tls_mbedtls.c parse CA cert DER/PEM blob",
     );
     let patched_text = replace_required(
         &patched_text,
@@ -2936,6 +3030,24 @@ fn patch_ssl_cli_source(source: &Path, out_dir: &Path) -> PathBuf {
         "    if( ( ret = mbedtls_pk_encrypt( &ssl->session_negotiate->peer_cert->pk,\n                            p, ssl->handshake->pmslen,\n                            ssl->out_msg + offset + len_bytes, olen,\n                            MBEDTLS_SSL_OUT_CONTENT_LEN - offset - len_bytes,\n                            ssl->conf->f_rng, ssl->conf->p_rng ) ) != 0 )\n    {\n        MBEDTLS_SSL_DEBUG_RET( 1, \"mbedtls_rsa_pkcs1_encrypt\", ret );\n        return( ret );\n    }",
         "    extern void esp8266_hal_eap_rsa_reserve(void);\n    extern void esp8266_hal_eap_rsa_release(void);\n\n    esp8266_hal_eap_rsa_reserve();\n    if( ( ret = mbedtls_pk_encrypt( &ssl->session_negotiate->peer_cert->pk,\n                            p, ssl->handshake->pmslen,\n                            ssl->out_msg + offset + len_bytes, olen,\n                            MBEDTLS_SSL_OUT_CONTENT_LEN - offset - len_bytes,\n                            ssl->conf->f_rng, ssl->conf->p_rng ) ) != 0 )\n    {\n        esp8266_hal_eap_rsa_release();\n        MBEDTLS_SSL_DEBUG_RET( 1, \"mbedtls_rsa_pkcs1_encrypt\", ret );\n        return( ret );\n    }\n    esp8266_hal_eap_rsa_release();",
         "ssl_cli.c RSA premaster reserve",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "static int ssl_parse_server_hello_done( mbedtls_ssl_context *ssl )",
+        "extern void esp8266_hal_eap_rsa_reserve(void);\nextern void esp8266_hal_eap_rsa_release(void);\n\nstatic void esp8266_hal_free_peer_cert_after_ecdhe( mbedtls_ssl_context *ssl )\n{\n#if defined(MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED) || \\\n    defined(MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED)\n    const mbedtls_ssl_ciphersuite_t *ciphersuite_info;\n\n    if( ssl->transform_negotiate == NULL ||\n        ssl->transform_negotiate->ciphersuite_info == NULL ||\n        ssl->session_negotiate == NULL ||\n        ssl->session_negotiate->peer_cert == NULL )\n    {\n        return;\n    }\n\n    ciphersuite_info = ssl->transform_negotiate->ciphersuite_info;\n    if( ciphersuite_info->key_exchange != MBEDTLS_KEY_EXCHANGE_ECDHE_RSA &&\n        ciphersuite_info->key_exchange != MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA )\n    {\n        return;\n    }\n\n    mbedtls_x509_crt_free( ssl->session_negotiate->peer_cert );\n    mbedtls_free( ssl->session_negotiate->peer_cert );\n    ssl->session_negotiate->peer_cert = NULL;\n#else\n    (void) ssl;\n#endif\n}\n\nstatic int ssl_parse_server_hello_done( mbedtls_ssl_context *ssl )",
+        "ssl_cli.c free ECDHE peer cert helper",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    ssl->state++;\n\n#if defined(MBEDTLS_SSL_PROTO_DTLS)\n    if( ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM )\n        mbedtls_ssl_recv_flight_completed( ssl );",
+        "    esp8266_hal_free_peer_cert_after_ecdhe( ssl );\n    ssl->state++;\n\n#if defined(MBEDTLS_SSL_PROTO_DTLS)\n    if( ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM )\n        mbedtls_ssl_recv_flight_completed( ssl );",
+        "ssl_cli.c free ECDHE peer cert at ServerHelloDone",
+    );
+    let patched_text = replace_required(
+        &patched_text,
+        "    if( ( ret = mbedtls_pk_sign_restartable( mbedtls_ssl_own_key( ssl ),\n                         md_alg, hash_start, hashlen,\n                         ssl->out_msg + 6 + offset, &n,\n                         ssl->conf->f_rng, ssl->conf->p_rng, rs_ctx ) ) != 0 )\n    {\n        MBEDTLS_SSL_DEBUG_RET( 1, \"mbedtls_pk_sign\", ret );\n#if defined(MBEDTLS_SSL__ECP_RESTARTABLE)\n        if( ret == MBEDTLS_ERR_ECP_IN_PROGRESS )\n            ret = MBEDTLS_ERR_SSL_CRYPTO_IN_PROGRESS;\n#endif\n        return( ret );\n    }",
+        "    esp8266_hal_eap_rsa_reserve();\n    if( ( ret = mbedtls_pk_sign_restartable( mbedtls_ssl_own_key( ssl ),\n                         md_alg, hash_start, hashlen,\n                         ssl->out_msg + 6 + offset, &n,\n                         ssl->conf->f_rng, ssl->conf->p_rng, rs_ctx ) ) != 0 )\n    {\n        esp8266_hal_eap_rsa_release();\n        MBEDTLS_SSL_DEBUG_RET( 1, \"mbedtls_pk_sign\", ret );\n#if defined(MBEDTLS_SSL__ECP_RESTARTABLE)\n        if( ret == MBEDTLS_ERR_ECP_IN_PROGRESS )\n            ret = MBEDTLS_ERR_SSL_CRYPTO_IN_PROGRESS;\n#endif\n        return( ret );\n    }\n    esp8266_hal_eap_rsa_release();",
+        "ssl_cli.c certificate verify sign reserve",
     );
     fs::write(&patched, patched_text).expect("failed to write patched ssl_cli.c");
     patched

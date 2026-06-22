@@ -345,10 +345,14 @@ impl WifiController {
         let raw = config.to_raw();
         let ret = unsafe { sys::esp_wifi_init(&raw) };
         if ret != sys::ESP_OK {
-            if let Some((kind, size, free, task, count)) =
-                super::compat::memory::debug_last_alloc_failure()
-            {
-                log_wifi_alloc_failure(kind, size, free, task, count);
+            if let Some(failure) = super::compat::memory::debug_last_alloc_failure() {
+                log_wifi_alloc_failure(
+                    failure.kind,
+                    failure.requested_bytes,
+                    failure.free_bytes,
+                    failure.task_marker,
+                    failure.count,
+                );
             }
         }
         if let Err(e) = EspError::check(ret) {

@@ -564,28 +564,61 @@ pub enum Credential {
     Wpa2Enterprise(Wpa2EnterpriseCredentials),
 }
 
+/// Encoding used for WPA2 Enterprise certificate or key material.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wpa2EnterpriseMaterialFormat {
+    /// PEM text. The target backend requires these slices to include a trailing
+    /// NUL byte because the ESP8266 RTOS SDK passes them through C string code.
+    Pem,
+    /// ASN.1 DER bytes. DER material is length-delimited and must not be
+    /// NUL-terminated for the HAL to accept it.
+    Der,
+}
+
 /// Optional client certificate material forwarded to the SDK supplicant.
 ///
 /// The repo-local hardware matrix currently validates the username/password
 /// Enterprise path. Client certificate fields are preserved by the typed API and
 /// forwarded to the SDK when supplied, but they need a dedicated EAP-TLS fixture
 /// before they should be treated as hardware-green.
+///
+/// The ESP8266 RTOS SDK stores pointers to these buffers. PEM inputs must be
+/// NUL-terminated; DER inputs are length-delimited. The target backend rejects
+/// malformed PEM/DER material rather than forwarding a broken configuration to
+/// the SDK.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Wpa2EnterpriseClientCertificate {
     client_cert: &'static [u8],
     private_key: &'static [u8],
     private_key_password: Option<&'static [u8]>,
+    client_cert_format: Wpa2EnterpriseMaterialFormat,
+    private_key_format: Wpa2EnterpriseMaterialFormat,
 }
 
 impl Wpa2EnterpriseClientCertificate {
+    /// Create client certificate material from NUL-terminated PEM buffers.
     pub const fn new(client_cert: &'static [u8], private_key: &'static [u8]) -> Self {
         Self {
             client_cert,
             private_key,
             private_key_password: None,
+            client_cert_format: Wpa2EnterpriseMaterialFormat::Pem,
+            private_key_format: Wpa2EnterpriseMaterialFormat::Pem,
         }
     }
 
+    /// Create client certificate material from DER buffers.
+    pub const fn new_der(client_cert_der: &'static [u8], private_key_der: &'static [u8]) -> Self {
+        Self {
+            client_cert: client_cert_der,
+            private_key: private_key_der,
+            private_key_password: None,
+            client_cert_format: Wpa2EnterpriseMaterialFormat::Der,
+            private_key_format: Wpa2EnterpriseMaterialFormat::Der,
+        }
+    }
+
+    /// Attach a NUL-terminated private-key password.
     pub const fn with_private_key_password(mut self, password: &'static [u8]) -> Self {
         self.private_key_password = Some(password);
         self
@@ -602,6 +635,14 @@ impl Wpa2EnterpriseClientCertificate {
     pub const fn private_key_password(&self) -> Option<&'static [u8]> {
         self.private_key_password
     }
+
+    pub const fn client_cert_format(&self) -> Wpa2EnterpriseMaterialFormat {
+        self.client_cert_format
+    }
+
+    pub const fn private_key_format(&self) -> Wpa2EnterpriseMaterialFormat {
+        self.private_key_format
+    }
 }
 
 /// WPA2 Enterprise station credentials.
@@ -609,13 +650,16 @@ impl Wpa2EnterpriseClientCertificate {
 /// `new` covers the validated username/password path used by the OpenWrt/RADIUS
 /// hardware fixture. Optional CA and client certificate fields expose the
 /// corresponding ESP8266 RTOS SDK supplicant hooks for deployments that require
-/// certificate validation or EAP-TLS-style client material.
+/// certificate validation or EAP-TLS-style client material. PEM certificate
+/// slices must include a trailing NUL byte for the ESP8266 RTOS SDK; DER slices
+/// should be provided through the DER-specific constructors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wpa2EnterpriseCredentials {
     identity: EnterpriseIdentity,
     username: EnterpriseUsername,
     password: EnterprisePassword,
     ca_cert: Option<&'static [u8]>,
+    ca_cert_format: Wpa2EnterpriseMaterialFormat,
     client_certificate: Option<Wpa2EnterpriseClientCertificate>,
     disable_time_check: bool,
 }
@@ -631,13 +675,23 @@ impl Wpa2EnterpriseCredentials {
             username,
             password,
             ca_cert: None,
+            ca_cert_format: Wpa2EnterpriseMaterialFormat::Pem,
             client_certificate: None,
             disable_time_check: true,
         }
     }
 
+    /// Attach a NUL-terminated PEM CA certificate.
     pub const fn with_ca_cert(mut self, ca_cert: &'static [u8]) -> Self {
         self.ca_cert = Some(ca_cert);
+        self.ca_cert_format = Wpa2EnterpriseMaterialFormat::Pem;
+        self
+    }
+
+    /// Attach a DER-encoded CA certificate.
+    pub const fn with_ca_cert_der(mut self, ca_cert_der: &'static [u8]) -> Self {
+        self.ca_cert = Some(ca_cert_der);
+        self.ca_cert_format = Wpa2EnterpriseMaterialFormat::Der;
         self
     }
 
@@ -668,6 +722,13 @@ impl Wpa2EnterpriseCredentials {
 
     pub const fn ca_cert(&self) -> Option<&'static [u8]> {
         self.ca_cert
+    }
+
+    pub const fn ca_cert_format(&self) -> Option<Wpa2EnterpriseMaterialFormat> {
+        match self.ca_cert {
+            Some(_) => Some(self.ca_cert_format),
+            None => None,
+        }
     }
 
     pub const fn client_certificate(&self) -> Option<Wpa2EnterpriseClientCertificate> {

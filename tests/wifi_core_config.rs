@@ -2,7 +2,8 @@ use esp8266_hal::wifi_core::{
     AccessPointConfig, ApClientLimit, BeaconInterval, Channel, ClientConfig, ConfigError,
     Credential, EnterpriseIdentity, EnterprisePassword, EnterpriseUsername, InitConfig, Passphrase,
     SmartConfigTimeout, Ssid, StationPowerSave, Wpa2EnterpriseClientCertificate,
-    Wpa2EnterpriseCredentials, WpsConfig, WpsFactoryInfo, WpsMode, WpsPin,
+    Wpa2EnterpriseCredentials, Wpa2EnterpriseMaterialFormat, WpsConfig, WpsFactoryInfo, WpsMode,
+    WpsPin,
 };
 
 #[test]
@@ -124,21 +125,63 @@ fn enterprise_credentials_preserve_username_password_and_defaults() {
 
 #[test]
 fn enterprise_credentials_preserve_optional_certificate_material() {
-    let certificate = Wpa2EnterpriseClientCertificate::new(b"client-cert", b"client-key")
-        .with_private_key_password(b"key-pass");
+    let certificate = Wpa2EnterpriseClientCertificate::new(b"client-cert\0", b"client-key\0")
+        .with_private_key_password(b"key-pass\0");
     let credentials = Wpa2EnterpriseCredentials::new(
         EnterpriseIdentity::new("anonymous").unwrap(),
         EnterpriseUsername::new("esp8266-user").unwrap(),
         EnterprisePassword::new("esp8266-password").unwrap(),
     )
-    .with_ca_cert(b"ca-cert")
+    .with_ca_cert(b"ca-cert\0")
     .with_client_certificate(certificate);
 
-    assert_eq!(credentials.ca_cert(), Some(&b"ca-cert"[..]));
+    assert_eq!(credentials.ca_cert(), Some(&b"ca-cert\0"[..]));
+    assert_eq!(
+        credentials.ca_cert_format(),
+        Some(Wpa2EnterpriseMaterialFormat::Pem)
+    );
     let stored = credentials.client_certificate().unwrap();
-    assert_eq!(stored.client_cert(), b"client-cert");
-    assert_eq!(stored.private_key(), b"client-key");
-    assert_eq!(stored.private_key_password(), Some(&b"key-pass"[..]));
+    assert_eq!(stored.client_cert(), b"client-cert\0");
+    assert_eq!(stored.private_key(), b"client-key\0");
+    assert_eq!(stored.private_key_password(), Some(&b"key-pass\0"[..]));
+    assert_eq!(
+        stored.client_cert_format(),
+        Wpa2EnterpriseMaterialFormat::Pem
+    );
+    assert_eq!(
+        stored.private_key_format(),
+        Wpa2EnterpriseMaterialFormat::Pem
+    );
+}
+
+#[test]
+fn enterprise_credentials_preserve_der_certificate_material() {
+    let certificate =
+        Wpa2EnterpriseClientCertificate::new_der(b"\x30\x03client-cert", b"\x30\x03client-key");
+    let credentials = Wpa2EnterpriseCredentials::new(
+        EnterpriseIdentity::new("anonymous").unwrap(),
+        EnterpriseUsername::new("esp8266-user").unwrap(),
+        EnterprisePassword::new("esp8266-password").unwrap(),
+    )
+    .with_ca_cert_der(b"\x30\x03ca-cert")
+    .with_client_certificate(certificate);
+
+    assert_eq!(credentials.ca_cert(), Some(&b"\x30\x03ca-cert"[..]));
+    assert_eq!(
+        credentials.ca_cert_format(),
+        Some(Wpa2EnterpriseMaterialFormat::Der)
+    );
+    let stored = credentials.client_certificate().unwrap();
+    assert_eq!(stored.client_cert(), b"\x30\x03client-cert");
+    assert_eq!(stored.private_key(), b"\x30\x03client-key");
+    assert_eq!(
+        stored.client_cert_format(),
+        Wpa2EnterpriseMaterialFormat::Der
+    );
+    assert_eq!(
+        stored.private_key_format(),
+        Wpa2EnterpriseMaterialFormat::Der
+    );
 }
 
 #[test]

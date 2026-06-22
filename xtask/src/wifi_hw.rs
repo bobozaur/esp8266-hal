@@ -2,10 +2,10 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -39,7 +39,25 @@ const DEFAULT_WPS_DUT_UUID: &str = "df2d477b-b793-51e8-a89b-5aec91edcbf9";
 const SMARTCONFIG_ROUTER_SSID: &str = "esp8266-hal-smart";
 const SMARTCONFIG_ROUTER_PASSPHRASE: &str = "esp8266smart";
 const DEFAULT_SMARTCONFIG_CHANNEL: u8 = 6;
+const RADIUS_AUTH_PORT: u16 = 1812;
+const RADIUS_ACCT_PORT: u16 = 1813;
+const EAP_TLS_ROOT_ENV: &str = "ESP8266_HAL_EAP_TLS_ROOT";
+const EAP_RADIUS_CONFIG_ROOT_ENV: &str = "ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT";
+const EAP_CA_CERT_FILE_ENV: &str = "ESP8266_HAL_EAP_CA_CERT_FILE";
+const EAP_CLIENT_CERT_FILE_ENV: &str = "ESP8266_HAL_EAP_CLIENT_CERT_FILE";
+const EAP_PRIVATE_KEY_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_FILE";
+const EAP_CA_CERT_PEM_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_CA_CERT_PEM_NUL_FILE";
+const EAP_CLIENT_CERT_PEM_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_CLIENT_CERT_PEM_NUL_FILE";
+const EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_PEM_NUL_FILE";
+const EAP_PRIVATE_KEY_PASSWORD_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_PASSWORD_NUL_FILE";
+const EAP_CA_CERT_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_CA_CERT_DER_FILE";
+const EAP_CLIENT_CERT_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_CLIENT_CERT_DER_FILE";
+const EAP_PRIVATE_KEY_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_DER_FILE";
+const EAP_DIAGNOSTICS_ENV: &str = "ESP8266_HAL_EAP_DIAGNOSTICS";
+const EAP_CAPTURE_IFACE_ENV: &str = "ESP8266_HAL_EAP_CAPTURE_IFACE";
+const DEFAULT_EAP_CAPTURE_IFACE: &str = "enp3s0";
 const SKIP_UNCHANGED_FLASH_ENV: &str = "ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH";
+const FAIL_IF_FLASH_CHANGED_ENV: &str = "ESP8266_HAL_WIFI_HW_FAIL_IF_FLASH_CHANGED";
 const FLASH_FINGERPRINT_OFFSET_A: u64 = 0xcbf2_9ce4_8422_2325;
 const FLASH_FINGERPRINT_OFFSET_B: u64 = 0x8422_2325_cbf2_9ce4;
 const FLASH_FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -527,6 +545,29 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         },
     },
     Scenario {
+        name: "eap_client_cert",
+        description: "validate optional WPA2 Enterprise CA/client-certificate material against an EAP-TLS-capable fixture",
+        example: Some("wifi_eap"),
+        features: &["interrupt", "rt", "wifi-enterprise", "wifi-sta"],
+        profile: "release",
+        state: ScenarioState::RigBlocked {
+            reason: "requires a configured EAP-TLS/RADIUS fixture and client certificate artifacts; PEAP username/password is covered by eap_sta_assoc",
+        },
+        runtime: RuntimePlan::UartWatch {
+            timeout: Duration::from_secs(180),
+            success_markers: &["eap-ok"],
+            failure_markers: &[
+                "wifi eap client cert incomplete",
+                "wifi eap configure err",
+                "wifi eap start err",
+                "wifi eap connect err",
+                "DISCONNECT reason=",
+                "panic",
+                "Guru Meditation",
+            ],
+        },
+    },
+    Scenario {
         name: "ap_station_list_companion",
         description: "join the soft-AP with the ESP32 companion and validate station list/deauth",
         example: Some("wifi_ap"),
@@ -970,6 +1011,58 @@ pub fn scenario_resource_labels(scenario: &Scenario) -> Vec<&'static str> {
     resources
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UdpPortStatus {
+    Listening,
+    Free,
+    Unknown(String),
+}
+
+impl UdpPortStatus {
+    fn label(&self) -> &str {
+        match self {
+            Self::Listening => "listening",
+            Self::Free => "not-listening",
+            Self::Unknown(_) => "unknown",
+        }
+    }
+}
+
+fn udp_port_status(addr: Ipv4Addr, port: u16) -> UdpPortStatus {
+    match UdpSocket::bind(SocketAddrV4::new(addr, port)) {
+        Ok(_) => UdpPortStatus::Free,
+        Err(error) if error.kind() == ErrorKind::AddrInUse => UdpPortStatus::Listening,
+        Err(error) => UdpPortStatus::Unknown(error.to_string()),
+    }
+}
+
+fn radius_port_statuses() -> (UdpPortStatus, UdpPortStatus) {
+    (
+        udp_port_status(Ipv4Addr::UNSPECIFIED, RADIUS_AUTH_PORT),
+        udp_port_status(Ipv4Addr::UNSPECIFIED, RADIUS_ACCT_PORT),
+    )
+}
+
+fn scenario_requires_radius(name: &str) -> bool {
+    matches!(
+        name,
+        "eap_sta_assoc" | "eap_wrong_password" | "eap_client_cert"
+    )
+}
+
+fn ensure_radius_listener() -> Result<()> {
+    let (auth, acct) = radius_port_statuses();
+    if auth == UdpPortStatus::Listening && acct == UdpPortStatus::Listening {
+        return Ok(());
+    }
+
+    bail!(
+        "EAP scenarios require FreeRADIUS to be listening on UDP {RADIUS_AUTH_PORT}/{RADIUS_ACCT_PORT}; auth={} acct={}",
+        auth.label(),
+        acct.label()
+    )
+}
+
 pub fn scenario_matrix_lane_label(scenario: &Scenario) -> &'static str {
     if matrix_secondary_lane_candidate(scenario) {
         "secondary-candidate"
@@ -1234,6 +1327,9 @@ fn print_help() {
     println!("  matrix --jobs uses at most two lanes; secondary lane is limited to scenarios marked matrix_lane=secondary-candidate");
     println!("  companion <doctor|setup|build|flash|command>");
     println!("  env {SKIP_UNCHANGED_FLASH_ENV}=1 skips unchanged ESP8266 images after a known harness flash");
+    println!("  env {FAIL_IF_FLASH_CHANGED_ENV}=1 aborts instead of writing when the flash image is not already cached");
+    println!("  env {EAP_DIAGNOSTICS_ENV}=0 disables best-effort router/RADIUS capture for EAP scenarios");
+    println!("  env {EAP_CAPTURE_IFACE_ENV}=IFACE selects the EAP tcpdump interface (default {DEFAULT_EAP_CAPTURE_IFACE})");
 }
 
 fn list(format: OutputFormat) -> Result<()> {
@@ -1360,6 +1456,15 @@ fn doctor() -> Result<()> {
         );
         println!(
             "router default: {DEFAULT_ROUTER_USER}@{DEFAULT_ROUTER_HOST} hostapd_iface={DEFAULT_ROUTER_HOSTAPD_IFACE}"
+        );
+        let (radius_auth, radius_acct) = radius_port_statuses();
+        println!(
+            "radius auth UDP {RADIUS_AUTH_PORT}: {}",
+            radius_auth.label()
+        );
+        println!(
+            "radius acct UDP {RADIUS_ACCT_PORT}: {}",
+            radius_acct.label()
         );
         println!(
             "flash skip unchanged: {} ({SKIP_UNCHANGED_FLASH_ENV})",
@@ -1663,7 +1768,12 @@ fn matrix_secondary_lane_candidate(scenario: &Scenario) -> bool {
 fn scenario_uses_router(name: &str) -> bool {
     matches!(
         name,
-        "eap_sta_assoc" | "eap_wrong_password" | "wps" | "wps_pin" | "smartconfig"
+        "eap_sta_assoc"
+            | "eap_wrong_password"
+            | "eap_client_cert"
+            | "wps"
+            | "wps_pin"
+            | "smartconfig"
     )
 }
 
@@ -1781,6 +1891,13 @@ fn run_scenario_with_root(
         }
     }
 
+    if scenario_requires_radius(scenario.name) {
+        ensure_radius_listener()?;
+    }
+    if scenario.name == "eap_client_cert" {
+        ensure_eap_client_cert_radius_listener()?;
+    }
+
     if matches!(scenario.name, "wps" | "wps_pin") {
         return run_wps_router_scenario(scenario, root, serial_port);
     }
@@ -1811,8 +1928,9 @@ fn run_scenario_with_root(
             build_example(&run_dir, example, scenario, &build_env)?;
             let images = elf2image(&run_dir, example, scenario)?;
             flash_images(&run_dir, &images, serial_port)?;
+            let mut eap_diagnostics = start_eap_diagnostics(&run_dir, scenario)?;
 
-            match scenario.runtime {
+            let runtime_result = match scenario.runtime {
                 RuntimePlan::UartWatch {
                     timeout,
                     success_markers,
@@ -1901,7 +2019,13 @@ fn run_scenario_with_root(
                     scenario.name
                 ),
                 RuntimePlan::Pending => bail!("scenario `{}` has no runtime plan", scenario.name),
+            };
+
+            if let Some(diagnostics) = eap_diagnostics.as_mut() {
+                diagnostics.finish(&run_dir, runtime_result.is_ok())?;
             }
+
+            runtime_result
         })()
     };
 
@@ -2215,6 +2339,270 @@ fn router_run_with_rig(
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+struct EapDiagnostics {
+    router: Option<RouterRig>,
+    tcpdump: Option<Child>,
+}
+
+impl EapDiagnostics {
+    fn finish(&mut self, run_dir: &Path, scenario_passed: bool) -> Result<()> {
+        record_eap_diagnostic_note(
+            run_dir,
+            &format!(
+                "runtime_result={}",
+                if scenario_passed { "pass" } else { "fail" }
+            ),
+        )?;
+        stop_eap_tcpdump(run_dir, self.tcpdump.take());
+        collect_radius_listener_state_best_effort(run_dir, "eap-radius-listeners-after");
+        if let Some(router) = &self.router {
+            collect_router_eap_status_best_effort(run_dir, router, "router-eap-after");
+        }
+        Ok(())
+    }
+}
+
+fn start_eap_diagnostics(run_dir: &Path, scenario: &Scenario) -> Result<Option<EapDiagnostics>> {
+    if !scenario_requires_radius(scenario.name) {
+        return Ok(None);
+    }
+
+    if !eap_diagnostics_enabled() {
+        append_manifest_line(run_dir, "eap_diagnostics", "disabled")?;
+        record_eap_diagnostic_note(run_dir, "eap diagnostics disabled by environment")?;
+        return Ok(None);
+    }
+
+    append_manifest_line(run_dir, "eap_diagnostics", "enabled")?;
+    record_eap_diagnostic_note(run_dir, "eap diagnostics starting")?;
+    collect_radius_listener_state_best_effort(run_dir, "eap-radius-listeners-before");
+
+    let router = match RouterRig::from_env() {
+        Ok(router) => {
+            append_manifest_line(run_dir, "eap_router_host", &router.host)?;
+            append_manifest_line(run_dir, "eap_router_user", &router.user)?;
+            append_manifest_line(run_dir, "eap_router_hostapd_iface", &router.hostapd_iface)?;
+            collect_router_eap_status_best_effort(run_dir, &router, "router-eap-before");
+            Some(router)
+        }
+        Err(error) => {
+            record_eap_diagnostic_note(
+                run_dir,
+                &format!("router diagnostics unavailable: {error:#}"),
+            )?;
+            None
+        }
+    };
+
+    let router_host = router
+        .as_ref()
+        .map(|router| router.host.as_str())
+        .unwrap_or(DEFAULT_ROUTER_HOST);
+    let tcpdump = start_eap_tcpdump(run_dir, router_host);
+
+    Ok(Some(EapDiagnostics { router, tcpdump }))
+}
+
+fn record_eap_diagnostic_note(run_dir: &Path, line: &str) -> Result<()> {
+    let log_path = run_dir.join("eap-diagnostics.log");
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open {}", log_path.display()))?;
+    writeln!(log, "{line}")?;
+    Ok(())
+}
+
+fn collect_radius_listener_state_best_effort(run_dir: &Path, label: &str) {
+    if let Err(error) = collect_radius_listener_state(run_dir, label) {
+        let _ =
+            record_eap_diagnostic_note(run_dir, &format!("failed to collect {label}: {error:#}"));
+    }
+}
+
+fn collect_radius_listener_state(run_dir: &Path, label: &str) -> Result<()> {
+    let log_path = run_dir.join(format!("{label}.log"));
+    let mut log = File::create(&log_path)
+        .with_context(|| format!("failed to create {}", log_path.display()))?;
+    writeln!(log, "$ ss -lunp")?;
+
+    let output = Command::new("ss")
+        .arg("-lunp")
+        .output()
+        .context("failed to inspect UDP listeners with ss")?;
+    log.write_all(&output.stdout)?;
+    log.write_all(&output.stderr)?;
+    writeln!(log, "---radius-cmdlines")?;
+    for cmdline in active_radius_listener_cmdlines()? {
+        writeln!(log, "{}", cmdline.join(" "))?;
+    }
+
+    if !output.status.success() {
+        bail!("ss -lunp failed while collecting {label}");
+    }
+
+    Ok(())
+}
+
+fn collect_router_eap_status_best_effort(run_dir: &Path, router: &RouterRig, label: &str) {
+    if let Err(error) = collect_router_eap_status(run_dir, router, label) {
+        let _ =
+            record_eap_diagnostic_note(run_dir, &format!("failed to collect {label}: {error:#}"));
+    }
+}
+
+fn collect_router_eap_status(run_dir: &Path, router: &RouterRig, label: &str) -> Result<()> {
+    let iface = shell_quote(&router.hostapd_iface);
+    let dut_mac = shell_quote(&eap_dut_mac());
+    let script = format!(
+        r#"set +e
+iface={iface}
+dut_mac={dut_mac}
+echo "---uci"
+uci -q get wireless.default_radio0.ssid || true
+uci -q get wireless.default_radio0.encryption || true
+uci -q get wireless.default_radio0.auth_server || true
+uci -q get wireless.default_radio0.auth_port || true
+echo "---hostapd-config"
+hostapd_cli -p /var/run/hostapd -i "$iface" get_config 2>&1 || true
+echo "---hostapd-status"
+ubus -S call "hostapd.$iface" get_status 2>/dev/null || true
+echo "---recent-log"
+logread | tail -n 220 | grep -i "radius\|eap\|$dut_mac\|hostapd\|wpa" || true
+exit 0
+"#
+    );
+    router_run_with_rig(run_dir, router, label, &script).map(|_| ())
+}
+
+fn eap_dut_mac() -> String {
+    env::var("ESP8266_HAL_EAP_DUT_MAC")
+        .or_else(|_| env::var("ESP8266_HAL_WPS_DUT_MAC"))
+        .unwrap_or_else(|_| DEFAULT_WPS_DUT_MAC.to_owned())
+}
+
+fn start_eap_tcpdump(run_dir: &Path, router_host: &str) -> Option<Child> {
+    let iface = env::var(EAP_CAPTURE_IFACE_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_EAP_CAPTURE_IFACE.to_owned());
+    let log_path = run_dir.join("eap-radius-tcpdump.log");
+    let mut log = match File::create(&log_path) {
+        Ok(log) => log,
+        Err(error) => {
+            let _ = record_eap_diagnostic_note(
+                run_dir,
+                &format!("failed to create {}: {error}", log_path.display()),
+            );
+            return None;
+        }
+    };
+
+    let filter = eap_tcpdump_filter_args(router_host);
+    let mut command = Command::new("tcpdump");
+    command
+        .arg("-i")
+        .arg(&iface)
+        .arg("-nn")
+        .arg("-l")
+        .args(&filter);
+
+    let _ = writeln!(log, "$ tcpdump -i {iface} -nn -l {}", filter.join(" "));
+    let _ = append_manifest_line(run_dir, "eap_capture_iface", &iface);
+    let _ = append_manifest_line(run_dir, "eap_tcpdump_log", &log_path.display().to_string());
+    let stdout = match log.try_clone() {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            let _ = record_eap_diagnostic_note(
+                run_dir,
+                &format!("failed to clone {}: {error}", log_path.display()),
+            );
+            return None;
+        }
+    };
+    command.stdout(Stdio::from(stdout)).stderr(Stdio::from(log));
+
+    match command.spawn() {
+        Ok(child) => {
+            let _ = record_eap_diagnostic_note(run_dir, "tcpdump capture started");
+            Some(child)
+        }
+        Err(error) => {
+            let _ = record_eap_diagnostic_note(
+                run_dir,
+                &format!("failed to start tcpdump capture: {error}"),
+            );
+            None
+        }
+    }
+}
+
+fn stop_eap_tcpdump(run_dir: &Path, tcpdump: Option<Child>) {
+    let Some(mut child) = tcpdump else {
+        return;
+    };
+
+    thread::sleep(Duration::from_millis(500));
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let _ = record_eap_diagnostic_note(
+                run_dir,
+                &format!("tcpdump exited before stop: {status}"),
+            );
+        }
+        Ok(None) => {
+            if let Err(error) = child.kill() {
+                let _ = record_eap_diagnostic_note(
+                    run_dir,
+                    &format!("failed to stop tcpdump capture: {error}"),
+                );
+                return;
+            }
+            match child.wait() {
+                Ok(status) => {
+                    let _ =
+                        record_eap_diagnostic_note(run_dir, &format!("tcpdump stopped: {status}"));
+                }
+                Err(error) => {
+                    let _ = record_eap_diagnostic_note(
+                        run_dir,
+                        &format!("failed to wait for tcpdump capture: {error}"),
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            let _ = record_eap_diagnostic_note(
+                run_dir,
+                &format!("failed to poll tcpdump capture: {error}"),
+            );
+        }
+    }
+}
+
+fn eap_tcpdump_filter_args(router_host: &str) -> Vec<String> {
+    [
+        "host",
+        router_host,
+        "and",
+        "(",
+        "udp",
+        "port",
+        "1812",
+        "or",
+        "udp",
+        "port",
+        "1813",
+        "or",
+        "icmp",
+        ")",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn configure_router_wps_fixture(run_dir: &Path, fixture: &RouterWpsFixture) -> Result<()> {
@@ -4668,6 +5056,10 @@ fn build_env_prefix(
         prefix.push_str("ESP8266_HAL_EAP_CHANNEL=11 ");
     }
 
+    if scenario.name == "eap_client_cert" {
+        append_eap_client_cert_build_env(run_dir, &mut prefix)?;
+    }
+
     if scenario.name == "smartconfig" {
         for key in [
             "ESP8266_HAL_SMARTCONFIG_ENABLE_LOG",
@@ -4789,6 +5181,464 @@ fn build_env_prefix(
     Ok(prefix)
 }
 
+fn append_eap_client_cert_build_env(run_dir: &Path, prefix: &mut String) -> Result<()> {
+    let root = eap_tls_root()?;
+    let radius_config_root = validate_eap_tls_radius_fixture(run_dir, &root)?;
+    let ca_cert = eap_tls_file(EAP_CA_CERT_FILE_ENV, &root, "certs/ca.pem");
+    let client_cert = eap_tls_file(EAP_CLIENT_CERT_FILE_ENV, &root, "certs/client.pem");
+    let private_key = eap_tls_file(EAP_PRIVATE_KEY_FILE_ENV, &root, "certs/client.key");
+
+    append_manifest_line(run_dir, "eap_tls_root", &root.display().to_string())?;
+    append_manifest_line(
+        run_dir,
+        "eap_radius_config_root",
+        &radius_config_root.display().to_string(),
+    )?;
+    append_manifest_line(run_dir, "eap_ca_cert_file", &ca_cert.display().to_string())?;
+    append_manifest_line(
+        run_dir,
+        "eap_client_cert_file",
+        &client_cert.display().to_string(),
+    )?;
+    append_manifest_line(
+        run_dir,
+        "eap_private_key_file",
+        &private_key.display().to_string(),
+    )?;
+
+    prefix.push_str("ESP8266_HAL_EAP_SSID=esp8266-router-eap ");
+    prefix.push_str("ESP8266_HAL_EAP_IDENTITY=esp8266-client ");
+    prefix.push_str("ESP8266_HAL_EAP_USERNAME=esp8266-client ");
+    prefix.push_str("ESP8266_HAL_EAP_PASSWORD=unused-client-cert-password ");
+    prefix.push_str("ESP8266_HAL_EAP_CHANNEL=11 ");
+
+    if let Ok(password) = env::var("ESP8266_HAL_EAP_PRIVATE_KEY_PASSWORD") {
+        let ca_cert_nul = write_nul_terminated_pem_file(
+            run_dir,
+            "eap-ca-cert.pem.nul",
+            &ca_cert,
+            EAP_CA_CERT_FILE_ENV,
+            "eap_ca_cert_pem_nul_file",
+        )?;
+        let client_cert_nul = write_nul_terminated_pem_file(
+            run_dir,
+            "eap-client-cert.pem.nul",
+            &client_cert,
+            EAP_CLIENT_CERT_FILE_ENV,
+            "eap_client_cert_pem_nul_file",
+        )?;
+        let private_key_nul = write_nul_terminated_pem_file(
+            run_dir,
+            "eap-private-key.pem.nul",
+            &private_key,
+            EAP_PRIVATE_KEY_FILE_ENV,
+            "eap_private_key_pem_nul_file",
+        )?;
+        prefix.push_str(&shell_env_assignment(
+            EAP_CA_CERT_PEM_NUL_FILE_ENV,
+            &ca_cert_nul.display().to_string(),
+        ));
+        prefix.push(' ');
+        prefix.push_str(&shell_env_assignment(
+            EAP_CLIENT_CERT_PEM_NUL_FILE_ENV,
+            &client_cert_nul.display().to_string(),
+        ));
+        prefix.push(' ');
+        prefix.push_str(&shell_env_assignment(
+            EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV,
+            &private_key_nul.display().to_string(),
+        ));
+        prefix.push(' ');
+
+        let password_nul =
+            write_nul_terminated_text_file(run_dir, "eap-private-key-password.nul", &password)
+                .with_context(|| "failed to write EAP private key password include file")?;
+        append_manifest_line(
+            run_dir,
+            "eap_private_key_password_nul_file",
+            &password_nul.display().to_string(),
+        )?;
+        prefix.push_str(&shell_env_assignment(
+            EAP_PRIVATE_KEY_PASSWORD_NUL_FILE_ENV,
+            &password_nul.display().to_string(),
+        ));
+        prefix.push(' ');
+    } else {
+        let ca_cert_der = eap_der_file(
+            run_dir,
+            EAP_CA_CERT_DER_FILE_ENV,
+            &ca_cert,
+            EAP_CA_CERT_FILE_ENV,
+            "eap-ca-cert.der",
+            "x509",
+            "eap_ca_cert_der_file",
+        )?;
+        let client_cert_der = eap_der_file(
+            run_dir,
+            EAP_CLIENT_CERT_DER_FILE_ENV,
+            &client_cert,
+            EAP_CLIENT_CERT_FILE_ENV,
+            "eap-client-cert.der",
+            "x509",
+            "eap_client_cert_der_file",
+        )?;
+        let private_key_der = eap_der_file(
+            run_dir,
+            EAP_PRIVATE_KEY_DER_FILE_ENV,
+            &private_key,
+            EAP_PRIVATE_KEY_FILE_ENV,
+            "eap-private-key.der",
+            "pkey",
+            "eap_private_key_der_file",
+        )?;
+        prefix.push_str(&shell_env_assignment(
+            EAP_CA_CERT_DER_FILE_ENV,
+            &ca_cert_der.display().to_string(),
+        ));
+        prefix.push(' ');
+        prefix.push_str(&shell_env_assignment(
+            EAP_CLIENT_CERT_DER_FILE_ENV,
+            &client_cert_der.display().to_string(),
+        ));
+        prefix.push(' ');
+        prefix.push_str(&shell_env_assignment(
+            EAP_PRIVATE_KEY_DER_FILE_ENV,
+            &private_key_der.display().to_string(),
+        ));
+        prefix.push(' ');
+    }
+
+    Ok(())
+}
+
+fn validate_eap_tls_radius_fixture(run_dir: &Path, tls_root: &Path) -> Result<PathBuf> {
+    let radius_config_root = eap_radius_config_root(tls_root);
+    let eap_config = eap_radius_config_file(&radius_config_root).with_context(|| {
+        format!(
+            "failed to find EAP config under {}",
+            radius_config_root.display()
+        )
+    })?;
+    let default_eap = radius_default_eap_type(&eap_config)
+        .with_context(|| format!("failed to read {}", eap_config.display()))?;
+
+    append_manifest_line(
+        run_dir,
+        "eap_radius_eap_config",
+        &eap_config.display().to_string(),
+    )?;
+    append_manifest_line(run_dir, "eap_radius_default_eap_type", &default_eap)?;
+
+    if default_eap != "tls" {
+        bail!(
+            "eap_client_cert requires an EAP-TLS FreeRADIUS fixture, but {} has default_eap_type={default_eap}; set {EAP_RADIUS_CONFIG_ROOT_ENV} or {EAP_TLS_ROOT_ENV}",
+            eap_config.display()
+        );
+    }
+
+    Ok(radius_config_root)
+}
+
+fn ensure_eap_client_cert_radius_listener() -> Result<()> {
+    let tls_root = eap_tls_root()?;
+    let radius_config_root = eap_radius_config_root(&tls_root);
+    let eap_config = eap_radius_config_file(&radius_config_root)?;
+    let default_eap = radius_default_eap_type(&eap_config)?;
+    if default_eap != "tls" {
+        bail!(
+            "eap_client_cert requires an EAP-TLS FreeRADIUS fixture, but {} has default_eap_type={default_eap}; set {EAP_RADIUS_CONFIG_ROOT_ENV} or {EAP_TLS_ROOT_ENV}",
+            eap_config.display()
+        );
+    }
+    ensure_radius_listener_uses_config_root(&radius_config_root)
+}
+
+fn eap_tls_root() -> Result<PathBuf> {
+    if let Some(root) = env::var_os(EAP_TLS_ROOT_ENV) {
+        return Ok(PathBuf::from(root));
+    }
+
+    Ok(repo_root()?.join("target/eap-radius-ecdsa-tls"))
+}
+
+fn eap_radius_config_root(tls_root: &Path) -> PathBuf {
+    env::var_os(EAP_RADIUS_CONFIG_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| tls_root.join("raddb"))
+}
+
+fn eap_radius_config_file(root: &Path) -> Result<PathBuf> {
+    for relative in ["mods-enabled/eap", "mods-available/eap"] {
+        let path = root.join(relative);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    bail!(
+        "missing FreeRADIUS EAP config under {}; expected mods-enabled/eap or mods-available/eap",
+        root.display()
+    )
+}
+
+fn radius_default_eap_type(path: &Path) -> Result<String> {
+    let config = fs::read_to_string(path)?;
+    for line in config.lines() {
+        let line = line
+            .split_once('#')
+            .map_or(line, |(before, _)| before)
+            .trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "default_eap_type" {
+            return Ok(value.trim().trim_matches('"').to_owned());
+        }
+    }
+
+    bail!("missing default_eap_type in {}", path.display())
+}
+
+fn ensure_radius_listener_uses_config_root(config_root: &Path) -> Result<()> {
+    let active = active_radius_listener_cmdlines()?;
+    if active.is_empty() {
+        bail!(
+            "eap_client_cert requires an active FreeRADIUS listener using {}; no listener process was identified",
+            config_root.display()
+        );
+    }
+
+    if active
+        .iter()
+        .any(|cmdline| cmdline_uses_config_root(cmdline, config_root))
+    {
+        return Ok(());
+    }
+
+    bail!(
+        "eap_client_cert requires the active FreeRADIUS listener to use {}; active listener command lines: {}",
+        config_root.display(),
+        active
+            .iter()
+            .map(|cmdline| cmdline.join(" "))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    )
+}
+
+fn active_radius_listener_cmdlines() -> Result<Vec<Vec<String>>> {
+    let output = Command::new("ss")
+        .arg("-lunp")
+        .output()
+        .context("failed to inspect UDP listeners with ss")?;
+    if !output.status.success() {
+        bail!("ss -lunp failed while inspecting RADIUS listeners");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result = Vec::new();
+    for pid in parse_radius_listener_pids(&stdout) {
+        let path = PathBuf::from(format!("/proc/{pid}/cmdline"));
+        let Ok(cmdline) = fs::read(&path) else {
+            continue;
+        };
+        let args = parse_proc_cmdline(&cmdline);
+        if !args.is_empty() {
+            result.push(args);
+        }
+    }
+    Ok(result)
+}
+
+fn parse_radius_listener_pids(ss_output: &str) -> Vec<u32> {
+    let mut pids = Vec::new();
+    for line in ss_output.lines() {
+        if !(ss_line_has_udp_port(line, RADIUS_AUTH_PORT)
+            || ss_line_has_udp_port(line, RADIUS_ACCT_PORT))
+        {
+            continue;
+        }
+
+        let mut rest = line;
+        while let Some(index) = rest.find("pid=") {
+            rest = &rest[index + 4..];
+            let digits = rest
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>();
+            if let Ok(pid) = digits.parse::<u32>() {
+                if !pids.contains(&pid) {
+                    pids.push(pid);
+                }
+            }
+        }
+    }
+    pids
+}
+
+fn ss_line_has_udp_port(line: &str, port: u16) -> bool {
+    line.split_whitespace().any(|field| {
+        field
+            .rsplit_once(':')
+            .is_some_and(|(_, value)| value == port.to_string())
+    })
+}
+
+fn parse_proc_cmdline(bytes: &[u8]) -> Vec<String> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| String::from_utf8(part.to_vec()).ok())
+        .collect()
+}
+
+fn cmdline_uses_config_root(cmdline: &[String], config_root: &Path) -> bool {
+    cmdline_config_roots(cmdline)
+        .iter()
+        .any(|active| paths_refer_to_same_file(active, config_root))
+}
+
+fn cmdline_config_roots(cmdline: &[String]) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut args = cmdline.iter();
+    while let Some(arg) = args.next() {
+        if arg == "-d" {
+            if let Some(path) = args.next() {
+                roots.push(PathBuf::from(path));
+            }
+        } else if let Some(path) = arg.strip_prefix("-d") {
+            if !path.is_empty() {
+                roots.push(PathBuf::from(path));
+            }
+        }
+    }
+    roots
+}
+
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn eap_tls_file(env_key: &str, root: &Path, relative: &str) -> PathBuf {
+    env::var_os(env_key)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(relative))
+}
+
+fn read_pem_file(path: &Path, env_key: &str) -> Result<String> {
+    let pem = fs::read_to_string(path)
+        .with_context(|| format!("failed to read {env_key} PEM file {}", path.display()))?;
+    if !pem.contains("-----BEGIN ") || !pem.contains("-----END ") {
+        bail!("{env_key} file {} does not look like PEM", path.display());
+    }
+    Ok(pem)
+}
+
+fn write_nul_terminated_pem_file(
+    run_dir: &Path,
+    file_name: &str,
+    source: &Path,
+    env_key: &str,
+    manifest_key: &str,
+) -> Result<PathBuf> {
+    let pem = read_pem_file(source, env_key)?;
+    let path = write_nul_terminated_text_file(run_dir, file_name, &pem)?;
+    append_manifest_line(run_dir, manifest_key, &path.display().to_string())?;
+    Ok(path)
+}
+
+fn eap_der_file(
+    run_dir: &Path,
+    der_env_key: &str,
+    pem_source: &Path,
+    pem_env_key: &str,
+    file_name: &str,
+    openssl_subcommand: &str,
+    manifest_key: &str,
+) -> Result<PathBuf> {
+    if let Some(path) = env::var_os(der_env_key).map(PathBuf::from) {
+        validate_der_file(&path, der_env_key)?;
+        append_manifest_line(run_dir, manifest_key, &path.display().to_string())?;
+        return Ok(path);
+    }
+
+    let _ = read_pem_file(pem_source, pem_env_key)?;
+    let path = run_dir.join(file_name);
+    convert_pem_to_der(run_dir, openssl_subcommand, pem_source, &path)?;
+    validate_der_file(&path, der_env_key)?;
+    append_manifest_line(run_dir, manifest_key, &path.display().to_string())?;
+    Ok(path)
+}
+
+fn convert_pem_to_der(
+    run_dir: &Path,
+    openssl_subcommand: &str,
+    pem_source: &Path,
+    der_path: &Path,
+) -> Result<()> {
+    let log_path = run_dir.join("eap-der-conversion.log");
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open {}", log_path.display()))?;
+    writeln!(
+        log,
+        "$ openssl {openssl_subcommand} -in {} -outform DER -out {}",
+        pem_source.display(),
+        der_path.display()
+    )?;
+
+    let output = Command::new("openssl")
+        .arg(openssl_subcommand)
+        .arg("-in")
+        .arg(pem_source)
+        .arg("-outform")
+        .arg("DER")
+        .arg("-out")
+        .arg(der_path)
+        .output()
+        .with_context(|| "failed to start openssl for EAP DER conversion")?;
+    log.write_all(&output.stdout)?;
+    log.write_all(&output.stderr)?;
+
+    if !output.status.success() {
+        bail!(
+            "openssl {openssl_subcommand} failed while converting {} to DER; see {}",
+            pem_source.display(),
+            log_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_der_file(path: &Path, env_key: &str) -> Result<()> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read {env_key} DER file {}", path.display()))?;
+    if bytes.first() != Some(&0x30) {
+        bail!(
+            "{env_key} file {} does not look like ASN.1 DER",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn write_nul_terminated_text_file(run_dir: &Path, file_name: &str, text: &str) -> Result<PathBuf> {
+    let path = run_dir.join(file_name);
+    let mut bytes = text.as_bytes().to_vec();
+    if bytes.last() != Some(&0) {
+        bytes.push(0);
+    }
+    fs::write(&path, &bytes)
+        .with_context(|| format!("failed to write NUL-terminated file {}", path.display()))?;
+    Ok(path)
+}
+
 fn shell_env_assignment(key: &str, value: &str) -> String {
     let escaped = value.replace('\'', "'\"'\"'");
     format!("{key}='{escaped}'")
@@ -4885,6 +5735,19 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_flag_default(name: &str, default: bool) -> bool {
+    match env::var(name).ok().as_deref() {
+        Some("1" | "true" | "yes" | "on") => true,
+        Some("0" | "false" | "no" | "off") => false,
+        Some(_) => default,
+        None => default,
+    }
+}
+
+fn eap_diagnostics_enabled() -> bool {
+    env_flag_default(EAP_DIAGNOSTICS_ENV, true)
+}
+
 fn flash_skip_status_from_value(value: Option<&str>) -> &'static str {
     match value {
         Some("1" | "true" | "yes" | "on") => "enabled",
@@ -4907,6 +5770,10 @@ fn path_presence(path: &Path) -> &'static str {
 
 fn skip_unchanged_flash_enabled() -> bool {
     env_flag(SKIP_UNCHANGED_FLASH_ENV)
+}
+
+fn fail_if_flash_changed_enabled() -> bool {
+    env_flag(FAIL_IF_FLASH_CHANGED_ENV)
 }
 
 fn flash_images_fingerprint(images: &[FlashImage]) -> Result<String> {
@@ -4988,13 +5855,16 @@ fn flash_images(run_dir: &Path, images: &[FlashImage], serial_port: &Path) -> Re
 
     let fingerprint = flash_images_fingerprint(images)?;
     let skip_enabled = skip_unchanged_flash_enabled();
+    let fail_if_changed = fail_if_flash_changed_enabled();
     let cache_path = flash_cache_path(serial_port)?;
+    let cached_fingerprint = read_flash_cache(&cache_path)?;
     writeln!(log, "image_fingerprint={fingerprint}")?;
     writeln!(log, "skip_unchanged_flash={skip_enabled}")?;
+    writeln!(log, "fail_if_flash_changed={fail_if_changed}")?;
     writeln!(log, "cache_path={}", cache_path.display())?;
     append_manifest_line(run_dir, "flash_image_fingerprint", &fingerprint)?;
 
-    if skip_enabled && read_flash_cache(&cache_path)?.as_deref() == Some(fingerprint.as_str()) {
+    if skip_enabled && cached_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         writeln!(log, "flash_action=skipped-unchanged")?;
         append_manifest_line(run_dir, "flash_action", "skipped-unchanged")?;
         eprintln!(
@@ -5002,6 +5872,17 @@ fn flash_images(run_dir: &Path, images: &[FlashImage], serial_port: &Path) -> Re
             serial_port.display()
         );
         return Ok(());
+    }
+
+    if fail_if_changed {
+        let cached = cached_fingerprint.as_deref().unwrap_or("<missing>");
+        writeln!(log, "flash_action=blocked-changed")?;
+        writeln!(log, "cached_fingerprint={cached}")?;
+        append_manifest_line(run_dir, "flash_action", "blocked-changed")?;
+        bail!(
+            "flash image fingerprint changed for {}; cached={cached} current={fingerprint}; unset {FAIL_IF_FLASH_CHANGED_ENV} to write",
+            serial_port.display()
+        );
     }
 
     let esptool = esptool_command();
@@ -5793,18 +6674,28 @@ fn repo_root() -> Result<PathBuf> {
 mod tests {
     use std::{
         fs,
+        net::{Ipv4Addr, SocketAddrV4, UdpSocket},
         path::{Path, PathBuf},
+        sync::Mutex,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        bounded_companion_command_timeout, command_field, flash_cache_key,
-        flash_images_fingerprint, flash_skip_status_from_value, focused_run_attempt_limit,
-        matrix_secondary_lane_candidate, parse_matrix_options, partition_matrix_lanes,
-        path_presence, promisc_raw_kind, scenario_by_name, scenario_matrix_lane_label,
+        bounded_companion_command_timeout, build_env_prefix, command_field,
+        eap_tcpdump_filter_args, env_flag_default, flash_cache_key, flash_images_fingerprint,
+        flash_skip_status_from_value, focused_run_attempt_limit, matrix_secondary_lane_candidate,
+        parse_matrix_options, parse_proc_cmdline, parse_radius_listener_pids,
+        partition_matrix_lanes, path_presence, promisc_raw_kind, radius_default_eap_type,
+        scenario_by_name, scenario_matrix_lane_label, scenario_requires_radius,
         scenario_resource_labels, scenario_uses_companion_resource, scenario_uses_router,
-        wrong_channel_hint, FlashImage, WpsRouterMode, DEFAULT_MATRIX_ATTEMPTS,
+        ss_line_has_udp_port, udp_port_status, wrong_channel_hint, FlashImage, UdpPortStatus,
+        WpsRouterMode, DEFAULT_MATRIX_ATTEMPTS, EAP_CA_CERT_DER_FILE_ENV, EAP_CA_CERT_FILE_ENV,
+        EAP_CA_CERT_PEM_NUL_FILE_ENV, EAP_CLIENT_CERT_DER_FILE_ENV, EAP_CLIENT_CERT_FILE_ENV,
+        EAP_CLIENT_CERT_PEM_NUL_FILE_ENV, EAP_PRIVATE_KEY_DER_FILE_ENV, EAP_PRIVATE_KEY_FILE_ENV,
+        EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV, EAP_RADIUS_CONFIG_ROOT_ENV, EAP_TLS_ROOT_ENV,
     };
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_test_dir(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -5932,6 +6823,140 @@ mod tests {
     }
 
     #[test]
+    fn udp_port_status_reports_bound_loopback_socket() {
+        let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .expect("failed to bind loopback UDP socket");
+        let port = socket.local_addr().expect("missing local addr").port();
+
+        assert_eq!(
+            udp_port_status(Ipv4Addr::LOCALHOST, port),
+            UdpPortStatus::Listening
+        );
+
+        drop(socket);
+        assert_eq!(
+            udp_port_status(Ipv4Addr::LOCALHOST, port),
+            UdpPortStatus::Free
+        );
+    }
+
+    #[test]
+    fn eap_scenarios_require_radius_preflight() {
+        assert!(scenario_requires_radius("eap_sta_assoc"));
+        assert!(scenario_requires_radius("eap_wrong_password"));
+        assert!(scenario_requires_radius("eap_client_cert"));
+        assert!(!scenario_requires_radius("sta_connect"));
+        assert!(!scenario_requires_radius("wps"));
+    }
+
+    #[test]
+    fn radius_listener_pid_parser_extracts_unique_radius_pids() {
+        let output = r#"
+udp UNCONN 0 0 0.0.0.0:1812 0.0.0.0:* users:(("freeradius",pid=1234,fd=8))
+udp UNCONN 0 0 0.0.0.0:1813 0.0.0.0:* users:(("freeradius",pid=1234,fd=9))
+udp UNCONN 0 0 127.0.0.1:18120 0.0.0.0:* users:(("other",pid=5678,fd=7))
+udp UNCONN 0 0 0.0.0.0:9999 0.0.0.0:* users:(("other",pid=42,fd=3))
+"#;
+
+        assert_eq!(parse_radius_listener_pids(output), vec![1234]);
+    }
+
+    #[test]
+    fn ss_udp_port_matcher_uses_exact_ports() {
+        assert!(ss_line_has_udp_port(
+            r#"udp UNCONN 0 0 [::]:1812 [::]:* users:(("freeradius",pid=1234,fd=10))"#,
+            1812
+        ));
+        assert!(!ss_line_has_udp_port(
+            r#"udp UNCONN 0 0 127.0.0.1:18120 0.0.0.0:* users:(("freeradius",pid=1234,fd=7))"#,
+            1812
+        ));
+    }
+
+    #[test]
+    fn proc_cmdline_parser_splits_nul_separated_args() {
+        let args = parse_proc_cmdline(b"freeradius\0-f\0-d\0target/eap/raddb\0");
+
+        assert_eq!(
+            args,
+            ["freeradius", "-f", "-d", "target/eap/raddb"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn env_flag_default_honors_explicit_boolean_values() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+        const NAME: &str = "ESP8266_HAL_XTASK_TEST_FLAG_DEFAULT";
+        let previous = std::env::var_os(NAME);
+
+        std::env::remove_var(NAME);
+        assert!(env_flag_default(NAME, true));
+        assert!(!env_flag_default(NAME, false));
+
+        std::env::set_var(NAME, "0");
+        assert!(!env_flag_default(NAME, true));
+        std::env::set_var(NAME, "off");
+        assert!(!env_flag_default(NAME, true));
+        std::env::set_var(NAME, "1");
+        assert!(env_flag_default(NAME, false));
+        std::env::set_var(NAME, "yes");
+        assert!(env_flag_default(NAME, false));
+        std::env::set_var(NAME, "unexpected");
+        assert!(env_flag_default(NAME, true));
+        assert!(!env_flag_default(NAME, false));
+
+        if let Some(previous) = previous {
+            std::env::set_var(NAME, previous);
+        } else {
+            std::env::remove_var(NAME);
+        }
+    }
+
+    #[test]
+    fn eap_tcpdump_filter_tracks_router_radius_and_icmp() {
+        assert_eq!(
+            eap_tcpdump_filter_args("10.42.0.131"),
+            [
+                "host",
+                "10.42.0.131",
+                "and",
+                "(",
+                "udp",
+                "port",
+                "1812",
+                "or",
+                "udp",
+                "port",
+                "1813",
+                "or",
+                "icmp",
+                ")"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn radius_default_eap_type_parses_unquoted_and_quoted_values() {
+        let dir = unique_test_dir("radius-default-eap-type");
+        let config = dir.join("eap");
+
+        fs::write(&config, "  default_eap_type = tls # fixture\n")
+            .expect("failed to write eap config");
+        assert_eq!(radius_default_eap_type(&config).unwrap(), "tls");
+
+        fs::write(&config, "default_eap_type = \"peap\"\n").expect("failed to rewrite eap config");
+        assert_eq!(radius_default_eap_type(&config).unwrap(), "peap");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn focused_wps_runs_retry_the_router_armed_scenario() {
         let wps = scenario_by_name("wps").expect("wps scenario");
         let wps_pin = scenario_by_name("wps_pin").expect("wps pin scenario");
@@ -6030,6 +7055,7 @@ mod tests {
     fn parallel_matrix_resource_classification_tracks_shared_fixtures() {
         assert!(scenario_uses_router("eap_sta_assoc"));
         assert!(scenario_uses_router("eap_wrong_password"));
+        assert!(scenario_uses_router("eap_client_cert"));
         assert!(scenario_uses_router("wps"));
         assert!(scenario_uses_router("smartconfig"));
         assert!(!scenario_uses_router("sta_connect"));
@@ -6054,11 +7080,152 @@ mod tests {
         assert_eq!(scenario_matrix_lane_label(eap), "secondary-candidate");
         assert_eq!(scenario_resource_labels(eap), ["router"]);
 
+        let eap_client_cert =
+            scenario_by_name("eap_client_cert").expect("eap client-cert scenario");
+        assert_eq!(scenario_matrix_lane_label(eap_client_cert), "primary");
+        assert_eq!(scenario_resource_labels(eap_client_cert), ["router"]);
+
         assert_eq!(scenario_matrix_lane_label(sta_connect), "primary");
         assert_eq!(scenario_resource_labels(sta_connect), ["esp32-companion"]);
 
         assert_eq!(scenario_matrix_lane_label(esp_now), "primary");
         assert_eq!(scenario_resource_labels(esp_now), ["esp32-companion"]);
+    }
+
+    #[test]
+    fn eap_client_cert_build_env_embeds_fixture_der_material() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let previous_root = std::env::var_os(EAP_TLS_ROOT_ENV);
+        let previous_ca = std::env::var_os(EAP_CA_CERT_FILE_ENV);
+        let previous_client = std::env::var_os(EAP_CLIENT_CERT_FILE_ENV);
+        let previous_key = std::env::var_os(EAP_PRIVATE_KEY_FILE_ENV);
+        let previous_radius = std::env::var_os(EAP_RADIUS_CONFIG_ROOT_ENV);
+        let previous_ca_nul = std::env::var_os(EAP_CA_CERT_PEM_NUL_FILE_ENV);
+        let previous_client_nul = std::env::var_os(EAP_CLIENT_CERT_PEM_NUL_FILE_ENV);
+        let previous_key_nul = std::env::var_os(EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV);
+        let previous_ca_der = std::env::var_os(EAP_CA_CERT_DER_FILE_ENV);
+        let previous_client_der = std::env::var_os(EAP_CLIENT_CERT_DER_FILE_ENV);
+        let previous_key_der = std::env::var_os(EAP_PRIVATE_KEY_DER_FILE_ENV);
+
+        let root = unique_test_dir("eap-client-cert");
+        let certs = root.join("certs");
+        fs::create_dir_all(&certs).expect("failed to create certs dir");
+        let raddb = root.join("raddb/mods-enabled");
+        fs::create_dir_all(&raddb).expect("failed to create raddb dir");
+        fs::write(raddb.join("eap"), "default_eap_type = tls\n")
+            .expect("failed to write eap config");
+        fs::write(
+            certs.join("ca.pem"),
+            "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n",
+        )
+        .expect("failed to write ca");
+        fs::write(
+            certs.join("client.pem"),
+            "-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n",
+        )
+        .expect("failed to write client cert");
+        fs::write(
+            certs.join("client.key"),
+            "-----BEGIN EC PRIVATE KEY-----\nkey\n-----END EC PRIVATE KEY-----\n",
+        )
+        .expect("failed to write client key");
+        let ca_der = certs.join("ca.der");
+        let client_der = certs.join("client.der");
+        let key_der = certs.join("client.key.der");
+        fs::write(&ca_der, b"\x30\x03ca").expect("failed to write ca DER");
+        fs::write(&client_der, b"\x30\x07client").expect("failed to write client DER");
+        fs::write(&key_der, b"\x30\x03key").expect("failed to write key DER");
+
+        std::env::set_var(EAP_TLS_ROOT_ENV, &root);
+        std::env::remove_var(EAP_CA_CERT_FILE_ENV);
+        std::env::remove_var(EAP_CLIENT_CERT_FILE_ENV);
+        std::env::remove_var(EAP_PRIVATE_KEY_FILE_ENV);
+        std::env::remove_var(EAP_RADIUS_CONFIG_ROOT_ENV);
+        std::env::remove_var(EAP_CA_CERT_PEM_NUL_FILE_ENV);
+        std::env::remove_var(EAP_CLIENT_CERT_PEM_NUL_FILE_ENV);
+        std::env::remove_var(EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV);
+        std::env::set_var(EAP_CA_CERT_DER_FILE_ENV, &ca_der);
+        std::env::set_var(EAP_CLIENT_CERT_DER_FILE_ENV, &client_der);
+        std::env::set_var(EAP_PRIVATE_KEY_DER_FILE_ENV, &key_der);
+        let run_dir = unique_test_dir("eap-client-cert-run");
+        fs::write(run_dir.join("manifest.txt"), "").expect("failed to write manifest");
+        let scenario = scenario_by_name("eap_client_cert").expect("eap client cert scenario");
+        let prefix = build_env_prefix(&run_dir, scenario, &[]).expect("build env");
+
+        assert!(prefix.contains("ESP8266_HAL_EAP_IDENTITY=esp8266-client"));
+        assert!(prefix.contains("ESP8266_HAL_EAP_CA_CERT_DER_FILE='"));
+        assert!(prefix.contains("ESP8266_HAL_EAP_CLIENT_CERT_DER_FILE='"));
+        assert!(prefix.contains("ESP8266_HAL_EAP_PRIVATE_KEY_DER_FILE='"));
+
+        assert!(prefix.contains(&ca_der.display().to_string()));
+        assert!(prefix.contains(&client_der.display().to_string()));
+        assert!(prefix.contains(&key_der.display().to_string()));
+
+        let manifest = fs::read_to_string(run_dir.join("manifest.txt")).expect("manifest");
+        assert!(manifest.contains("eap_tls_root="));
+        assert!(manifest.contains("eap_radius_default_eap_type=tls"));
+        assert!(manifest.contains("eap_client_cert_file="));
+        assert!(manifest.contains("eap_ca_cert_der_file="));
+        assert!(manifest.contains("eap_client_cert_der_file="));
+        assert!(manifest.contains("eap_private_key_der_file="));
+
+        if let Some(previous_root) = previous_root {
+            std::env::set_var(EAP_TLS_ROOT_ENV, previous_root);
+        } else {
+            std::env::remove_var(EAP_TLS_ROOT_ENV);
+        }
+        if let Some(previous_ca) = previous_ca {
+            std::env::set_var(EAP_CA_CERT_FILE_ENV, previous_ca);
+        } else {
+            std::env::remove_var(EAP_CA_CERT_FILE_ENV);
+        }
+        if let Some(previous_client) = previous_client {
+            std::env::set_var(EAP_CLIENT_CERT_FILE_ENV, previous_client);
+        } else {
+            std::env::remove_var(EAP_CLIENT_CERT_FILE_ENV);
+        }
+        if let Some(previous_key) = previous_key {
+            std::env::set_var(EAP_PRIVATE_KEY_FILE_ENV, previous_key);
+        } else {
+            std::env::remove_var(EAP_PRIVATE_KEY_FILE_ENV);
+        }
+        if let Some(previous_radius) = previous_radius {
+            std::env::set_var(EAP_RADIUS_CONFIG_ROOT_ENV, previous_radius);
+        } else {
+            std::env::remove_var(EAP_RADIUS_CONFIG_ROOT_ENV);
+        }
+        if let Some(previous_ca_nul) = previous_ca_nul {
+            std::env::set_var(EAP_CA_CERT_PEM_NUL_FILE_ENV, previous_ca_nul);
+        } else {
+            std::env::remove_var(EAP_CA_CERT_PEM_NUL_FILE_ENV);
+        }
+        if let Some(previous_client_nul) = previous_client_nul {
+            std::env::set_var(EAP_CLIENT_CERT_PEM_NUL_FILE_ENV, previous_client_nul);
+        } else {
+            std::env::remove_var(EAP_CLIENT_CERT_PEM_NUL_FILE_ENV);
+        }
+        if let Some(previous_key_nul) = previous_key_nul {
+            std::env::set_var(EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV, previous_key_nul);
+        } else {
+            std::env::remove_var(EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV);
+        }
+        if let Some(previous_ca_der) = previous_ca_der {
+            std::env::set_var(EAP_CA_CERT_DER_FILE_ENV, previous_ca_der);
+        } else {
+            std::env::remove_var(EAP_CA_CERT_DER_FILE_ENV);
+        }
+        if let Some(previous_client_der) = previous_client_der {
+            std::env::set_var(EAP_CLIENT_CERT_DER_FILE_ENV, previous_client_der);
+        } else {
+            std::env::remove_var(EAP_CLIENT_CERT_DER_FILE_ENV);
+        }
+        if let Some(previous_key_der) = previous_key_der {
+            std::env::set_var(EAP_PRIVATE_KEY_DER_FILE_ENV, previous_key_der);
+        } else {
+            std::env::remove_var(EAP_PRIVATE_KEY_DER_FILE_ENV);
+        }
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(run_dir);
     }
 
     #[test]

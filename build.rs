@@ -10,6 +10,13 @@ const SMARTCONFIG_WIFI_TRACE_ENV: &str = "ESP8266_HAL_SMARTCONFIG_WIFI_TRACE";
 const SMARTCONFIG_RX_TRACE_ENV: &str = "ESP8266_HAL_SMARTCONFIG_RX_TRACE";
 const SMARTCONFIG_RX_DIAG_ENV: &str = "ESP8266_HAL_SMARTCONFIG_RX_DIAG";
 const WIFI_START_TRACE_ENV: &str = "ESP8266_HAL_WIFI_START_TRACE";
+const EAP_CA_CERT_PEM_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_CA_CERT_PEM_NUL_FILE";
+const EAP_CLIENT_CERT_PEM_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_CLIENT_CERT_PEM_NUL_FILE";
+const EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_PEM_NUL_FILE";
+const EAP_PRIVATE_KEY_PASSWORD_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_PASSWORD_NUL_FILE";
+const EAP_CA_CERT_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_CA_CERT_DER_FILE";
+const EAP_CLIENT_CERT_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_CLIENT_CERT_DER_FILE";
+const EAP_PRIVATE_KEY_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_DER_FILE";
 const DEFAULT_IROM_ORIGIN: u32 = 0x4021_0000;
 const IROM_FLASH_BASE: u32 = 0x4020_0000;
 
@@ -19,6 +26,13 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(esp8266_hal_smartconfig_wifi_trace)");
     println!("cargo:rustc-check-cfg=cfg(esp8266_hal_smartconfig_rx_trace)");
     println!("cargo:rustc-check-cfg=cfg(esp8266_hal_wifi_start_trace)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_ca_cert_pem_nul_file)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_client_cert_pem_nul_file)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_private_key_pem_nul_file)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_private_key_password_nul_file)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_ca_cert_der_file)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_client_cert_der_file)");
+    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_private_key_der_file)");
 
     // Put the linker script somewhere the linker can find it
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
@@ -44,6 +58,28 @@ fn main() {
         .unwrap();
 
     println!("cargo:rustc-link-search={}", out.display());
+
+    if env::var_os(EAP_CA_CERT_PEM_NUL_FILE_ENV).is_some() {
+        println!("cargo:rustc-cfg=esp8266_hal_eap_ca_cert_pem_nul_file");
+    }
+    if env::var_os(EAP_CLIENT_CERT_PEM_NUL_FILE_ENV).is_some() {
+        println!("cargo:rustc-cfg=esp8266_hal_eap_client_cert_pem_nul_file");
+    }
+    if env::var_os(EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV).is_some() {
+        println!("cargo:rustc-cfg=esp8266_hal_eap_private_key_pem_nul_file");
+    }
+    if env::var_os(EAP_PRIVATE_KEY_PASSWORD_NUL_FILE_ENV).is_some() {
+        println!("cargo:rustc-cfg=esp8266_hal_eap_private_key_password_nul_file");
+    }
+    if env::var_os(EAP_CA_CERT_DER_FILE_ENV).is_some() {
+        println!("cargo:rustc-cfg=esp8266_hal_eap_ca_cert_der_file");
+    }
+    if env::var_os(EAP_CLIENT_CERT_DER_FILE_ENV).is_some() {
+        println!("cargo:rustc-cfg=esp8266_hal_eap_client_cert_der_file");
+    }
+    if env::var_os(EAP_PRIVATE_KEY_DER_FILE_ENV).is_some() {
+        println!("cargo:rustc-cfg=esp8266_hal_eap_private_key_der_file");
+    }
 
     if env::var_os("CARGO_FEATURE_WIFI").is_some() {
         // Only functional wraps — NO tracing wrappers.
@@ -160,6 +196,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed={SMARTCONFIG_RX_TRACE_ENV}");
     println!("cargo:rerun-if-env-changed={SMARTCONFIG_RX_DIAG_ENV}");
     println!("cargo:rerun-if-env-changed={WIFI_START_TRACE_ENV}");
+    println!("cargo:rerun-if-env-changed={EAP_CA_CERT_PEM_NUL_FILE_ENV}");
+    println!("cargo:rerun-if-env-changed={EAP_CLIENT_CERT_PEM_NUL_FILE_ENV}");
+    println!("cargo:rerun-if-env-changed={EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV}");
+    println!("cargo:rerun-if-env-changed={EAP_PRIVATE_KEY_PASSWORD_NUL_FILE_ENV}");
+    println!("cargo:rerun-if-env-changed={EAP_CA_CERT_DER_FILE_ENV}");
+    println!("cargo:rerun-if-env-changed={EAP_CLIENT_CERT_DER_FILE_ENV}");
+    println!("cargo:rerun-if-env-changed={EAP_PRIVATE_KEY_DER_FILE_ENV}");
 }
 
 fn alias_x() -> &'static str {

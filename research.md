@@ -3100,3 +3100,597 @@
   - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw --help | rg 'matrix|ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH|secondary'`: showed the new secondary-lane help line and the flash-skip environment variable;
   - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list | rg 'eap_|wps|smartconfig|promisc_control_filters'`: showed `eap_sta_assoc` and `eap_wrong_password` as `matrix_lane=secondary-candidate resources=router`, WPS as primary router scenarios, SmartConfig as `resources=router,esp32-companion`, and promiscuous control capture as `resources=esp32-companion`;
   - `cargo fmt --all -- --check && git diff --check`: passed.
+
+### 2026-06-19 Host-Only Matrix Dry-Run Planning
+
+- Scope and cadence:
+  - host-only matrix planning pass under the reduced-flash workflow;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to make long matrix runs previewable before touching flash and to expose the exact two-ESP8266 lane split.
+- Harness changes:
+  - added `wifi-hw matrix --dry-run`;
+  - dry-run output prints artifact root, job count, primary serial, companion serial, optional secondary serial, per-lane scenario counts, and each scenario's runtime, matrix lane, and shared fixture resources;
+  - reused the same lane-partition helper for dry-run output and the actual parallel matrix scheduler so the preview stays aligned with execution;
+  - added host tests for `--dry-run` parsing and the current lane partition.
+- Fast validation:
+  - `cargo fmt --all && cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `22`, `5`, and `35` tests in the non-empty xtask test binaries;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw matrix --dry-run --jobs 2 --secondary-serial-port /dev/ttyUSB1 | sed -n '1,28p'`: showed repo-local artifact root, `/dev/ttyUSB0` as primary, `/dev/ttyACM0` as companion, `/dev/ttyUSB1` as secondary, and `primary_scenario_count=36`;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw matrix --dry-run --jobs 2 --secondary-serial-port /dev/ttyUSB1 | tail -n 8`: showed `secondary_scenario_count=2` and only `eap_sta_assoc` plus `eap_wrong_password` on the secondary lane with `resources=router`;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw --help | rg 'matrix|dry-run|secondary|ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH'`: showed the new `--dry-run` usage and existing secondary-lane/flash-skip guidance;
+  - `cargo fmt --all -- --check && git diff --check`: passed.
+
+### 2026-06-19 Host-Only WPA2 Enterprise Certificate-Path Tracking
+
+- Scope and cadence:
+  - host-only Enterprise API/example accuracy pass under the reduced-flash workflow;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix;
+  - goal was to keep the validated PEAP username/password path distinct from the optional CA/client-certificate path that still needs an EAP-TLS-capable hardware fixture.
+- Example and harness changes:
+  - `examples/wifi_eap.rs` now accepts compile-time PEM strings through `ESP8266_HAL_EAP_CA_CERT_PEM`, `ESP8266_HAL_EAP_CLIENT_CERT_PEM`, `ESP8266_HAL_EAP_PRIVATE_KEY_PEM`, and optional `ESP8266_HAL_EAP_PRIVATE_KEY_PASSWORD`;
+  - the example configures `Wpa2EnterpriseCredentials::with_ca_cert()` and `with_client_certificate()` when those PEM env vars are present, and logs whether CA/client cert material was configured;
+  - `ESP8266_HAL_EAP_DISABLE_TIME_CHECK=0|false|no|off` now opts the example back into supplicant certificate time checks; the default remains disabled to match the validated fixture;
+  - added `eap_client_cert` to `wifi-hw list` as `rig-blocked`, not implemented, with the explicit reason that it requires a configured EAP-TLS/RADIUS fixture and client certificate artifacts;
+  - kept only `eap_sta_assoc` and `eap_wrong_password` as implemented secondary-lane matrix candidates.
+- Fast validation:
+  - `cargo fmt --all && cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `22`, `5`, and `36` tests in the non-empty xtask test binaries;
+  - first targeted `wifi_eap` Xtensa check failed because the example matched string env values in a `const`; fixed by moving the boolean env parsing to a runtime helper;
+  - `source .envrc && CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with the known broad warning set;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw list | rg 'eap_|rig-blocked'`: showed `eap_sta_assoc` and `eap_wrong_password` implemented, plus `eap_client_cert` as `rig-blocked runtime=pending resources=router`;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw matrix --dry-run --jobs 2 --secondary-serial-port /dev/ttyUSB1 | tail -n 12`: still showed only `eap_sta_assoc` and `eap_wrong_password` on the secondary lane;
+  - `cargo fmt --all -- --check && git diff --check`: passed.
+
+### 2026-06-19 Reduced-Flash Cadence and RADIUS Preflight Hardening
+
+- User-directed test cadence adjustment:
+  - reduce ESP8266 flash wear by batching fixes and using fast host/static checks during iteration;
+  - use focused hardware runs only at meaningful milestones or for hardware-only questions;
+  - reserve full matrix runs for larger Wi-Fi behavior milestones;
+  - continue using `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1` where applicable for repeated focused hardware checks.
+- Live safety/fixture checks after the laptop restart and before host-side fixture work:
+  - `git status --short`: dirty files were `examples/wifi_eap.rs`, `research.md`, `xtask/src/wifi_hw.rs`, and `xtask/tests/wifi_hw_cli.rs`;
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - `enp3s0` was still `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` stayed connected at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping;
+  - `ss -lunpt | rg ':(1812|1813)\b|freeradius' || true`: no FreeRADIUS listener was present.
+- EAP-TLS hardware attempt reclassified:
+  - artifact `target/wifi-hw-artifacts-20260619-eap-tls-client-cert/eap_client_cert-1781864234` failed with `wifi eap connect err`, but this is not useful DUT evidence because FreeRADIUS had exited before/during the run;
+  - `target/wifi-hw-artifacts-20260619-eap-tls-client-cert/freeradius-eap-tls.stdout` and `freeradius-restore-ecdsa.stdout` both contained `radiusd: ERROR - Cannot get ID for group freerad: No error`;
+  - the copied FreeRADIUS configs in `target/eap-radius-ecdsa*/raddb/radiusd.conf` still contain `user = freerad` and `group = freerad`, so normal daemon mode fails on this laptop session when that group is unavailable.
+- Host-only fixture recovery:
+  - foreground/debug startup probe:
+    `OPENSSL_CONF=target/eap-radius-1024/openssl-lowsec.cnf LD_LIBRARY_PATH=/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/lib/freeradius timeout 3 /home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/sbin/freeradius -f -xx -D /home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/share/freeradius -d target/eap-radius-ecdsa/raddb -l stdout`: reached `Ready to process requests` and bound UDP `1812`/`1813`, then exited normally on timeout;
+  - restored the PEAP/MSCHAPv2 ECDSA/P-256 fixture detached with foreground mode as PID `1116228`, logging to `target/wifi-hw-artifacts-20260619-radius-restore/freeradius-ecdsa-foreground.log`;
+  - `ss -lunpt | rg ':(1812|1813)\b|freeradius' || true`: FreeRADIUS PID `1116228` listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`;
+  - `ps -p 1116228 -o pid,ppid,pgid,stat,cmd`: process was detached under PPID `1`, PGID `1116228`, command included `freeradius -f -xx -d target/eap-radius-ecdsa/raddb`;
+  - log tail reached `Ready to process requests`.
+- Harness changes to prevent wasted reflashes:
+  - `wifi-hw doctor` now reports RADIUS auth/acct UDP listener status for ports `1812` and `1813`;
+  - EAP scenarios now run a host-side RADIUS UDP listener preflight before build/flash;
+  - affected scenarios: `eap_sta_assoc`, `eap_wrong_password`, and opt-in `eap_client_cert`;
+  - if RADIUS is down, the harness now fails fast with `EAP scenarios require FreeRADIUS to be listening on UDP 1812/1813` instead of building/flashing a test that cannot pass.
+- Fast validation only; no ESP8266 flash, no ESP32 companion flash, no OpenWrt/router mutation, and no hardware matrix:
+  - first `cargo fmt --all && cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: failed due missing imports in the new internal tests; fixed immediately;
+  - `cargo fmt --all && cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `25`, `5`, and `36` tests in the non-empty xtask test binaries;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw doctor`: passed and printed `/dev/ttyUSB0 (present)`, `/dev/ttyACM0 (present)`, router default `root@10.42.0.131`, `radius auth UDP 1812: listening`, `radius acct UDP 1813: listening`, and flash-skip status.
+
+### 2026-06-19 EAP-TLS Live Fixture Guard
+
+- Scope and cadence:
+  - host-side Enterprise fixture hardening under the reduced-flash workflow;
+  - no ESP8266 flash, no ESP32 companion flash, no router mutation, and no hardware matrix;
+  - goal was to prevent the opt-in `eap_client_cert` path from consuming a flash cycle when the active RADIUS daemon is still the PEAP/MSCHAPv2 fixture.
+- Harness changes:
+  - `eap_client_cert` now validates the configured FreeRADIUS EAP config before build-env generation:
+    - default config root is `${ESP8266_HAL_EAP_TLS_ROOT}/raddb`;
+    - override is `ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT`;
+    - accepted config must contain `default_eap_type = tls` in `mods-enabled/eap` or `mods-available/eap`;
+    - run manifests record `eap_radius_config_root`, `eap_radius_eap_config`, and `eap_radius_default_eap_type`;
+  - before any `eap_client_cert` hardware run, xtask now inspects UDP listener PIDs from `ss -lunp`, reads `/proc/<pid>/cmdline`, and requires the active FreeRADIUS process to be running with `-d` pointing at the EAP-TLS config root;
+  - this keeps a live PEAP daemon on UDP `1812`/`1813` from being mistaken for an EAP-TLS-ready fixture.
+- Host-only negative preflight with the PEAP daemon active:
+  - command set `ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1`, `ESP8266_HAL_EAP_TLS_ROOT=target/eap-radius-ecdsa-tls`, and `ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT=target/eap-radius-ecdsa-tls/raddb`, then ran `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_client_cert`;
+  - expected result occurred before build/flash: `eap_client_cert requires the active FreeRADIUS listener to use .../target/eap-radius-ecdsa-tls/raddb`;
+  - reported active command line was the restored PEAP fixture: `freeradius ... -d /home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa/raddb -l stdout`.
+- Host-only positive-live-config preflight without build/flash:
+  - temporarily stopped the PEAP daemon, started FreeRADIUS in foreground mode against `target/eap-radius-ecdsa-tls/raddb` as PID `1120056`, and verified UDP `1812`/`1813` were bound;
+  - ran `eap_client_cert` with the EAP-TLS config active but deliberately set `ESP8266_HAL_EAP_CA_CERT_FILE` to missing `target/eap-radius-ecdsa-tls/certs/missing-ca.pem`;
+  - expected result occurred after the live-config check and before build/flash: `failed to read ESP8266_HAL_EAP_CA_CERT_FILE PEM file .../missing-ca.pem`;
+  - the restore trap restarted the PEAP/MSCHAPv2 ECDSA/P-256 fixture as PID `1120089` with `-d /home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa/raddb`;
+  - `ss -lunpt | rg ':(1812|1813)\b|freeradius' || true`: FreeRADIUS PID `1120089` listening on UDP `1812`/`1813`;
+  - `target/x86_64-unknown-linux-gnu/debug/xtask wifi-hw doctor`: passed and reported RADIUS auth/acct listening.
+- Fast validation only:
+  - `cargo fmt --all && cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `28`, `5`, and `36` tests in the non-empty xtask test binaries;
+  - added pure tests for RADIUS listener PID parsing, `/proc/<pid>/cmdline` parsing, and `default_eap_type` parsing.
+
+### 2026-06-19 Flash-Conservative Test Cadence and EAP-TLS Evidence Triage
+
+- User-directed cadence refinement:
+  - test less often during development to reduce ESP8266 flash wear;
+  - batch fixes before hardware validation;
+  - prefer fast host/unit/static checks during iteration;
+  - use focused hardware runs only at meaningful milestones or for hardware-only questions;
+  - reserve full hardware matrix runs for larger milestones;
+  - continue using `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1` for repeated focused checks when the image fingerprint is unchanged.
+- Live safety/fixture checks before log triage:
+  - `git status --short`: dirty files were `examples/wifi_eap.rs`, `research.md`, `xtask/src/wifi_hw.rs`, and `xtask/tests/wifi_hw_cli.rs`;
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS PID `1123564` was listening on UDP `1812` and `1813`;
+  - `ps -p 1123564 -o pid,ppid,pgid,stat,cmd`: restored PEAP fixture was detached under PPID `1` with `-d /home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa/raddb`;
+  - `enp3s0` was up at `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Guarded EAP-TLS/client-certificate attempt evidence:
+  - artifact root: `target/wifi-hw-artifacts-20260619-eap-tls-client-cert-guarded`;
+  - scenario dir: `target/wifi-hw-artifacts-20260619-eap-tls-client-cert-guarded/eap_client_cert-1781865322`;
+  - command path used `ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1`, `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1`, `ESP8266_HAL_EAP_TLS_ROOT=target/eap-radius-ecdsa-tls`, and `ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT=target/eap-radius-ecdsa-tls/raddb`;
+  - `manifest.txt` recorded `scenario=eap_client_cert`, `eap_radius_default_eap_type=tls`, `eap_radius_config_root=/home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa-tls/raddb`, CA/client cert/private-key file paths, and image fingerprint `03922931976e70b39daead00f4150885`;
+  - `flash.log` recorded `skip_unchanged_flash=true` and `flash_action=skipped-unchanged`, so this attempt did not add a new ESP8266 flash/erase cycle;
+  - `eap_client_cert-run.log` reported `wifi-hw: skipping unchanged flash on /dev/ttyUSB0 (03922931976e70b39daead00f4150885)`, then failed on UART marker `wifi eap connect err`;
+  - `uart.log` showed `wifi eap ca cert configured`, `wifi eap client cert configured`, `wifi eap configured`, `wifi eap started`, then repeated workspace progress with no workspace reservations and ended with `wifi eap error detail error=timeout disconnect=201` plus `wifi eap connect err`;
+  - `freeradius-eap-tls.log` showed the EAP-TLS FreeRADIUS config reached `Ready to process requests` and later exited normally when the restore trap terminated it;
+  - `rg -n "Access-Request|Connection refused|authenticated|associated|EAP|RADIUS|48:3f:da:68:e3:04" ...` found no `Access-Request` lines in the EAP-TLS FreeRADIUS log, so the failed DUT run did not produce server-side RADIUS evidence;
+  - conclusion: keep `eap_client_cert` not-green. The current evidence proves the example embeds/configures CA and client cert material and that the harness avoids stale PEAP/EAP-TLS fixture confusion, but it does not prove EAP-TLS association. Before spending another ESP8266 run, prove the router-to-laptop UDP/RADIUS path with the EAP-TLS daemon active.
+- Router log access:
+  - `ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@10.42.0.131 'logread | tail -n 160'` failed with `Permission denied (publickey,password)`;
+  - no router config was changed and no OpenWrt image was flashed in this pass.
+
+### 2026-06-19 Host-Only Router/RADIUS Path Probe
+
+- Scope:
+  - host/router-only RADIUS path proof before spending another ESP8266 run on `eap_client_cert`;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt flash, and no router config mutation.
+- Router access:
+  - repo-local router SSH key still works:
+    `ssh -i target/wifi-hw-router/id_rsa -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/esp8266-hal-openwrt-known-hosts -o StrictHostKeyChecking=no -o BatchMode=yes root@10.42.0.131 ...`;
+  - router log around the guarded EAP-TLS attempt confirmed the AP-side failure:
+    `STA 48:3f:da:68:e3:04 authenticated`, `associated`, `CTRL-EVENT-EAP-STARTED`, then repeated `recvmsg[RADIUS]: Connection refused`, followed by disassociation/deauthentication;
+  - router AP remained restored as SSID `esp8266-router-eap`, BSSID `a0:63:91:0f:e5:f0`, channel `11`, encryption `wpa2`, RADIUS host `10.42.0.1`, and port `1812`.
+- UDP probe tool:
+  - router image has BusyBox `nc`, but it is TCP-only and `/dev/udp` is not supported by `ash`;
+  - compiled a tiny static MIPS32/mipsel UDP sender under ignored `target/router-udp-probe/udp_probe` using the existing OpenWrt toolchain:
+    `/home/bogdan/Coding/Personal/openwrt-netgear/staging_dir/toolchain-mipsel_24kc_gcc-14.3.0_musl/bin/mipsel-openwrt-linux-musl-gcc -Os -s -static`;
+  - copied it to router `/tmp/udp_probe` using legacy `scp -O` because the small OpenWrt image lacks the SFTP subsystem;
+  - removed `/tmp/udp_probe` from the router after the probe.
+- Current PEAP listener path probe:
+  - with restored PEAP FreeRADIUS active, router `/tmp/udp_probe 10.42.0.1 1812 peap-listener-probe-2` reported `sent=21 host=10.42.0.1 port=1812`;
+  - laptop `tcpdump -i enp3s0 -nn -c 4 'host 10.42.0.131 and (udp port 1812 or icmp)'` captured:
+    `10.42.0.131.32934 > 10.42.0.1.1812: RADIUS, Unknown Command (112), id: 0x65 length: 21`;
+  - no ICMP port-unreachable packet was captured.
+- EAP-TLS listener path probe:
+  - temporarily stopped the PEAP listener and started FreeRADIUS against `target/eap-radius-ecdsa-tls/raddb`;
+  - `ss -lunpt` confirmed the EAP-TLS FreeRADIUS process was bound on UDP `1812` and `1813`;
+  - router `/tmp/udp_probe 10.42.0.1 1812 eap-tls-listener-probe` reported `sent=22 host=10.42.0.1 port=1812`;
+  - laptop `tcpdump` captured:
+    `10.42.0.131.50417 > 10.42.0.1.1812: RADIUS, Unknown Command (101), id: 0x61 length: 22`;
+  - no ICMP port-unreachable packet was captured.
+- Fixture restore:
+  - the first trap-based restore started PEAP and logged `Ready to process requests`, but the process exited when the launching shell ended;
+  - restarted PEAP with `setsid ... freeradius -f -xx ... -d target/eap-radius-ecdsa/raddb -l stdout > target/wifi-hw-artifacts-20260619-radius-path-probe/freeradius-peap-detached.log`;
+  - delayed verification showed FreeRADIUS PID `1130754` detached under PPID `1` and listening on UDP `1812`/`1813`;
+  - router AP remained enabled on `esp8266-router-eap`.
+- Conclusion:
+  - router-to-laptop UDP delivery is good for both the normal PEAP daemon and the EAP-TLS daemon when they are actually bound;
+  - the previous guarded `eap_client_cert` failure is still not green, but the next hardware attempt should include simultaneous `tcpdump` capture and router log collection to determine whether hostapd again sees ICMP refused or whether RADIUS receives a real EAP-TLS Access-Request;
+  - do not run that hardware attempt until the next EAP/client-cert code or fixture milestone, to preserve flash cycles.
+- Follow-up host-side hardening:
+  - tightened the `ss -lunp` RADIUS PID parser so it matches exact UDP ports `1812`/`1813` and does not accidentally treat FreeRADIUS inner-tunnel `18120` as an auth-port listener;
+  - added focused unit coverage for the exact-port matcher and parser behavior;
+  - `cargo fmt --all && cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `29`, `5`, and `36` tests in the non-empty xtask test binaries;
+  - no ESP8266 flash, ESP32 companion flash, OpenWrt flash, or router config mutation was performed for this parser fix.
+
+### 2026-06-19 EAP Diagnostic Capture Harness
+
+- Scope:
+  - host-only harness improvement to make the next EAP hardware attempt more informative;
+  - no ESP8266 flash, no ESP32 companion flash, no OpenWrt flash, and no router config mutation.
+- Live safety/fixture checks:
+  - `git status --short`: dirty files were `examples/wifi_eap.rs`, `research.md`, `xtask/src/wifi_hw.rs`, and `xtask/tests/wifi_hw_cli.rs`;
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS PID `1130754` was listening on UDP `1812` and `1813`;
+  - `enp3s0` was up at `10.42.0.1/24`, laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Harness changes:
+  - EAP scenarios now start best-effort diagnostics after build/flash and before UART reset/watch;
+  - diagnostics are enabled by default for `eap_sta_assoc`, `eap_wrong_password`, and opt-in `eap_client_cert`;
+  - `ESP8266_HAL_EAP_DIAGNOSTICS=0` disables the capture;
+  - `ESP8266_HAL_EAP_CAPTURE_IFACE=IFACE` selects the host capture interface, defaulting to `enp3s0`;
+  - diagnostics write:
+    - `eap-diagnostics.log` for lifecycle notes;
+    - `eap-radius-listeners-before.log` and `eap-radius-listeners-after.log` for host `ss -lunp` plus active FreeRADIUS command lines;
+    - `eap-radius-tcpdump.log` for `tcpdump -i <iface> -nn -l host <router> and (udp port 1812 or udp port 1813 or icmp)`;
+    - `router-eap-before.log` and `router-eap-after.log` for AP-side UCI, `hostapd_cli get_config`, `ubus hostapd get_status`, and recent hostapd/RADIUS/EAP log lines when router SSH is available;
+  - diagnostic failures are recorded but do not fail the scenario, so a missing `tcpdump` or SSH issue does not mask DUT behavior.
+- Fast validation:
+  - `cargo fmt --all && cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `31`, `5`, and `36` tests in the non-empty xtask test binaries;
+  - `tcpdump -i enp3s0 -d host 10.42.0.131 and '(' udp port 1812 or udp port 1813 or icmp ')'`: passed and compiled the capture filter;
+  - no hardware scenario was run in this pass.
+
+### 2026-06-19 Reduced Hardware Test Cadence
+
+- User clarified the validation cadence:
+  - reduce repeated ESP8266 flashing to limit flash wear;
+  - batch code fixes before hardware validation;
+  - use fast host/static checks during development;
+  - run focused hardware scenarios only at meaningful milestones;
+  - reserve full hardware matrix runs for larger integration milestones.
+- Live restart/safety refresh:
+  - `git status --short`: dirty files were `examples/wifi_eap.rs`, `research.md`, `src/wifi/core/config.rs`, `src/wifi/core/target.rs`, `tests/wifi_core_config.rs`, `xtask/src/wifi_hw.rs`, and `xtask/tests/wifi_hw_cli.rs`;
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - FreeRADIUS PID `1139097` was listening on UDP `1812`/`1813`;
+  - `enp3s0` was up at `10.42.0.1/24`; laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Working rule from this point:
+  - keep `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1` for focused hardware runs;
+  - use `ESP8266_HAL_WIFI_HW_FAIL_IF_FLASH_CHANGED=1` for diagnostic reruns that must not reflash;
+  - omit `ESP8266_HAL_WIFI_HW_FAIL_IF_FLASH_CHANGED=1` only when intentionally proving a new firmware image at a milestone;
+  - do not run the full hardware matrix until a broader Wi-Fi milestone justifies it.
+
+### 2026-06-19 EAP-TLS Client Certificate NUL and RAM Findings
+
+- Scope:
+  - focused on `eap_client_cert`, which remains not-green;
+  - kept the normal PEAP FreeRADIUS fixture restored after each EAP-TLS attempt;
+  - no full hardware matrix was run.
+- Static validation after the NUL-terminated PEM and diagnostic-harness changes:
+  - `cargo fmt --all`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `git diff --check`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - focused Xtensa `cargo check` for `wifi_eap` with NUL include files: passed;
+  - focused Xtensa release `cargo build --release --example wifi_eap ... --features interrupt,rt,wifi-enterprise,wifi-sta`: passed.
+- First focused `eap_client_cert` attempt after making the PEM buffers explicitly NUL-terminated:
+  - artifact root: `target/wifi-hw-artifacts-20260619-eap-client-cert-nul`;
+  - scenario dir: `target/wifi-hw-artifacts-20260619-eap-client-cert-nul/eap_client_cert-1781874507`;
+  - `flash.log` recorded `flash_action=written` and image fingerprint `5f179f6126c3cb6a6e31eb09d2451cac`;
+  - UART reached certificate configuration but failed on `wifi eap connect err`;
+  - heap was only `7136` bytes after Wi-Fi init and later failed with allocation detail `alloc_kind=M alloc_size=0x1ab0 alloc_free=0x12d8 alloc_task=P alloc_count=1`;
+  - tcpdump captured no RADIUS packets for that run;
+  - conclusion: staging the CA/client certificate/private-key material in static RAM caused severe heap pressure before EAP-TLS could reach RADIUS.
+- Follow-up code change:
+  - changed `wifi_eap` client-certificate material from large `StaticCell` staging buffers to compile-time `include_bytes!` NUL files generated by the hardware harness;
+  - the target backend now rejects non-NUL-terminated PEM certificate/key/password material instead of forwarding it to the ESP8266 SDK;
+  - release `wifi_eap` size after the change was `text=488294 data=40880 bss=15052 dec=544226`;
+  - previous static-buffer release had `.bss=27348`, so the NUL-file path recovered about 12 KiB of `.bss`;
+  - `nm` no longer showed `EAP_CA_CERT_BUF`, `EAP_CLIENT_CERT_BUF`, or `EAP_PRIVATE_KEY_BUF`.
+- Second focused `eap_client_cert` attempt after the NUL-file RAM fix:
+  - artifact root: `target/wifi-hw-artifacts-20260619-eap-client-cert-nulfile`;
+  - scenario dir: `target/wifi-hw-artifacts-20260619-eap-client-cert-nulfile/eap_client_cert-1781875137`;
+  - `flash.log` recorded `flash_action=written` and image fingerprint `6db81e5f0c4154c9d7bc93ec7400f8e1`;
+  - UART reached `wifi eap ca cert configured`, `wifi eap client cert configured`, and `wifi eap started`;
+  - heap was `36620` before Wi-Fi init and `19464` after init, then stayed around `17836` during the early EAP-TLS exchange;
+  - the run eventually failed with `alloc_kind=Z alloc_size=0x000001ea alloc_free=0x00000300 alloc_task=? alloc_count=1` and disconnect reason `23`;
+  - tcpdump captured real router-to-FreeRADIUS traffic:
+    - `Access-Request id 0x02 len 230 -> Access-Challenge len 68`;
+    - `Access-Request id 0x03 len 415 -> Access-Challenge len 548`;
+    - `Access-Request id 0x04 len 235 -> Access-Challenge len 370`;
+    - `Access-Request id 0x05 len 235 -> Access-Reject len 44`;
+  - FreeRADIUS saw `User-Name="esp8266-client"`, `Calling-Station-Id="48-3F-DA-68-E3-04"`, initiated EAP-TLS, received ClientHello, sent TLS 1.0 `ServerHello`, `Certificate`, `ServerKeyExchange`, `CertificateRequest`, and `ServerHelloDone`, then rejected the exchange with `eap_tls: ERROR: (TLS) Cannot continue, as the peer is misbehaving.`;
+  - router logs showed auth/assoc/EAP start followed by `CTRL-EVENT-EAP-FAILURE2` and EAP type `13 (TLS)`;
+  - conclusion: the RAM fix moved failure from pre-RADIUS/no-traffic into the TLS exchange. The router, capture, RADIUS listener, and EAP-TLS fixture are live; the remaining defect is client-side EAP-TLS memory/handshake handling.
+- Fixture restore:
+  - restored the normal PEAP FreeRADIUS fixture with `-d /home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa/raddb`;
+  - delayed verification showed FreeRADIUS PID `1154245` detached under PPID `1` and listening on UDP `1812` and `1813`;
+  - `enp3s0` stayed at `10.42.0.1/24`, `wlp4s0` stayed at `192.168.0.221/24`, and router `10.42.0.131` replied to ping.
+- Next low-flash direction:
+  - do not rerun hardware until a batched code change is ready;
+  - reduce EAP-TLS transient heap pressure further, likely by supporting DER certificate/key material so mbedTLS avoids PEM base64 decode staging;
+  - run host/static checks first, then at most one focused `eap_client_cert` hardware checkpoint if the image changed for a meaningful reason.
+
+### 2026-06-19 EAP-TLS DER Material Batch
+
+- Scope:
+  - code-only batch before any further ESP8266 flash;
+  - goal was to reduce EAP-TLS certificate/key parsing pressure without changing the normal PEAP username/password path.
+- API and example changes:
+  - added `Wpa2EnterpriseMaterialFormat::{Pem, Der}`;
+  - existing `Wpa2EnterpriseClientCertificate::new()` and `Wpa2EnterpriseCredentials::with_ca_cert()` remain PEM-oriented;
+  - added `Wpa2EnterpriseClientCertificate::new_der()` and `Wpa2EnterpriseCredentials::with_ca_cert_der()`;
+  - target backend now validates PEM as trailing-NUL material and DER as non-empty ASN.1 sequence material before forwarding to the SDK;
+  - `wifi_eap` now accepts compile-time DER include files:
+    - `ESP8266_HAL_EAP_CA_CERT_DER_FILE`;
+    - `ESP8266_HAL_EAP_CLIENT_CERT_DER_FILE`;
+    - `ESP8266_HAL_EAP_PRIVATE_KEY_DER_FILE`;
+  - `wifi_eap` still accepts the previous NUL-terminated PEM include files for compatibility and for passworded private-key fallback.
+- SDK patch changes:
+  - patched generated `tls_mbedtls.c` normal and EAP trace paths so CA/client certificate blobs are parsed by a helper that detects PEM by `-----BEGIN` and otherwise calls `mbedtls_x509_crt_parse_der()`;
+  - an attempted `mbedtls_x509_crt_parse_der_nocopy()` link failed because the ESP8266-linked mbedTLS library does not export that symbol, so the patch intentionally uses the exported DER parser;
+  - DER should still avoid PEM/base64 decode staging, but mbedTLS will keep its normal DER copy.
+- Harness changes:
+  - `eap_client_cert` now converts the EAP-TLS fixture PEM cert/key files to DER under the run directory by default;
+  - conversion uses `openssl x509 -outform DER` for CA/client certs and `openssl pkey -outform DER` for the private key;
+  - manifest keys record `eap_ca_cert_der_file`, `eap_client_cert_der_file`, and `eap_private_key_der_file`;
+  - if `ESP8266_HAL_EAP_PRIVATE_KEY_PASSWORD` is set, the harness keeps the previous NUL-terminated PEM path.
+- Fast/static validation:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed with `31`, `5`, and `36` tests in the non-empty xtask test binaries;
+  - generated temporary DER inputs under `target/eap-der-check` from the EAP-TLS fixture using `openssl`;
+  - `source .envrc && ESP8266_HAL_EAP_*_DER_FILE=... CARGO_INCREMENTAL=0 cargo check --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with existing dead-code warnings;
+  - the first release link attempt with `mbedtls_x509_crt_parse_der_nocopy()` failed on undefined symbol `mbedtls_x509_crt_parse_der_nocopy`;
+  - after switching to `mbedtls_x509_crt_parse_der()`, `source .envrc && ESP8266_HAL_EAP_*_DER_FILE=... CARGO_INCREMENTAL=0 cargo build --release --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with existing dead-code warnings;
+  - DER release size: `text=488494 data=40336 bss=15052 dec=543882`;
+  - section sizes: `.text=481880`, `.rodata=38396`, `.data=1940`, `.bss=15052`;
+  - compared with prior NUL-PEM release size `dec=544226`, DER was slightly smaller overall and kept `.bss=15052`.
+- Hardware cadence decision:
+  - no hardware was flashed during this batch;
+  - because this is a meaningful EAP-TLS image change with clean fast/static evidence, the next validation should be exactly one focused `eap_client_cert` run with diagnostics enabled, then restore the normal PEAP RADIUS fixture.
+
+### 2026-06-19 EAP-TLS Allocator Reserve Checkpoint
+
+- Scope:
+  - one focused hardware checkpoint for the DER material plus EAP workspace reserve batch;
+  - no full hardware matrix was run;
+  - no parallel hardware runs were started.
+- Restart/safety refresh before the checkpoint:
+  - `git status --short`: dirty files were `build.rs`, `esp8266-wifi-sys/build.rs`, `examples/wifi_eap.rs`, `research.md`, `src/wifi/compat/memory.rs`, `src/wifi/core/config.rs`, `src/wifi/core/mod.rs`, `src/wifi/core/target.rs`, `tests/wifi_core_config.rs`, `xtask/src/wifi_hw.rs`, and `xtask/tests/wifi_hw_cli.rs`;
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - EAP-TLS FreeRADIUS PID `1247605` was listening on UDP `1812`/`1813`;
+  - `enp3s0` was up at `10.42.0.1/24`; laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Focused hardware command:
+  - `source .envrc && ESP8266_HAL_WIFI_HW_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/wifi-hw-artifacts-20260619-eap-reserve ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1 ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1 ESP8266_HAL_EAP_TLS_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa-tls ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa-tls/raddb CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_client_cert`.
+- Result:
+  - failed with `Error: uart reported failure marker wifi eap connect err`;
+  - scenario dir: `target/wifi-hw-artifacts-20260619-eap-reserve/eap_client_cert-1781876911`;
+  - `flash.log` recorded `flash_action=written` because the image fingerprint changed to `65fe05db41bb524943835bfe61d9b218`;
+  - DER fixture material was embedded from:
+    - `eap-ca-cert.der`;
+    - `eap-client-cert.der`;
+    - `eap-private-key.der`.
+- UART evidence:
+  - heap was `37148` before Wi-Fi init and `19992` after init;
+  - the example logged `wifi eap ca cert der configured`, `wifi eap client cert configured`, `wifi eap configured`, and `wifi eap started`;
+  - before connect, workspace counters were `reserved=1 attempts=1 made=1 used=0 released=0`;
+  - during the handshake, counters reached `reserved=1 attempts=1 made=1 used=1 released=1`, proving the reserve block was consumed;
+  - timeout summary was `reserved=0 attempts=1 made=1 used=1 released=1`;
+  - final allocation detail was `error=timeout disconnect=23 alloc_kind=Z alloc_size=0x000001ea alloc_free=0x00000304 alloc_task=? alloc_count=1`;
+  - conclusion: the reserve moved the failure to a later small allocation, but did not make EAP-TLS client-certificate authentication pass.
+- RADIUS/router evidence:
+  - tcpdump captured the full failing exchange:
+    - `Access-Request id 0x0a len 230 -> Access-Challenge len 68`;
+    - `Access-Request id 0x0b len 415 -> Access-Challenge len 548`;
+    - `Access-Request id 0x0c len 235 -> Access-Challenge len 372`;
+    - `Access-Request id 0x0d len 235 -> Access-Reject len 44`;
+  - FreeRADIUS saw `User-Name="esp8266-client"` and `Calling-Station-Id="48-3F-DA-68-E3-04"`;
+  - FreeRADIUS received the ClientHello, sent `ServerHello`, `Certificate`, `ServerKeyExchange`, `CertificateRequest`, and `ServerHelloDone`, then rejected with `eap_tls: ERROR: (TLS) Cannot continue, as the peer is misbehaving` and `EAP Verification failed`;
+  - router logs showed EAP type `13 (TLS)` failure for DUT MAC `48:3f:da:68:e3:04`.
+- Fixture restore:
+  - stopped EAP-TLS FreeRADIUS and restored normal PEAP FreeRADIUS from `target/eap-radius-ecdsa/raddb`;
+  - restored PID `1249918` is detached and listening on UDP `1812` and `1813`;
+  - restore log reached `Ready to process requests`.
+- Next low-flash direction:
+  - do not rerun this firmware image;
+  - continue with code/static analysis of SDK EAP-TLS allocation behavior and memory pressure;
+  - batch the next fix and validate first with host/unit/Xtensa build checks;
+  - perform at most one focused EAP-TLS hardware checkpoint after the next meaningful image change.
+
+### 2026-06-19 EAPOL Low-Memory Batch Without Hardware
+
+- Scope:
+  - code/static batch only after the failed EAP-TLS reserve checkpoint;
+  - no serial access, flashing, or hardware scenario was run.
+- Finding from the reserve checkpoint:
+  - the recorded `alloc_kind=Z alloc_size=0x000001ea` is consistent with a large EAPOL/TLS fragment buffer allocation under the WPA2 Enterprise receive path;
+  - the existing trace-only ESP WPA2 patch already had some low-memory fallbacks, but the normal `esp_wpa2.c` production path did not receive those fallback edits unless `ESP8266_HAL_EAP_TRACE` was set;
+  - this was a diagnostics/production divergence and could also make normal EAP-TLS more fragile than trace builds.
+- Code changes:
+  - added a normal `esp_wpa2.c` patch path in `esp8266-wifi-sys/build.rs`;
+  - normal and trace WPA2 builds now both route EAPOL frames larger than `384` bytes directly through `eap_sm_rx_eapol_internal()` instead of first duplicating the frame into the WPA2 RX task queue;
+  - normal WPA2 builds now have the same low-memory fallback for EAPOL RX allocation failure: if the queue parameter or frame copy allocation fails, process the frame inline;
+  - normal WPA2 builds now have the same short-response EAPOL TX stack fallback used by trace builds for responses up to `256` bytes;
+  - normal WPA2 builds now have the same stack-backed `wpabuf` request fallback in `eap_sm_rx_eapol_internal()` when copying the EAP request would fail;
+  - allocator diagnostics now report the most recent allocation failure plus total failure count, instead of only the first failure after Wi-Fi init.
+- Fast/static validation:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `source .envrc && ESP8266_HAL_EAP_*_DER_FILE=target/eap-der-check/... CARGO_INCREMENTAL=0 cargo build --release --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with the existing dead-code warnings;
+  - generated-source sanity check confirmed both `esp_wpa2_patched.c` and `esp_wpa2_eap_trace.c` contain:
+    - the `len > 384` direct large EAPOL RX path;
+    - `stack_backed` short EAPOL TX fallback;
+    - `stack_req` EAP request fallback.
+- Size after this batch:
+  - `xtensa-lx106-elf-size target/xtensa-esp8266-none-elf/release/examples/wifi_eap`: `text=490774 data=40384 bss=15068 dec=546226`;
+  - section sizes: `.text=484160`, `.rodata=38444`, `.data=1940`, `.bss=15068`.
+- Hardware cadence decision:
+  - no hardware was run for this batch;
+  - the next hardware should be one focused `eap_client_cert` checkpoint only after deciding this batch is a meaningful EAP-TLS milestone, using `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1`;
+  - do not run a full matrix until EAP-TLS has either passed or been deliberately deferred and the broader Wi-Fi stack reaches another integration milestone.
+
+### 2026-06-19 EAPOL Batch Hardware Checkpoint and Workspace Lifetime Fix
+
+- Scope:
+  - one focused `eap_client_cert` checkpoint for the EAPOL low-memory batch;
+  - no full matrix and no parallel hardware runs;
+  - after the checkpoint, follow-up work was code/static only to avoid another flash in the same cycle.
+- Safety/fixture refresh:
+  - `git status --short`: dirty files remained `build.rs`, `esp8266-wifi-sys/build.rs`, `examples/wifi_eap.rs`, `research.md`, `src/wifi/compat/memory.rs`, `src/wifi/core/config.rs`, `src/wifi/core/mod.rs`, `src/wifi/core/target.rs`, `src/wifi/mod.rs`, `tests/wifi_core_config.rs`, `xtask/src/wifi_hw.rs`, and `xtask/tests/wifi_hw_cli.rs`;
+  - no stale hardware-test, serial, esptool, `cargo run -p xtask`, `wifi-hw`, or EAP process was active;
+  - no serial owners were reported for `/dev/ttyUSB0`, `/dev/ttyUSB1`, or `/dev/ttyACM0`;
+  - PEAP FreeRADIUS was initially listening on UDP `1812`/`1813`;
+  - `enp3s0` was up at `10.42.0.1/24`; laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Fixture script false start:
+  - an initial shell wrapper used `pkill -f "$FR_BIN"` and exited with status `143` because the pattern matched the wrapper command line itself;
+  - no `wifi-hw` scenario directory was created and no flash occurred in that false start;
+  - the wrapper was rerun with `pgrep -x freeradius` PID handling.
+- Focused hardware command shape:
+  - artifact root: `target/wifi-hw-artifacts-20260619-eap-eapol`;
+  - switched FreeRADIUS from PEAP to EAP-TLS using `target/eap-radius-ecdsa-tls/raddb`;
+  - ran `ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1 ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1 ESP8266_HAL_EAP_TLS_ROOT=target/eap-radius-ecdsa-tls ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT=target/eap-radius-ecdsa-tls/raddb CARGO_INCREMENTAL=0 timeout 900 cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run eap_client_cert`;
+  - restored PEAP FreeRADIUS afterward with `target/eap-radius-ecdsa/raddb`.
+- Result:
+  - failed with `Error: uart reported failure marker wifi eap connect err`;
+  - scenario dir: `target/wifi-hw-artifacts-20260619-eap-eapol/eap_client_cert-1781877615`;
+  - `flash.log` recorded `flash_action=written` because image fingerprint changed to `7f733bac5bd88457b4c9d4cbf55ecc58`;
+  - generated source sanity check confirmed the normal build included `esp_wpa2_patched.c` with the `len > 384` direct large EAPOL RX path, `stack_backed` short EAPOL TX fallback, and `stack_req` EAP request fallback.
+- UART evidence:
+  - heap was `37100` before Wi-Fi init and `19944` after init;
+  - DER CA/client cert/key material was configured;
+  - workspace counters before connect were `reserved=1 attempts=1 made=1 used=0 released=0`;
+  - during the handshake counters reached `reserved=1 attempts=1 made=1 used=1 released=1`;
+  - final timeout summary was `reserved=0 attempts=1 made=1 used=1 released=1`;
+  - final allocator detail changed to `error=timeout disconnect=23 alloc_kind=R alloc_size=0x00000318 alloc_free=0x000002ec alloc_task=? alloc_count=1`;
+  - conclusion: the EAPOL batch changed the failure shape from the prior `Z size=0x1ea` to a later `R size=0x318`, which points at TLS/wpabuf reallocation pressure rather than the previous small zalloc.
+- RADIUS/router evidence:
+  - tcpdump captured:
+    - `Access-Request id 0x0e len 230 -> Access-Challenge len 68`;
+    - `Access-Request id 0x0f len 415 -> Access-Challenge len 548`;
+    - `Access-Request id 0x10 len 235 -> Access-Challenge len 372`;
+    - `Access-Request id 0x11 len 235 -> Access-Reject len 44`;
+  - FreeRADIUS saw `User-Name="esp8266-client"` and `Calling-Station-Id="48-3F-DA-68-E3-04"`;
+  - FreeRADIUS received ClientHello, sent `ServerHello`, `Certificate`, `ServerKeyExchange`, `CertificateRequest`, and `ServerHelloDone`;
+  - the DUT still ACKed the server fragments with 6-byte EAP-TLS responses and never sent the client certificate flight;
+  - FreeRADIUS rejected with `eap_tls: ERROR: (TLS) Cannot continue, as the peer is misbehaving` and `EAP Verification failed`;
+  - router log showed EAP type `13 (TLS)` failure for DUT MAC `48:3f:da:68:e3:04`.
+- Fixture restore:
+  - PEAP FreeRADIUS was restored as PID `1257334`;
+  - UDP `1812`/`1813` were listening again;
+  - restore log reached `Ready to process requests`.
+- Follow-up code-only fix:
+  - root cause found in `src/wifi/compat/memory.rs`: the EAP workspace reserve was session-scoped from the Rust Enterprise path, but the mbedTLS RSA premaster hook also called the same reserve/release pair;
+  - after the first reserved allocation was freed, `release_eap_rsa_workspace_if_idle()` released the reserved block even though the Enterprise session was still active;
+  - changed the reserve state from a boolean to `EAP_RSA_WORKSPACE_ACTIVE_COUNT`, so nested/scoped crypto reserve/release calls cannot tear down the session reserve;
+  - `release_eap_rsa_workspace_if_idle()` now frees the reserved block only when the active count is zero and the block is not in use;
+  - `take_eap_rsa_workspace()` now only requires active count nonzero, allowing the same reserved block to be reused later in the EAP-TLS handshake.
+- Fast/static validation after the workspace lifetime fix:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - `source .envrc && ESP8266_HAL_EAP_*_DER_FILE=target/eap-der-check/... CARGO_INCREMENTAL=0 cargo build --release --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with existing dead-code warnings.
+- Size after the workspace lifetime fix:
+  - `xtensa-lx106-elf-size target/xtensa-esp8266-none-elf/release/examples/wifi_eap`: `text=490878 data=40384 bss=15068 dec=546330`;
+  - section sizes: `.text=484272`, `.rodata=38444`, `.data=1940`, `.bss=15068`.
+- Hardware cadence decision:
+  - no second hardware run was performed after the workspace lifetime fix;
+  - the next validation should be one focused `eap_client_cert` checkpoint, not a matrix, because this fix specifically targets the just-observed `R size=0x318` failure.
+
+### 2026-06-19 Reduced Flash/Test Cadence
+
+- User preference update:
+  - reduce hardware-test frequency to limit ESP8266 flash wear;
+  - batch related fixes before flashing;
+  - use fast host/static validation while iterating;
+  - reserve focused hardware runs for meaningful checkpoints where the result answers a new hardware question;
+  - reserve the full `wifi-hw matrix` for larger integration milestones, not routine cleanup.
+- Current EAP-TLS batch status under this cadence:
+  - workspace lifetime was fixed with `EAP_RSA_WORKSPACE_ACTIVE_COUNT`, so nested/scoped RSA reserve/release calls no longer tear down the Enterprise-session reserve;
+  - `c_realloc` now returns the original pointer when `new_size <= old_usable`, allowing reserved-block reallocs that fit within the current usable allocation;
+  - `rg -n "new_size <= old_usable|EAP_RSA_WORKSPACE_ACTIVE_COUNT" src/wifi/compat/memory.rs` confirmed both changes are present;
+  - no additional hardware run was performed after the realloc-in-place tweak.
+- Validation state:
+  - fast/static checks after the workspace/realloc batch passed: `cargo fmt --all -- --check`, `git diff --check`, host `wifi-core` tests, `xtask` tests, and targeted release `wifi_eap` Xtensa build with DER EAP material;
+  - next hardware should be a single focused `eap_client_cert` checkpoint when ready, not a full matrix.
+
+### 2026-06-22 Resume Safety and Diagnostic Validation
+
+- Scope:
+  - explicit resume in `/home/bogdan/Coding/Personal/esp8266-hal`;
+  - no commands, edits, or hardware access were performed after the previous user stop before this resume;
+  - no hardware test was run in this checkpoint.
+- Live safety/status checks:
+  - no matching `hw_suite.py`, `native_suite.py`, `esptool`, serial, `cargo run -p xtask`, `wifi-hw`, or `eap_sta_assoc` process was reported;
+  - `fuser -v /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyACM0` produced no serial-owner output;
+  - `ss -lunpt | rg ':(1812|1813)\b|freeradius' || true` produced no FreeRADIUS listener output at resume;
+  - `enp3s0` was up at `10.42.0.1/24`;
+  - laptop Wi-Fi `wlp4s0` remained up at `192.168.0.221/24`;
+  - router `10.42.0.131` replied to ping.
+- Dirty tree at resume:
+  - expected modified files were present: `build.rs`, `esp8266-wifi-sys/build.rs`, `examples/wifi_eap.rs`, `research.md`, `src/wifi/compat/memory.rs`, `src/wifi/controller.rs`, `src/wifi/core/config.rs`, `src/wifi/core/mod.rs`, `src/wifi/core/target.rs`, `src/wifi/mod.rs`, `tests/wifi_core_config.rs`, `xtask/src/wifi_hw.rs`, and `xtask/tests/wifi_hw_cli.rs`;
+  - `tests/wifi_core_link.rs` was modified in this resume only to remove a host-test race in a shared release counter;
+  - untracked artifacts were preserved.
+- Latest useful EAP-TLS hardware evidence carried forward:
+  - artifact root: `target/wifi-hw-artifacts-20260619-eap-workspace-lifetime`;
+  - scenario: `eap_client_cert-1781878348`;
+  - result marker: `wifi eap connect err`;
+  - UART showed the EAP RSA workspace reserve stayed active through the handshake, then released on disconnect/timeout;
+  - final allocator detail was `calloc size 0x1aa, free 0x1f4, count 1`;
+  - RADIUS/tcpdump showed the DUT sent TLS fatal `internal_error` after the server `CertificateRequest` / `ServerHelloDone`, then FreeRADIUS sent `Access-Reject`;
+  - interpretation: the workspace lifetime/refcount fix helped; the current failure likely sits in client certificate/private-key signing or a later mbedTLS handshake memory/path, and first/last allocation snapshots are needed to disambiguate the last allocation failure.
+- FreeRADIUS restore note:
+  - prior daemon-mode FreeRADIUS starts failed on this laptop session with `radiusd: ERROR - Cannot get ID for group freerad: No error`;
+  - the working foreground restore shape uses the repo-local fixture binary with `OPENSSL_CONF=target/eap-radius-1024/openssl-lowsec.cnf`, `LD_LIBRARY_PATH=/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/lib/freeradius`, `-f -xx`, `-D /home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/share/freeradius`, and `-d target/eap-radius-ecdsa/raddb` for the normal PEAP fixture;
+  - EAP-TLS checkpoints should temporarily switch `-d` to `target/eap-radius-ecdsa-tls/raddb` and then restore the PEAP fixture afterward.
+- Diagnostic edit validation:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - initial `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q` exposed a parallel-test race in `tests/wifi_core_link.rs`, where two tests shared and reset the same static `RELEASES` counter;
+  - fixed the test race by passing per-test `AtomicUsize` counters through the `RawRxRecord` release callback context;
+  - rerun `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - DER fixture files existed at `target/eap-der-check/{ca.der,client.der,client.key.der}`;
+  - `source .envrc && ESP8266_HAL_EAP_CA_CERT_DER_FILE=/home/bogdan/Coding/Personal/esp8266-hal/target/eap-der-check/ca.der ESP8266_HAL_EAP_CLIENT_CERT_DER_FILE=/home/bogdan/Coding/Personal/esp8266-hal/target/eap-der-check/client.der ESP8266_HAL_EAP_PRIVATE_KEY_DER_FILE=/home/bogdan/Coding/Personal/esp8266-hal/target/eap-der-check/client.key.der CARGO_INCREMENTAL=0 cargo build --release --example wifi_eap --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi-enterprise,wifi-sta -q`: passed with existing dead-code warnings.
+- Cadence decision:
+  - do not run another hardware test until after a reasoning/fix batch that targets the client-certificate/private-key signing or mbedTLS post-`ServerHelloDone` path;
+  - the next hardware checkpoint, when justified, should be one focused `eap_client_cert` run, not a matrix.
+
+### 2026-06-22 EAP-TLS Client-Cert Memory Batch and Focused Hardware Checkpoint
+
+- Code batch before hardware:
+  - changed the EAP crypto emergency reserve from one 1024-byte slot to two independent 1024-byte slots so concurrent medium TLS/EAP allocations can both be satisfied when the heap is fragmented;
+  - patched generated mbedTLS `ssl_cli.c` so ECDHE peer certificates are freed after `ServerHelloDone`, once the server key exchange has already been verified and before the client certificate flight is generated;
+  - added a reserve/release guard around `mbedtls_pk_sign_restartable()` in the client `CertificateVerify` path, matching the existing RSA premaster reserve hook;
+  - kept the first/last allocation snapshot diagnostics from the prior edit.
+- Fast/static validation before hardware:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - generated release `ssl_cli_patched.c` contained `esp8266_hal_free_peer_cert_after_ecdhe()` and the `mbedtls_pk_sign_restartable()` reserve hook;
+  - size after this two-slot/peer-cert-free batch: `text=493270 data=40352 bss=15140 dec=548762`.
+- Focused hardware checkpoint:
+  - safety refresh before the run found no matching stale hardware-test/esptool/serial/xtask process, no serial owners, no FreeRADIUS listener, `enp3s0` up at `10.42.0.1/24`, `wlp4s0` up at `192.168.0.221/24`, and router `10.42.0.131` reachable;
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-client-cert-memory`;
+  - scenario: `eap_client_cert-1782113023`;
+  - EAP-TLS FreeRADIUS was started with foreground mode, `OPENSSL_CONF=target/eap-radius-1024/openssl-lowsec.cnf`, and `LD_LIBRARY_PATH=/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/lib/freeradius`;
+  - command shape used `ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1`, `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1`, `ESP8266_HAL_EAP_TLS_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa-tls`, and `ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT=/home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa-tls/raddb`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `82ecf0aff15c232ad404724452514ab1`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- UART evidence from `eap_client_cert-1782113023/uart.log`:
+  - heap was `37060` before Wi-Fi init and `19904` after init;
+  - DER CA/client cert/key material was configured;
+  - workspace before connect was `reserved=1 active=1 attempts=1 made=2 used=0 released=0 usable=1024 in_use=0`;
+  - during the handshake it reached `made=2 used=5 released=5`, so the two-slot reserve was actively used multiple times;
+  - final timeout summary was `reserved=0 active=0 attempts=1 made=2 used=5 released=5 usable=0 in_use=0`;
+  - first allocation failure: `kind=Z size=0x1ea free=0x198 task=P count=2 eap_active=1 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - last allocation failure: `kind=Z size=0x138 free=0x14c task=? count=2 eap_active=1 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - interpretation: the failure is still memory pressure, but now specifically while all available reserve capacity is occupied, not while the reserve is idle or missing.
+- RADIUS/router evidence:
+  - tcpdump captured the normal EAP-TLS sequence through two server handshake fragments:
+    - `Access-Request id 0x17 len 230 -> Access-Challenge len 68`;
+    - `Access-Request id 0x18 len 415 -> Access-Challenge len 548`;
+    - `Access-Request id 0x19 len 235 -> Access-Challenge len 370`;
+    - `Access-Request id 0x1a len 235 -> Access-Reject len 44`;
+  - FreeRADIUS received `ClientHello`, sent TLS 1.0 `ServerHello`, `Certificate`, `ServerKeyExchange`, `CertificateRequest`, and `ServerHelloDone`;
+  - unlike the previous useful run, FreeRADIUS did not record a client TLS fatal alert; the DUT ACKed the server handshake fragments and then never sent the client certificate flight;
+  - FreeRADIUS rejected with `eap_tls: ERROR: (TLS) Cannot continue, as the peer is misbehaving` and `EAP Verification failed`;
+  - router hostapd stayed on SSID `esp8266-router-eap`, channel `11`, `key_mgmt=WPA-EAP`, and reported EAP type `13 (TLS)` authentication failure for DUT MAC `48:3f:da:68:e3:04`.
+- Fixture restore:
+  - the wrapper stopped EAP-TLS FreeRADIUS and restored the normal PEAP/MSCHAPv2 FreeRADIUS fixture from `target/eap-radius-ecdsa/raddb`;
+  - restored FreeRADIUS PID `964197` listened on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`;
+  - post-run safety check found no matching stale hardware-test/esptool/serial/xtask process, no serial owners, `enp3s0` and `wlp4s0` still up, and router `10.42.0.131` reachable.
+- Follow-up code-only adjustment after the hardware result:
+  - increased `EAP_RSA_WORKSPACE_SLOTS` from `2` to `3`, still with 1024 usable bytes per slot;
+  - rationale: the first and last allocation failures occurred with `eap_avail=0` while the two-slot reserve was active, so the next meaningful checkpoint is whether a third concurrent emergency slot lets the fragmented server-flight processing reach the client certificate flight;
+  - no additional hardware run was performed after the three-slot change in this cycle.
+- Fast/static validation after the three-slot adjustment:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - size after the three-slot adjustment: `text=493998 data=40352 bss=15148 dec=549498`.
+- Cadence decision:
+  - the next hardware run should be one focused `eap_client_cert` checkpoint for the three-slot reserve state;
+  - do not run a full matrix until EAP-TLS either passes or is deliberately deferred.

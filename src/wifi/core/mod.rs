@@ -42,7 +42,7 @@ pub use config::{
     ClientConfig, Credential, EnterpriseIdentity, EnterprisePassword, EnterpriseUsername,
     InitConfig, Ipv4Addr, MixedConfig, Passphrase, ScanOptions, ScanTimings, ScanType,
     SmartConfigTimeout, Ssid, StaticIpv4Config, StationPowerSave, Wpa2EnterpriseClientCertificate,
-    Wpa2EnterpriseCredentials, WpsPin,
+    Wpa2EnterpriseCredentials, Wpa2EnterpriseMaterialFormat, WpsPin,
 };
 pub use dhcp::{
     DhcpLease, DhcpMessageType, DhcpReply, DhcpServer, DhcpServerConfig, DhcpServerError,

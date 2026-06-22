@@ -8,7 +8,6 @@ use esp8266_hal::wifi_core::{
 
 static LINK_WAKES: AtomicUsize = AtomicUsize::new(0);
 static RX_WAKES: AtomicUsize = AtomicUsize::new(0);
-static RELEASES: AtomicUsize = AtomicUsize::new(0);
 static FAKE_RX_BYTES: [u8; 8] = [0xa5; 8];
 
 unsafe fn clone_counter(data: *const ()) -> RawWaker {
@@ -38,16 +37,17 @@ fn counter_waker(counter: &'static AtomicUsize) -> Waker {
     unsafe { Waker::from_raw(raw) }
 }
 
-unsafe fn count_release(_: *mut c_void, _: *mut c_void) {
-    RELEASES.fetch_add(1, Ordering::SeqCst);
+unsafe fn count_release(_: *mut c_void, counter: *mut c_void) {
+    let counter = unsafe { &*(counter as *const AtomicUsize) };
+    counter.fetch_add(1, Ordering::SeqCst);
 }
 
-fn fake_record(len: u16) -> RawRxRecord {
+fn fake_record(len: u16, releases: &AtomicUsize) -> RawRxRecord {
     unsafe {
         RawRxRecord::from_raw(
             core::ptr::null_mut(),
             len,
-            core::ptr::null_mut(),
+            releases as *const AtomicUsize as *mut c_void,
             Some(count_release),
         )
     }
@@ -84,28 +84,28 @@ fn publishing_link_events_updates_state_and_wakes_waiters() {
 #[test]
 fn rx_enqueue_wakes_waiters_and_overflow_releases_immediately() {
     RX_WAKES.store(0, Ordering::SeqCst);
-    RELEASES.store(0, Ordering::SeqCst);
+    let releases = AtomicUsize::new(0);
 
     let resources = WifiResources::<4, 1, 1>::new();
     let waker = counter_waker(&RX_WAKES);
     resources.register_rx_waker(&waker);
 
-    assert!(resources.enqueue_rx(fake_record(32)).is_ok());
+    assert!(resources.enqueue_rx(fake_record(32, &releases)).is_ok());
     assert_eq!(resources.queued_rx(), 1);
     assert_eq!(RX_WAKES.load(Ordering::SeqCst), 1);
 
     assert_eq!(
-        resources.enqueue_rx(fake_record(64)),
+        resources.enqueue_rx(fake_record(64, &releases)),
         Err(DriverError::PacketOverflow)
     );
     assert_eq!(resources.rx_drops(), 1);
-    assert_eq!(RELEASES.load(Ordering::SeqCst), 1);
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
 
     let mut frame = [0; 32];
     assert_eq!(resources.dequeue_rx().unwrap().copy_into(&mut frame), 32);
     assert_eq!(resources.queued_rx(), 0);
     assert_eq!(resources.rx_drops(), 1);
-    assert_eq!(RELEASES.load(Ordering::SeqCst), 2);
+    assert_eq!(releases.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -135,20 +135,20 @@ fn no_subscriber_event_discard_is_counted() {
 #[test]
 fn zero_capacity_sta_rx_releases_rejected_frame_without_wake() {
     RX_WAKES.store(0, Ordering::SeqCst);
-    RELEASES.store(0, Ordering::SeqCst);
+    let releases = AtomicUsize::new(0);
 
     let resources = WifiResources::<4, 0, 1>::new();
     let waker = counter_waker(&RX_WAKES);
     resources.register_rx_waker(&waker);
 
     assert_eq!(
-        resources.enqueue_rx(fake_record(32)),
+        resources.enqueue_rx(fake_record(32, &releases)),
         Err(DriverError::PacketOverflow)
     );
     assert_eq!(resources.queued_rx(), 0);
     assert_eq!(resources.rx_drops(), 1);
     assert_eq!(RX_WAKES.load(Ordering::SeqCst), 0);
-    assert_eq!(RELEASES.load(Ordering::SeqCst), 1);
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
 }
 
 #[derive(Default)]

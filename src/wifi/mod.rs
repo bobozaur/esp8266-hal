@@ -119,7 +119,7 @@ pub fn free_heap_bytes() -> u32 {
     unsafe { compat::memory::esp_get_free_heap_size() }
 }
 
-/// Snapshot of the first compat allocation failure since the last WiFi
+/// Snapshot of the most recent compat allocation failure since the last WiFi
 /// initialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AllocFailureDebug {
@@ -128,6 +128,11 @@ pub struct AllocFailureDebug {
     pub free_bytes: usize,
     pub task_marker: u8,
     pub count: u32,
+    pub eap_active_count: u32,
+    pub eap_reserved: bool,
+    pub eap_usable_bytes: usize,
+    pub eap_in_use: bool,
+    pub eap_reserve_available: bool,
 }
 
 /// Snapshot of the RSA workspace reservation used during EAP diagnostics.
@@ -135,40 +140,63 @@ pub struct AllocFailureDebug {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EapRsaWorkspaceDebug {
     pub reserved_now: bool,
+    pub active_count: u32,
     pub reserve_attempts: u32,
     pub reserved: u32,
     pub used: u32,
     pub released: u32,
+    pub usable_bytes: usize,
+    pub in_use: bool,
 }
 
-/// Return the first compat allocation failure recorded since WiFi init.
+/// Return the most recent compat allocation failure recorded since WiFi init.
 ///
 /// This is a diagnostics-only hook for constrained hardware bring-up. A
 /// returned value indicates that some SDK/blob allocation failed; it does not
 /// imply the public API call currently being handled returned allocation error.
 pub fn last_alloc_failure() -> Option<AllocFailureDebug> {
-    compat::memory::debug_last_alloc_failure().map(
-        |(kind, requested_bytes, free_bytes, task_marker, count)| AllocFailureDebug {
-            kind,
-            requested_bytes,
-            free_bytes,
-            task_marker,
-            count,
-        },
-    )
+    compat::memory::debug_last_alloc_failure().map(alloc_failure_from_snapshot)
+}
+
+/// Return the first compat allocation failure recorded since WiFi init.
+///
+/// This is a diagnostics-only hook for constrained hardware bring-up.
+#[doc(hidden)]
+pub fn first_alloc_failure() -> Option<AllocFailureDebug> {
+    compat::memory::debug_first_alloc_failure().map(alloc_failure_from_snapshot)
+}
+
+fn alloc_failure_from_snapshot(
+    snapshot: compat::memory::AllocFailureSnapshot,
+) -> AllocFailureDebug {
+    AllocFailureDebug {
+        kind: snapshot.kind,
+        requested_bytes: snapshot.requested_bytes,
+        free_bytes: snapshot.free_bytes,
+        task_marker: snapshot.task_marker,
+        count: snapshot.count,
+        eap_active_count: snapshot.eap_active_count,
+        eap_reserved: snapshot.eap_reserved,
+        eap_usable_bytes: snapshot.eap_usable_bytes,
+        eap_in_use: snapshot.eap_in_use,
+        eap_reserve_available: snapshot.eap_reserve_available,
+    }
 }
 
 /// Return the current RSA workspace reservation counters.
 #[doc(hidden)]
 pub fn eap_rsa_workspace_debug() -> EapRsaWorkspaceDebug {
-    let (reserved_now, reserve_attempts, reserved, used, released) =
+    let (active_count, reserve_attempts, reserved, used, released, usable_bytes, in_use) =
         compat::memory::debug_eap_rsa_workspace();
     EapRsaWorkspaceDebug {
-        reserved_now,
+        reserved_now: active_count != 0,
+        active_count,
         reserve_attempts,
         reserved,
         used,
         released,
+        usable_bytes,
+        in_use,
     }
 }
 

@@ -11,7 +11,8 @@ use super::{
     PromiscuousFilter, PromiscuousFrameInfo, PromiscuousPacketType, PromiscuousRxFrame, RawMode,
     RawRxRecord, ScanOptions, StationPowerSave, WifiApBackend, WifiEvent, WifiFeatureBackend,
     WifiLifecycleBackend, WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend,
-    WifiStaBackend, Wpa2EnterpriseCredentials, WpsConfig, WpsPin, PROMISCUOUS_MAX_PAYLOAD_PREFIX,
+    WifiStaBackend, Wpa2EnterpriseCredentials, Wpa2EnterpriseMaterialFormat, WpsConfig, WpsPin,
+    PROMISCUOUS_MAX_PAYLOAD_PREFIX,
 };
 #[cfg(feature = "wifi-debug-trace")]
 use super::{DeliverDataDebugSnapshot, RxCallbackDebugSnapshot};
@@ -621,6 +622,12 @@ impl<
         .map_err(map_enterprise_esp_error)?;
 
         if let Some(ca_cert) = credentials.ca_cert() {
+            require_enterprise_material(
+                ca_cert,
+                credentials
+                    .ca_cert_format()
+                    .unwrap_or(Wpa2EnterpriseMaterialFormat::Pem),
+            )?;
             crate::wifi::EspError::check(unsafe {
                 esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_set_ca_cert(
                     ca_cert.as_ptr(),
@@ -631,7 +638,18 @@ impl<
         }
 
         if let Some(certificate) = credentials.client_certificate() {
+            require_enterprise_material(
+                certificate.client_cert(),
+                certificate.client_cert_format(),
+            )?;
+            require_enterprise_material(
+                certificate.private_key(),
+                certificate.private_key_format(),
+            )?;
             let password = certificate.private_key_password();
+            if let Some(password) = password {
+                require_enterprise_pem(password)?;
+            }
             let password_ptr = password.map_or(core::ptr::null(), <[u8]>::as_ptr);
             let password_len = password.map_or(0, |password| password.len() as i32);
             crate::wifi::EspError::check(unsafe {
@@ -656,6 +674,10 @@ impl<
 
         crate::wifi::EspError::check(unsafe { esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_enable() })
             .map_err(map_enterprise_esp_error)?;
+
+        if credentials.client_certificate().is_some() {
+            crate::wifi::compat::memory::reserve_eap_rsa_workspace();
+        }
 
         self.wpa2_enterprise_enabled = true;
         Ok(())
@@ -2572,6 +2594,32 @@ fn map_wifi_driver_error(error: crate::wifi::WifiError) -> DriverError {
     match error {
         crate::wifi::WifiError::Timeout => DriverError::Timeout,
         _ => DriverError::BackendRejected,
+    }
+}
+
+fn require_enterprise_material(
+    bytes: &[u8],
+    format: Wpa2EnterpriseMaterialFormat,
+) -> Result<(), DriverError> {
+    match format {
+        Wpa2EnterpriseMaterialFormat::Pem => require_enterprise_pem(bytes),
+        Wpa2EnterpriseMaterialFormat::Der => require_enterprise_der(bytes),
+    }
+}
+
+fn require_enterprise_pem(bytes: &[u8]) -> Result<(), DriverError> {
+    if bytes.last() == Some(&0) {
+        Ok(())
+    } else {
+        Err(DriverError::BackendRejected)
+    }
+}
+
+fn require_enterprise_der(bytes: &[u8]) -> Result<(), DriverError> {
+    if bytes.first() == Some(&0x30) {
+        Ok(())
+    } else {
+        Err(DriverError::BackendRejected)
     }
 }
 

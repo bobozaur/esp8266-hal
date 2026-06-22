@@ -25,6 +25,7 @@ fn scenario_registry_includes_required_full_matrix_entries() {
         "tcp_client",
         "eap_sta_assoc",
         "eap_wrong_password",
+        "eap_client_cert",
         "ap_station_list_companion",
         "ap_rejoin_companion",
         "ap_attach_companion",
@@ -145,6 +146,10 @@ fn scenario_audit_metadata_exposes_fixture_resources_and_parallel_lane() {
     let wps = scenario_by_name("wps").expect("wps scenario");
     assert_eq!(scenario_matrix_lane_label(wps), "primary");
     assert_eq!(scenario_resource_labels(wps), ["router"]);
+
+    let eap_client_cert = scenario_by_name("eap_client_cert").expect("eap client-cert scenario");
+    assert_eq!(scenario_matrix_lane_label(eap_client_cert), "primary");
+    assert_eq!(scenario_resource_labels(eap_client_cert), ["router"]);
 }
 
 #[test]
@@ -421,6 +426,31 @@ fn eap_wrong_password_is_an_implemented_negative_enterprise_scenario() {
         timeout >= Duration::from_secs(90),
         "EAP negative timeout must cover Enterprise rejection and retry events"
     );
+}
+
+#[test]
+fn eap_client_certificate_validation_is_tracked_but_not_claimed_green() {
+    let scenario = scenario_by_name("eap_client_cert").expect("eap client-cert scenario");
+
+    assert_eq!(scenario.state.label(), "rig-blocked");
+    assert!(scenario
+        .state
+        .rig_blocked_reason()
+        .expect("rig-blocked reason")
+        .contains("EAP-TLS"));
+    assert_eq!(scenario.example, Some("wifi_eap"));
+    assert!(scenario.features.contains(&"wifi-enterprise"));
+    let RuntimePlan::UartWatch {
+        timeout,
+        success_markers,
+        failure_markers,
+    } = scenario.runtime
+    else {
+        panic!("eap_client_cert should have an opt-in UART runtime");
+    };
+    assert!(timeout >= Duration::from_secs(120));
+    assert!(success_markers.contains(&"eap-ok"));
+    assert!(failure_markers.contains(&"wifi eap client cert incomplete"));
 }
 
 #[test]
