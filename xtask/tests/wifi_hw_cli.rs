@@ -429,15 +429,11 @@ fn eap_wrong_password_is_an_implemented_negative_enterprise_scenario() {
 }
 
 #[test]
-fn eap_client_certificate_validation_is_tracked_but_not_claimed_green() {
+fn eap_client_certificate_validation_is_implemented_as_opt_in_runtime() {
     let scenario = scenario_by_name("eap_client_cert").expect("eap client-cert scenario");
 
-    assert_eq!(scenario.state.label(), "rig-blocked");
-    assert!(scenario
-        .state
-        .rig_blocked_reason()
-        .expect("rig-blocked reason")
-        .contains("EAP-TLS"));
+    assert_eq!(scenario.state.label(), "implemented");
+    assert!(scenario.state.rig_blocked_reason().is_none());
     assert_eq!(scenario.example, Some("wifi_eap"));
     assert!(scenario.features.contains(&"wifi-enterprise"));
     let RuntimePlan::UartWatch {

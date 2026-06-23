@@ -2000,7 +2000,11 @@ impl<
             }
         }
         let raw = esp8266_wifi_sys::smartconfig_start_config_t {
-            enable_log: config.log_enabled(),
+            // Hardware validation on this no-std ESP8266 port shows the
+            // closed SmartConfig library can stall before SC_EVENT_SCAN_DONE
+            // with its log path disabled. esp_log is stubbed here, so force
+            // the reliable SDK path without adding UART output.
+            enable_log: true,
             esp_touch_v2_enable_crypt: config.esp_touch_v2_key_value().is_some(),
             esp_touch_v2_key: if config.esp_touch_v2_key_value().is_some() {
                 key.as_mut_ptr()

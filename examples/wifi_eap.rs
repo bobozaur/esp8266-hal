@@ -291,6 +291,21 @@ fn log_alloc_failure(prefix: &[u8], failure: esp8266_hal::wifi::AllocFailureDebu
     esp8266_hal::logger::write_bytes(prefix);
     esp8266_hal::logger::write_bytes(b"_eap_avail=");
     esp8266_hal::logger::write_dec_u32(failure.eap_reserve_available as u32);
+    esp8266_hal::logger::write_bytes(prefix);
+    esp8266_hal::logger::write_bytes(b"_eap_count=");
+    esp8266_hal::logger::write_dec_u32(failure.eap_reserved_count as u32);
+    esp8266_hal::logger::write_bytes(prefix);
+    esp8266_hal::logger::write_bytes(b"_eap_usage=0x");
+    esp8266_hal::logger::write_hex_u32(failure.eap_usage_bits);
+    esp8266_hal::logger::write_bytes(prefix);
+    esp8266_hal::logger::write_bytes(b"_realloc_old=0x");
+    esp8266_hal::logger::write_hex_u32(failure.realloc_old_usable as u32);
+    esp8266_hal::logger::write_bytes(prefix);
+    esp8266_hal::logger::write_bytes(b"_realloc_workspace=0x");
+    esp8266_hal::logger::write_hex_u32(failure.realloc_workspace_usable as u32);
+    esp8266_hal::logger::write_bytes(prefix);
+    esp8266_hal::logger::write_bytes(b"_ctx=0x");
+    esp8266_hal::logger::write_hex_u32(failure.context);
 }
 
 fn log_init_error(message: &[u8], error: esp8266_hal::wifi::InitError) {

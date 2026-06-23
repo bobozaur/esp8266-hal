@@ -133,6 +133,11 @@ pub struct AllocFailureDebug {
     pub eap_usable_bytes: usize,
     pub eap_in_use: bool,
     pub eap_reserve_available: bool,
+    pub eap_reserved_count: usize,
+    pub eap_usage_bits: u32,
+    pub realloc_old_usable: usize,
+    pub realloc_workspace_usable: usize,
+    pub context: u32,
 }
 
 /// Snapshot of the RSA workspace reservation used during EAP diagnostics.
@@ -180,6 +185,11 @@ fn alloc_failure_from_snapshot(
         eap_usable_bytes: snapshot.eap_usable_bytes,
         eap_in_use: snapshot.eap_in_use,
         eap_reserve_available: snapshot.eap_reserve_available,
+        eap_reserved_count: snapshot.eap_reserved_count,
+        eap_usage_bits: snapshot.eap_usage_bits,
+        realloc_old_usable: snapshot.realloc_old_usable,
+        realloc_workspace_usable: snapshot.realloc_workspace_usable,
+        context: snapshot.context,
     }
 }
 

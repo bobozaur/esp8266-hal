@@ -101,7 +101,10 @@ pub fn start(config: &SmartConfigStartConfig) -> Result<(), WifiError> {
     };
 
     let raw = sys::smartconfig_start_config_t {
-        enable_log: config.enable_log,
+        // On this no-std ESP8266 port the closed SmartConfig library can stall
+        // before SC_EVENT_SCAN_DONE when the SDK log path is disabled. The
+        // esp_log shim is a no-op, so keep the reliable SDK path selected.
+        enable_log: true,
         esp_touch_v2_enable_crypt: config.esp_touch_v2_enable_crypt,
         esp_touch_v2_key: key_ptr as *mut core::ffi::c_char,
     };

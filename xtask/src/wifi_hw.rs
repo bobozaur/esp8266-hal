@@ -5,7 +5,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -27,6 +27,7 @@ const DEFAULT_ROUTER_USER: &str = "root";
 const DEFAULT_ROUTER_IDENTITY: &str = "target/wifi-hw-router/id_rsa";
 const DEFAULT_ROUTER_KNOWN_HOSTS: &str = "/tmp/esp8266-hal-openwrt-known-hosts";
 const DEFAULT_ROUTER_HOSTAPD_IFACE: &str = "phy0-ap0";
+const ROUTER_COMMAND_TIMEOUT: Duration = Duration::from_secs(240);
 const DEFAULT_MATRIX_ATTEMPTS: usize = 3;
 const MATRIX_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 const COMPANION_TCP_CONNECT_TIMEOUT_MS: u32 = 20_000;
@@ -39,6 +40,7 @@ const DEFAULT_WPS_DUT_UUID: &str = "df2d477b-b793-51e8-a89b-5aec91edcbf9";
 const SMARTCONFIG_ROUTER_SSID: &str = "esp8266-hal-smart";
 const SMARTCONFIG_ROUTER_PASSPHRASE: &str = "esp8266smart";
 const DEFAULT_SMARTCONFIG_CHANNEL: u8 = 6;
+const SMARTCONFIG_COMPANION_AP_SETTLE: Duration = Duration::from_secs(2);
 const RADIUS_AUTH_PORT: u16 = 1812;
 const RADIUS_ACCT_PORT: u16 = 1813;
 const EAP_TLS_ROOT_ENV: &str = "ESP8266_HAL_EAP_TLS_ROOT";
@@ -58,6 +60,7 @@ const EAP_CAPTURE_IFACE_ENV: &str = "ESP8266_HAL_EAP_CAPTURE_IFACE";
 const DEFAULT_EAP_CAPTURE_IFACE: &str = "enp3s0";
 const SKIP_UNCHANGED_FLASH_ENV: &str = "ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH";
 const FAIL_IF_FLASH_CHANGED_ENV: &str = "ESP8266_HAL_WIFI_HW_FAIL_IF_FLASH_CHANGED";
+const INCLUDE_EAP_CLIENT_CERT_MATRIX_ENV: &str = "ESP8266_HAL_WIFI_HW_INCLUDE_EAP_CLIENT_CERT";
 const FLASH_FINGERPRINT_OFFSET_A: u64 = 0xcbf2_9ce4_8422_2325;
 const FLASH_FINGERPRINT_OFFSET_B: u64 = 0x8422_2325_cbf2_9ce4;
 const FLASH_FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -227,7 +230,7 @@ impl SmartConfigSenderKind {
     }
 
     const fn default_start_after_scan(self) -> bool {
-        matches!(self, Self::CompanionAp)
+        false
     }
 
     fn build_env(self) -> Vec<(&'static str, String)> {
@@ -550,9 +553,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         example: Some("wifi_eap"),
         features: &["interrupt", "rt", "wifi-enterprise", "wifi-sta"],
         profile: "release",
-        state: ScenarioState::RigBlocked {
-            reason: "requires a configured EAP-TLS/RADIUS fixture and client certificate artifacts; PEAP username/password is covered by eap_sta_assoc",
-        },
+        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(180),
             success_markers: &["eap-ok"],
@@ -1328,6 +1329,7 @@ fn print_help() {
     println!("  companion <doctor|setup|build|flash|command>");
     println!("  env {SKIP_UNCHANGED_FLASH_ENV}=1 skips unchanged ESP8266 images after a known harness flash");
     println!("  env {FAIL_IF_FLASH_CHANGED_ENV}=1 aborts instead of writing when the flash image is not already cached");
+    println!("  env {INCLUDE_EAP_CLIENT_CERT_MATRIX_ENV}=1 includes the EAP-TLS client-certificate scenario in matrix runs");
     println!("  env {EAP_DIAGNOSTICS_ENV}=0 disables best-effort router/RADIUS capture for EAP scenarios");
     println!("  env {EAP_CAPTURE_IFACE_ENV}=IFACE selects the EAP tcpdump interface (default {DEFAULT_EAP_CAPTURE_IFACE})");
 }
@@ -1506,10 +1508,8 @@ fn matrix_dry_run(
     jobs: usize,
 ) -> Result<()> {
     let root = artifacts_root(root);
-    let implemented: Vec<_> = WIFI_SCENARIOS
-        .iter()
-        .filter(|scenario| scenario.state == ScenarioState::Implemented)
-        .collect();
+    let implemented = matrix_default_scenarios();
+    let skipped = matrix_opt_in_skipped_scenarios();
     let (primary, secondary) = partition_matrix_lanes(&implemented);
 
     println!("wifi-hw matrix dry-run");
@@ -1531,6 +1531,10 @@ fn matrix_dry_run(
         print_matrix_plan_lane("primary", &implemented);
     }
 
+    for (scenario, reason) in skipped {
+        println!("opt_in_skipped: {} reason={reason}", scenario.name);
+    }
+
     if jobs > 2 {
         println!("note=matrix scheduler currently uses at most two hardware lanes");
     }
@@ -1546,10 +1550,8 @@ fn run_matrix(
     jobs: usize,
 ) -> Result<()> {
     let root = artifacts_root(root);
-    let implemented: Vec<_> = WIFI_SCENARIOS
-        .iter()
-        .filter(|scenario| scenario.state == ScenarioState::Implemented)
-        .collect();
+    let implemented = matrix_default_scenarios();
+    let skipped = matrix_opt_in_skipped_scenarios();
 
     let mut failures = if jobs > 1 {
         let secondary_serial_port =
@@ -1576,6 +1578,10 @@ fn run_matrix(
         eprintln!(
             "wifi-hw matrix: --jobs {jobs} requested; current scheduler uses at most 2 hardware lanes"
         );
+    }
+
+    for (scenario, reason) in skipped {
+        println!("wifi-hw matrix: opt-in skipped {}: {reason}", scenario.name);
     }
 
     for scenario in WIFI_SCENARIOS
@@ -1606,6 +1612,32 @@ fn run_matrix(
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+fn matrix_default_scenarios() -> Vec<&'static Scenario> {
+    WIFI_SCENARIOS
+        .iter()
+        .filter(|scenario| scenario.state == ScenarioState::Implemented)
+        .filter(|scenario| matrix_opt_in_skip_reason(scenario).is_none())
+        .collect()
+}
+
+fn matrix_opt_in_skipped_scenarios() -> Vec<(&'static Scenario, &'static str)> {
+    WIFI_SCENARIOS
+        .iter()
+        .filter(|scenario| scenario.state == ScenarioState::Implemented)
+        .filter_map(|scenario| matrix_opt_in_skip_reason(scenario).map(|reason| (scenario, reason)))
+        .collect()
+}
+
+fn matrix_opt_in_skip_reason(scenario: &Scenario) -> Option<&'static str> {
+    if scenario.name == "eap_client_cert" && !env_flag(INCLUDE_EAP_CLIENT_CERT_MATRIX_ENV) {
+        Some(
+            "requires the EAP-TLS FreeRADIUS/client-certificate fixture; run directly or set ESP8266_HAL_WIFI_HW_INCLUDE_EAP_CLIENT_CERT=1",
+        )
+    } else {
+        None
+    }
 }
 
 fn run_matrix_parallel(
@@ -2074,18 +2106,31 @@ fn run_wps_router_scenario(scenario: &Scenario, root: &Path, serial_port: &Path)
     }
     build_env.push((
         "ESP8266_HAL_WPS_MAX_ATTEMPTS",
-        WPS_HARNESS_MAX_ATTEMPTS.to_owned(),
+        match fixture.mode {
+            WpsRouterMode::Pbc => WPS_HARNESS_MAX_ATTEMPTS,
+            WpsRouterMode::Pin => "1",
+        }
+        .to_owned(),
     ));
 
     build_example(&run_dir, example, scenario, &build_env)?;
     let images = elf2image(&run_dir, example, scenario)?;
-    flash_images(&run_dir, &images, serial_port)?;
 
     append_router_manifest(&run_dir, &fixture)?;
 
     if let Err(error) = configure_router_wps_fixture(&run_dir, &fixture) {
         let _ = restore_router_wps_fixture(&run_dir, &fixture);
         return Err(error);
+    }
+
+    if let Err(error) = flash_images(&run_dir, &images, serial_port) {
+        let restore_result = restore_router_wps_fixture(&run_dir, &fixture);
+        return match restore_result {
+            Ok(()) => Err(error),
+            Err(restore_error) => {
+                Err(error.context(format!("router restore also failed: {restore_error:#}")))
+            }
+        };
     }
 
     let result = match scenario.runtime {
@@ -2100,7 +2145,9 @@ fn run_wps_router_scenario(scenario: &Scenario, root: &Path, serial_port: &Path)
             success_markers,
             failure_markers,
         ),
-        _ => bail!("WPS router scenario requires a UART watch runtime plan"),
+        _ => Err(anyhow!(
+            "WPS router scenario requires a UART watch runtime plan"
+        )),
     };
 
     let status_result = collect_router_wps_status(&run_dir, &fixture, "router-after");
@@ -2315,17 +2362,39 @@ fn router_run_with_rig(
         .with_context(|| format!("failed to create {}", log_path.display()))?;
     writeln!(log, "$ ssh {} {label}", router.target())?;
     writeln!(log, "{script}")?;
+    log.flush()?;
 
     let mut command = router.ssh_command();
     command
         .arg(script)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = command
-        .output()
-        .with_context(|| format!("failed to run router command `{label}`"))?;
-    log.write_all(&output.stdout)?;
-    log.write_all(&output.stderr)?;
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to start router command `{label}`"))?;
+    let timeout = router_command_timeout();
+    let deadline = Instant::now() + timeout;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .with_context(|| format!("failed to collect timed-out router command `{label}`"))?;
+            append_router_output(&mut log, &output)?;
+            writeln!(log, "router_command_timeout_ms={}", timeout.as_millis())?;
+            bail!(
+                "router command `{label}` timed out after {} ms; see {}",
+                timeout.as_millis(),
+                log_path.display()
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("failed to collect router command `{label}`"))?;
+    append_router_output(&mut log, &output)?;
 
     if !output.status.success() {
         bail!(
@@ -2335,6 +2404,21 @@ fn router_run_with_rig(
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn router_command_timeout() -> Duration {
+    env::var("ESP8266_HAL_ROUTER_COMMAND_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(ROUTER_COMMAND_TIMEOUT)
+}
+
+fn append_router_output(log: &mut File, output: &Output) -> Result<()> {
+    log.write_all(&output.stdout)?;
+    log.write_all(&output.stderr)?;
+    Ok(())
 }
 
 fn shell_quote(value: &str) -> String {
@@ -2645,7 +2729,7 @@ uci -q delete wireless.default_radio0.auth_secret || true
 uci commit wireless
 wifi down radio0 || true
 sleep 2
-wifi up radio0
+wifi up radio0 || true
 ready=0
 tries=0
 while [ "$tries" -lt 120 ]; do
@@ -2686,7 +2770,6 @@ esac
 printf '%s\n' "$wps_result"
 test "$wps_result" = "OK"
 hostapd_cli -p /var/run/hostapd -i "$iface" update_beacon >/dev/null 2>&1 || true
-hostapd_cli -p /var/run/hostapd -i "$iface" wps_get_status
 sleep 1
 echo "backup_path=$backup"
 "#
@@ -2728,7 +2811,7 @@ fi
 expected_ssid="$(uci -q get wireless.default_radio0.ssid || true)"
 wifi down radio0 || true
 sleep 3
-wifi up radio0
+wifi up radio0 || true
 sleep 70
 uci show wireless
 [ -n "$expected_ssid" ]
@@ -2799,6 +2882,11 @@ fn run_smartconfig_router_scenario(
     if sender == SmartConfigSenderKind::CompanionAp {
         prestart_companion_smartconfig_ap(&fixture, &mut companion_log, &mut companion_commands)?;
         append_manifest_line(&run_dir, "smartconfig_companion_ap_prestarted", "1")?;
+        append_manifest_line(
+            &run_dir,
+            "smartconfig_companion_ap_settle_ms",
+            &SMARTCONFIG_COMPANION_AP_SETTLE.as_millis().to_string(),
+        )?;
     }
 
     let result = match scenario.runtime {
@@ -2889,7 +2977,7 @@ uci -q delete wireless.default_radio0.auth_secret || true
 uci commit wireless
 wifi down radio0 || true
 sleep 2
-wifi up radio0
+wifi up radio0 || true
 ready=0
 tries=0
 while [ "$tries" -lt 120 ]; do
@@ -2974,7 +3062,7 @@ fi
 expected_ssid="$(uci -q get wireless.default_radio0.ssid || true)"
 wifi down radio0 || true
 sleep 3
-wifi up radio0
+wifi up radio0 || true
 sleep 70
 uci show wireless
 [ -n "$expected_ssid" ]
@@ -3193,6 +3281,7 @@ fn prestart_companion_smartconfig_ap(
         Duration::from_secs(10),
     )?;
     ensure_ok_response(&response, "AP_START")?;
+    thread::sleep(SMARTCONFIG_COMPANION_AP_SETTLE);
     Ok(())
 }
 
@@ -3410,7 +3499,10 @@ fn start_companion_ap_for_scenario(
             .build_env
             .push(("ESP8266_HAL_WIFI_CONNECT_TIMEOUT_MS", "30000".to_owned()));
     }
-    if matches!(scenario.name, "sta_scan_connect" | "tcp_client") {
+    if matches!(
+        scenario.name,
+        "sta_scan_connect" | "sta_static_ip" | "tcp_client"
+    ) {
         session
             .build_env
             .retain(|(key, _)| *key != "ESP8266_HAL_WIFI_CHANNEL");

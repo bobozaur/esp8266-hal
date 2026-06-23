@@ -3694,3 +3694,1529 @@
 - Cadence decision:
   - the next hardware run should be one focused `eap_client_cert` checkpoint for the three-slot reserve state;
   - do not run a full matrix until EAP-TLS either passes or is deliberately deferred.
+
+### 2026-06-22 EAP-TLS Three-Slot Regression and Two-Phase Reserve Follow-Up
+
+- Focused three-slot hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-client-cert-3slot`;
+  - scenario: `eap_client_cert-1782113438`;
+  - command shape used the EAP-TLS FreeRADIUS fixture from `target/eap-radius-ecdsa-tls/raddb`, `ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1`, `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1`, absolute `ESP8266_HAL_EAP_TLS_ROOT`, and absolute `ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `40b07a3edcd1cadaba5f6d2af496a8a0`;
+  - result: `Error: timed out waiting for UART success markers`; the firmware did not print the prior `wifi eap connect err` failure marker.
+- Three-slot hardware evidence:
+  - `uart.log` stopped after `wifi eap workspace before connect reserved=1 active=1 attempts=1 made=3 used=0 released=0 usable=1024 in_use=0`, a matching workspace progress line, `wifi eap heap progress heap=15192`, and then `Uu`;
+  - no firmware timeout summary was printed before the host-side UART watcher timed out;
+  - tcpdump only showed the initial EAP identity exchange, `Access-Request id 0x1b length 230` followed by `Access-Challenge id 0x1b length 68`; there was no ClientHello;
+  - FreeRADIUS likewise saw EAP Identity and sent the EAP-TLS Start request, then the session did not progress;
+  - router logs showed repeated `CTRL-EVENT-EAP-RETRANSMIT2` and `CTRL-EVENT-EAP-TIMEOUT-FAILURE2`.
+- Interpretation:
+  - reserving all three 1024-byte emergency slots at Enterprise session start regressed the handshake from "ACKs server handshake fragments but cannot send the client certificate flight" to "does not answer EAP-TLS Start";
+  - the two-slot session reserve got much farther, while the third slot is only likely useful during the client certificate/private-key-signing flight;
+  - the next code path should reserve two slots for the whole EAP session, then opportunistically reserve the third only while driving mbedTLS from `SERVER_HELLO_DONE` / `CLIENT_CERTIFICATE` through `CLIENT_FINISHED`.
+- Fixture restore after the hardware run:
+  - the wrapper stopped EAP-TLS FreeRADIUS and restored the normal PEAP/MSCHAPv2 fixture from `target/eap-radius-ecdsa/raddb`;
+  - restored FreeRADIUS PID `968113` listened on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`;
+  - the known-good restore shape continued to require `LD_LIBRARY_PATH=/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/lib/freeradius`;
+  - post-run safety checks found no matching stale hardware-test/esptool/serial/xtask process, no serial owners, `enp3s0` and `wlp4s0` still up, and router `10.42.0.131` reachable.
+- Follow-up code-only adjustment:
+  - kept `EAP_RSA_WORKSPACE_SLOTS = 3`;
+  - added `EAP_RSA_WORKSPACE_SESSION_SLOTS = 2`;
+  - changed `reserve_eap_rsa_workspace()` so the first/session reserve allocates only two slots, while nested reserves can fill up to all three slots;
+  - patched generated normal `tls_mbedtls.c` so the client-flight loop around `tls->ssl.state <= MBEDTLS_SSL_CLIENT_FINISHED` calls `esp8266_hal_eap_rsa_reserve()` before the loop and `esp8266_hal_eap_rsa_release()` after it;
+  - patched the EAP trace `tls_mbedtls.c` variant with the same reserve/release guard plus trace markers `j` before reserve and `J` after release.
+- Fast/static validation after the two-phase reserve adjustment:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - targeted `ESP8266_HAL_EAP_TRACE=1` release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - targeted default release `wifi_eap` Xtensa build was rerun after the trace check, so the local release artifact matches the non-trace hardware path.
+- Generated-source and size checks:
+  - normal generated `tls_mbedtls_patched.c` contained `esp8266_hal_eap_rsa_reserve()`, the `CLIENT_FINISHED` loop, and `esp8266_hal_eap_rsa_release()`;
+  - trace generated `tls_mbedtls_eap_trace.c` regenerated with the same reserve/release calls and `j`/`J` trace markers;
+  - default image size after the two-phase reserve adjustment: `text=493862 data=40352 bss=15156 dec=549370`;
+  - trace-enabled image size during the static check: `text=495926 data=40464 bss=15156 dec=551546`.
+- Cadence decision:
+  - no additional hardware test was run after the two-phase reserve adjustment;
+  - the next hardware checkpoint, when justified, should be one focused `eap_client_cert` run for the two-phase reserve state, not a full matrix.
+
+### 2026-06-22 EAP-TLS Two-Phase Hardware Checkpoint and Server-Input Reserve Follow-Up
+
+- Focused two-phase hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-client-cert-two-phase`;
+  - scenario: `eap_client_cert-1782114110`;
+  - EAP-TLS FreeRADIUS was started from `target/eap-radius-ecdsa-tls/raddb`;
+  - command shape used `ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1`, `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1`, absolute `ESP8266_HAL_EAP_TLS_ROOT`, and absolute `ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `8db105d5efe08a9cd041568e6c2f4247`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- UART evidence from `eap_client_cert-1782114110/uart.log`:
+  - heap was `37044` before Wi-Fi init and `19888` after init;
+  - DER CA/client cert/key material was configured;
+  - workspace before connect was `reserved=1 active=1 attempts=1 made=2 used=0 released=0 usable=1024 in_use=0`;
+  - the run reached `made=2 used=5 released=5`, so it returned to the useful two-slot failure shape rather than the all-three-slots early timeout;
+  - final timeout summary was `reserved=0 active=0 attempts=1 made=2 used=5 released=5 usable=0 in_use=0`;
+  - first allocation failure: `kind=Z size=0x1ea free=0x188 task=P count=2 eap_active=1 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - last allocation failure: `kind=Z size=0x138 free=0x13c task=? count=2 eap_active=1 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - interpretation: the client-flight reserve hook was too late for this failure, because no third slot was ever made; the heap pressure still occurs while processing the server TLS input before the client certificate flight.
+- RADIUS/router evidence:
+  - tcpdump captured the same server-handshake-fragment shape as the earlier two-slot run:
+    - `Access-Request id 0x1c len 230 -> Access-Challenge len 68`;
+    - `Access-Request id 0x1d len 415 -> Access-Challenge len 548`;
+    - `Access-Request id 0x1e len 235 -> Access-Challenge len 370`;
+    - `Access-Request id 0x1f len 235 -> Access-Reject len 44`;
+  - the DUT ACKed the server handshake fragments and then failed before sending a client certificate flight;
+  - router state remained `ssid=esp8266-router-eap`, `key_mgmt=WPA-EAP`, channel `11`, with EAP type `13 (TLS)` failure for DUT MAC `48:3f:da:68:e3:04`.
+- Fixture restore notes:
+  - the wrapper restored PEAP with `freeradius -f -xx`, but that foreground process did not survive the wrapper shell exit;
+  - a manual `nohup ... freeradius -X ...` restore also started cleanly and reached `Ready to process requests`, but did not survive the launching shell in this execution environment;
+  - the stable restore shape was `setsid -f env OPENSSL_CONF=target/eap-radius-1024/openssl-lowsec.cnf LD_LIBRARY_PATH=/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/lib/freeradius /home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/sbin/freeradius -X -D /home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/share/freeradius -d target/eap-radius-ecdsa/raddb`;
+  - delayed post-restore check confirmed PEAP FreeRADIUS PID `982261` listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Follow-up code-only adjustment after the two-phase hardware result:
+  - kept the two-slot session reserve and three-slot total capacity;
+  - patched generated normal `tls_mbedtls.c` so `tls_connection_handshake()` calls `esp8266_hal_eap_rsa_reserve()` only when `wpabuf_len(in_data) != 0`, then releases that nested reserve at the `end:` cleanup path;
+  - rationale: delay the third-slot top-up until non-empty server TLS input is being processed, avoiding the all-three-slots-at-session-start regression while making the third emergency slot available for the observed server-flight allocation failures;
+  - patched the EAP trace variant with the same guard and trace markers `[` before the delayed reserve and `]` after release;
+  - no hardware test was run after this server-input reserve follow-up.
+- Fast/static validation after the server-input reserve follow-up:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - generated normal `tls_mbedtls_patched.c` contained the delayed server-input reserve/release and the existing client-flight reserve/release;
+  - targeted `ESP8266_HAL_EAP_TRACE=1` release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - generated trace `tls_mbedtls_eap_trace.c` contained the delayed server-input reserve/release, `[`/`]` trace markers, and the existing client-flight `j`/`J` markers;
+  - targeted default release `wifi_eap` Xtensa build was rerun after the trace check, so the local release artifact matches the non-trace hardware path.
+- Size after the server-input reserve follow-up:
+  - default image: `text=493878 data=40352 bss=15156 dec=549386`;
+  - trace-enabled image during the static check: `text=495958 data=40464 bss=15156 dec=551578`.
+- Cadence decision:
+  - the next hardware checkpoint, when justified, should be one focused `eap_client_cert` run for the delayed server-input reserve state;
+  - do not run a full matrix until EAP-TLS either passes or is deliberately deferred.
+
+### 2026-06-22 EAP-TLS Server-Input, Helper, and Late-Slot Follow-Up
+
+- Focused delayed server-input reserve hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-server-input-reserve`;
+  - scenario: `eap_client_cert-1782117296`;
+  - command shape used the EAP-TLS FreeRADIUS fixture from `target/eap-radius-ecdsa-tls/raddb`, `ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED=1`, `ESP8266_HAL_WIFI_HW_SKIP_UNCHANGED_FLASH=1`, absolute `ESP8266_HAL_EAP_TLS_ROOT`, and absolute `ESP8266_HAL_EAP_RADIUS_CONFIG_ROOT`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `13f133ee48480c4ed27851d3e4468017`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- Delayed server-input UART/RADIUS evidence:
+  - heap was `37044` before Wi-Fi init and `19888` after init;
+  - workspace before connect was `reserved=1 active=1 attempts=1 made=2 used=0 released=0 usable=1024 in_use=0`;
+  - progress reached only `attempts=1 made=2 used=5 released=5`, so the lower `tls_connection_handshake()` non-empty-input hook was never reached before the allocation failure;
+  - final timeout summary was `reserved=0 active=0 attempts=1 made=2 used=5 released=5 usable=0 in_use=0`;
+  - first allocation failure: `kind=Z size=0x1ea free=0x188 task=P count=2 eap_active=1 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - last allocation failure: `kind=Z size=0x13a free=0x13c task=? count=2 eap_active=1 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - tcpdump showed the normal EAP-TLS server-handshake shape through Access-Reject: `0x20` request length `230` to challenge `68`, `0x21` request length `415` to challenge `548`, `0x22` request length `235` to challenge `372`, then `0x23` request length `235` to Access-Reject `44`;
+  - interpretation: the third-slot top-up must happen above the lower TLS wrapper, before the server TLS input reaches `tls_connection_handshake()`.
+- Helper-level reserve code adjustment:
+  - patched generated normal `eap_tls_common.c` so `eap_peer_tls_process_helper()` reserves at helper entry when `in_len > 0`, holds that nested reserve through `eap_tls_process_input()` and `eap_tls_process_output()`, and releases it on all helper returns where the flag can be active;
+  - patched the EAP trace variant with the same reserve/release guard and trace markers `{` and `}`;
+  - validation after this helper-level adjustment passed:
+    - `cargo fmt --all -- --check`;
+    - `git diff --check`;
+    - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`;
+    - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`;
+    - targeted default release `wifi_eap` Xtensa build with absolute DER env paths;
+    - targeted `ESP8266_HAL_EAP_TRACE=1` release `wifi_eap` Xtensa build with absolute DER env paths;
+  - generated normal `eap_tls_common_patched.c` and trace `eap_tls_common_trace.c` contained the helper reserve/release paths;
+  - default image size after the helper-level reserve: `text=493918 data=40352 bss=15156 dec=549426`;
+  - trace-enabled image size after the helper-level reserve: `text=496014 data=40464 bss=15156 dec=551634`.
+- Focused helper-level reserve hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-helper-input-reserve`;
+  - scenario: `eap_client_cert-1782117843`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `36beeb8de959daa3df41829def36f99e`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- Helper-level hardware evidence:
+  - heap was `37044` before Wi-Fi init and `19888` after init;
+  - workspace before connect was `reserved=1 active=1 attempts=1 made=2 used=0 released=0 usable=1024 in_use=0`;
+  - progress reached `reserved=1 active=1 attempts=3 made=2 used=5 released=5 usable=1024 in_use=0`;
+  - final timeout summary was `reserved=0 active=0 attempts=3 made=2 used=5 released=5 usable=0 in_use=0`;
+  - first allocation failure: `kind=Z size=0x1ea free=0x188 task=P count=2 eap_active=2 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - last allocation failure: `kind=Z size=0x13a free=0x13c task=? count=2 eap_active=2 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - tcpdump again showed the same server-handshake-fragment failure: `0x24` request length `230` to challenge `68`, `0x25` request length `415` to challenge `548`, `0x26` request length `235` to challenge `372`, then `0x27` request length `235` to Access-Reject `44`;
+  - interpretation: the helper-level reserve was entered (`attempts=3`, `active=2` at failure), but it still could not allocate a third 1024-byte slot before the first failed allocation.
+- Late boost code adjustment after the helper-level hardware result:
+  - added `boost_eap_rsa_workspace()` and C symbol `esp8266_hal_eap_rsa_boost()`;
+  - the boost only runs while `EAP_RSA_WORKSPACE_ACTIVE_COUNT != 0` and does not increment the active count, so it can top up missing slots without adding a nested reserve lifetime to release;
+  - patched generated normal `eap_tls_common.c` so the final `eap_tls_process_output()` path calls `esp8266_hal_eap_rsa_boost()` when `ret >= 0`, `in_len == 0`, and `*out_data != NULL`;
+  - patched the EAP trace variant with the same boost call and trace marker `^`;
+  - validation after the 1024-byte late boost passed:
+    - `cargo fmt --all -- --check`;
+    - `git diff --check`;
+    - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`;
+    - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`;
+    - targeted default release `wifi_eap` Xtensa build with absolute DER env paths;
+    - targeted `ESP8266_HAL_EAP_TRACE=1` release `wifi_eap` Xtensa build with absolute DER env paths;
+    - targeted default release `wifi_eap` Xtensa build was rerun after the trace check, so the local release artifact matched the non-trace hardware path;
+  - generated normal and trace `eap_tls_common` outputs contained the helper reserve/release, boost call, and trace `^` marker in the trace variant;
+  - default image size with the 1024-byte late boost: `text=494398 data=40352 bss=15156 dec=549906`;
+  - trace-enabled image size with the 1024-byte late boost: `text=496502 data=40464 bss=15156 dec=552122`.
+- Focused 1024-byte late boost hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-boost`;
+  - scenario: `eap_client_cert-1782118370`;
+  - EAP-TLS FreeRADIUS started as PID `1034124`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `f9233a77f0847ca877606ed8932760f3`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- 1024-byte late boost hardware evidence:
+  - heap was `37044` before Wi-Fi init and `19888` after init;
+  - workspace before connect was `reserved=1 active=1 attempts=1 made=2 used=0 released=0 usable=1024 in_use=0`;
+  - progress reached `reserved=1 active=1 attempts=4 made=2 used=5 released=5 usable=1024 in_use=0`, proving the boost/helper reserve attempts ran but still did not allocate a third 1024-byte slot;
+  - final timeout summary was `reserved=0 active=0 attempts=4 made=2 used=5 released=5 usable=0 in_use=0`;
+  - first allocation failure: `kind=Z size=0x1ea free=0x188 task=P count=2 eap_active=2 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - last allocation failure: `kind=Z size=0x139 free=0x13c task=? count=2 eap_active=2 eap_reserved=1 eap_usable=1024 eap_in_use=1 eap_avail=0`;
+  - tcpdump showed `0x28` request length `230` to challenge `68`, `0x29` request length `415` to challenge `548`, `0x2a` request length `235` to challenge `371`, then `0x2b` request length `235` to Access-Reject `44`;
+  - FreeRADIUS received `ClientHello`, sent TLS 1.0 `ServerHello`, `Certificate`, `ServerKeyExchange`, `CertificateRequest`, and `ServerHelloDone`, then rejected after the DUT ACKed the server handshake fragment without sending the client certificate flight;
+  - router fixture remained on SSID `esp8266-router-eap`, channel `11`, `key_mgmt=WPA-EAP`, and reported EAP type `13 (TLS)` failure for DUT MAC `48:3f:da:68:e3:04`.
+- Fixture restore after the 1024-byte late boost hardware run:
+  - the wrapper restored PEAP/MSCHAPv2 FreeRADIUS using the stable detached shape with `setsid -f`, `OPENSSL_CONF=target/eap-radius-1024/openssl-lowsec.cnf`, `LD_LIBRARY_PATH=/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/lib/freeradius`, `-D /home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/share/freeradius`, and `-d target/eap-radius-ecdsa/raddb`;
+  - restored FreeRADIUS PID `1035542` listened on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`;
+  - post-run safety checks found no matching stale hardware-test/esptool/serial/xtask process and no serial owners.
+- Follow-up code-only adjustment after the 1024-byte late boost result:
+  - kept `EAP_RSA_WORKSPACE_SLOTS = 3` and `EAP_RSA_WORKSPACE_SESSION_SLOTS = 2`;
+  - kept the first two slots at 1024 usable bytes;
+  - changed only the late third slot to 512 usable bytes via `EAP_RSA_WORKSPACE_LATE_USABLE_BYTES` and per-slot sizing in `ensure_eap_rsa_workspace_reserved()`;
+  - rationale: the observed failed server-flight allocations were `0x1ea` and `0x139`, so a 512-byte late slot should cover the known failures while reducing the top-up pressure that prevented a third 1024-byte slot from being allocated.
+- Fast/static validation after the 512-byte late-slot adjustment:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - targeted `ESP8266_HAL_EAP_TRACE=1` release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - targeted default release `wifi_eap` Xtensa build was rerun after the trace check, so the local release artifact matches the non-trace hardware path;
+  - default image size after the 512-byte late-slot adjustment: `text=494454 data=40352 bss=15140 dec=549946`;
+  - trace-enabled image size after the 512-byte late-slot adjustment: `text=496558 data=40464 bss=15140 dec=552162`.
+- Cadence decision:
+  - no hardware run was performed for the 512-byte late-slot state in this cycle to avoid a fourth flash in the same EAP batch;
+  - the next hardware checkpoint should be one focused `eap_client_cert` run for the 512-byte late-slot state, not a full matrix;
+  - success criterion for that checkpoint is at least `made=3` plus movement past the current server-handshake ACK / no-client-certificate-flight failure shape.
+
+### 2026-06-22 EAP-TLS No-Copy Input and Small-Cell Workspace Follow-Up
+
+- Focused no-copy input hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-no-fragment-view`;
+  - scenario: `eap_client_cert-1782132768`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `b5ef9fe793b6fa1a0e35c7db1108368b`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- No-copy input evidence:
+  - generated EAP-TLS patches avoided copying unfragmented TLS input, avoided copying the final reassembly fragment by passing it as extra input, and transferred heap-reassembled input ownership explicitly to the TLS wrapper;
+  - UART showed heap `36868` before Wi-Fi init, `19712` after init, and progress heap `16040`;
+  - workspace reached `attempts=5 made=3 used=22 released=22`, proving the late third dynamic slot could be reserved in this shape;
+  - the retained allocation-failure snapshot was `kind=C size=0xac free=0x28 eap_active=3 eap_count=3 eap_usage=0x00070f0f`;
+  - RADIUS still ended in Access-Reject after the DUT ACKed the server TLS flight and did not send a client certificate flight.
+- Interpretation:
+  - avoiding TLS input copies improved ownership/lifetime correctness but did not remove the `0xac` allocation failure;
+  - source inspection mapped `0xac` to `sizeof(mbedtls_x509_crt)` for `ssl->session_negotiate->peer_cert` in `ssl_parse_certificate_chain()`, not to a `wpabuf` duplicate;
+  - the diagnostic fields named `alloc_first_*` are currently the retained last-failure snapshot, not the original first failure, because the separate first-failure slot was removed to save RAM.
+- Late-slot reshaping hardware checkpoints:
+  - `target/wifi-hw-artifacts-20260622-eap-late176/eap_client_cert-1782133094` used image fingerprint `d7c1da248e25fb9978c11060af8ea720`, failed with `0xac`, and only reached `made=2`; the 176+32+32+32 late slot could not be reserved under the live heap fragmentation;
+  - `target/wifi-hw-artifacts-20260622-eap-late176-only/eap_client_cert-1782133413` used image fingerprint `93c448300ce8b133c9f484e068b7f72b`, kept the late slot at 176 bytes, preserved the normal 176-byte block for peer-cert allocation, and failed later with `kind=C size=0x20 free=0x38 eap_usage=0x03000b0f`;
+  - `target/wifi-hw-artifacts-20260622-eap-extra3/eap_client_cert-1782133641` used image fingerprint `4795736a10f571560c03018b1c8e03cb`, added three static 32-byte cells, and still failed with `kind=C size=0x20 free=0x40 eap_usage=0x07000b0f`.
+- Small-cell interpretation:
+  - top-byte usage `0x07` means all three static 32-byte cells were consumed;
+  - the preserved 176-byte block was intentionally not used for <=32-byte allocations, so the logged `eap_avail=1` was a diagnostic mismatch rather than capacity the allocator would actually consume;
+  - adding one more 32-byte static cell is the next meaningful allocator checkpoint, but the BSS cost should be offset to avoid reintroducing early Wi-Fi init starvation.
+- Certificate fixture inspection:
+  - the EAP-TLS server and client leaf certificates are P-256 ECDSA certificates with no SAN/EKU/basic-constraints/key-usage extensions reported by `openssl x509 -ext ...`;
+  - DER sizes are small: server `426` bytes, client `422` bytes, CA `523` bytes;
+  - fixture simplification is therefore unlikely to remove the remaining 32-byte allocation pressure.
+- Code-only adjustment prepared after the three-cell hardware result:
+  - removed dead task3 stack-monitor static state now that `trace_task3_overlap()` is a no-op;
+  - increased `EAP_RSA_WORKSPACE_EXTRA_SLOTS` from `3` to `4`, using the removed monitor state to more than offset the extra 32-byte cell on 32-bit;
+  - changed `eap_workspace_reserve_available()` to call `find_eap_workspace_block(size)`, so diagnostics now match the actual small-allocation policy that avoids consuming blocks larger than 32 bytes for <=32-byte allocations;
+  - removed the now-unused `eap_workspace_slot_can_take()` helper.
+- Fast/static validation after the four-cell adjustment:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - default image size after the four-cell adjustment: `text=499450 data=40456 bss=15276 dec=555182`;
+  - compared with the previous three-cell checkpoint size (`text=499830 data=40464 bss=15244 dec=555538`), total image size decreased while `.bss` increased by 32 bytes.
+- Cadence decision:
+  - the next hardware checkpoint is justified as one focused `eap_client_cert` run for the four-cell state;
+  - success criterion is movement past the latest `size=0x20 eap_usage=0x07000b0f` failure shape, ideally to the client certificate flight or full association.
+
+### 2026-06-22 EAP-TLS Four-Cell Regression and 176-Byte Fallback Follow-Up
+
+- Focused four-cell hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-extra4`;
+  - scenario: `eap_client_cert-1782134216`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `c92822c0a7a0a2958a6fe663178d75e4`;
+  - result: failed with `Error: timed out waiting for UART success markers`.
+- Four-cell hardware evidence:
+  - UART showed heap `36812` before Wi-Fi init and `19656` after init;
+  - the DUT initialized, configured, started, and reserved the normal two session slots, but stopped after the first EAP-TLS Start request with only `Uu` after progress heap `15984`;
+  - RADIUS saw only the first EAP Identity / EAP-TLS Start exchange and sent `Access-Challenge id 0xaa length 68`; no ClientHello followed;
+  - there was no firmware timeout summary and no allocation-failure detail before the host-side UART watcher timed out.
+- Interpretation:
+  - a fourth static 32-byte cell is not viable in this image shape; the 32-byte `.bss` increase moved the firmware back to the early no-ClientHello failure line;
+  - the four-cell sizing change was reverted, while the no-copy input path, richer diagnostics, and diagnostic availability policy were kept.
+- Follow-up code-only adjustment:
+  - kept `EAP_RSA_WORKSPACE_EXTRA_SLOTS = 3`;
+  - changed workspace block selection to use <=32-byte cells first, then fall back to the smallest larger free block only after all true tiny cells are exhausted;
+  - rationale: the three-cell hardware failure had all three tiny cells in use (`0x07000000`) while the preserved 176-byte peer-cert block was still free, so the fallback may satisfy the fourth 32-byte request without permanent RAM growth.
+- Fast/static validation after the fallback adjustment:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - fallback image size: `text=499694 data=40480 bss=15236 dec=555410`, restoring a safer RAM footprint than the failed four-cell image (`bss=15276`) and the prior three-cell checkpoint (`bss=15244`).
+- Fixture restore after the four-cell run:
+  - PEAP/MSCHAPv2 FreeRADIUS was restored as PID `1429037`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`;
+  - post-run safety checks found no stale hardware/esptool/serial/xtask process and no serial owners, `enp3s0` and `wlp4s0` remained up, and router `10.42.0.131` was reachable.
+- Focused 176-byte fallback hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-small-fallback`;
+  - scenario: `eap_client_cert-1782134563`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `3c218d357afafec10b807d42cdfc51aa`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- 176-byte fallback hardware evidence:
+  - UART showed heap `36836` before Wi-Fi init and `19680` after init;
+  - the run reached the normal ClientHello and server-flight ACK shape, not the four-cell early timeout;
+  - workspace reached `attempts=5 made=2 used=20 released=20`;
+  - retained allocation-failure snapshot was still `kind=C size=0x20 free=0x38 eap_active=3 eap_count=2 eap_usage=0x07000f0f eap_avail=0`;
+  - RADIUS received ClientHello, sent ServerHello/Certificate/ServerKeyExchange/CertificateRequest/ServerHelloDone, got an ACK for the server handshake fragment, then received a TLS fatal `bad_certificate` alert and sent Access-Reject.
+- Interpretation:
+  - the fallback block was consumed, proving generic workspace capacity still matters, but another 32-byte allocation remained;
+  - local SDK source inspection mapped 32-byte `calloc`s in this phase to `mbedtls_x509_name` / `mbedtls_asn1_named_data` DN nodes, not certificate extensions;
+  - the fixture cert subjects/issuers have multiple RDNs (`C`, `ST`, `O`, `CN`), causing repeated 32-byte linked-list node allocations during server and CA certificate parse.
+- Follow-up code-only adjustment:
+  - patched generated `x509.c` so `mbedtls_x509_get_name()` keeps only one parsed DN component, preferring CN, while still advancing through the complete DER name;
+  - patched generated `x509_crt.c` with `x509_raw_name_cmp()` and raw issuer/subject DER comparisons for CA parent matching and self-issued checks, so full DN bytes still participate in chain verification even though the heap-linked parsed list is trimmed;
+  - generated `x509_patched.c` contains the heapless DN parser and no `cur->next = mbedtls_calloc(1, sizeof(mbedtls_x509_name))` allocation;
+  - generated `x509_crt_patched.c` contains `x509_raw_name_cmp()` and raw issuer/subject comparisons at the parent and self-issued check sites.
+- Fast/static validation after the DN parser adjustment:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute DER env paths: passed with existing dead-code warnings;
+  - DN-patched image size: `text=499870 data=40480 bss=15236 dec=555586`.
+
+### 2026-06-22 EAP-TLS DN-Trim Hardware Checkpoint
+
+- Focused DN-trim hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-dn-trim`;
+  - scenario: `eap_client_cert-1782135001`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `b22aceab0e9c021305b8bba602764188`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- DN-trim hardware evidence:
+  - UART showed heap `36836` before Wi-Fi init, `19680` after init, and progress heaps `16008` then `15804`;
+  - workspace reached `attempts=5 made=3 used=25 released=25`, so the DN-trim build reduced enough pressure to reserve and use the late third workspace slot;
+  - retained allocation-failure snapshot was `kind=C size=0x20 free=0x10 eap_active=3 eap_count=3 eap_usage=0x07010f0f eap_avail=0`;
+  - RADIUS saw the normal ClientHello and server-handshake flight, the DUT ACKed the server fragment, then the DUT sent TLS fatal `unknown_ca` and FreeRADIUS sent Access-Reject.
+- Interpretation:
+  - trimming the parsed DN list moved the memory profile forward from the earlier `bad_certificate` shape, but it changed certificate-chain semantics and broke trust validation;
+  - raw issuer/subject DER comparisons in the patched `x509_crt.c` were not sufficient to preserve the mbedTLS trust decision with heap-trimmed parsed names;
+  - because this is a certificate-verification semantic regression, the DN-trim patch should not be kept as the next baseline without a stronger proof or a host-side reproduction.
+- Fixture restore/status:
+  - PEAP/MSCHAPv2 FreeRADIUS was restored as PID `1440150`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`;
+  - the restore again required `LD_LIBRARY_PATH=/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/lib/freeradius`;
+  - live safety checks after resume found no stale hardware/esptool/serial/xtask processes, no serial owners, `enp3s0` and `wlp4s0` still up, and router `10.42.0.131` reachable.
+
+### 2026-06-22 EAP-TLS CN-Only Fixture Follow-Up
+
+- Source adjustment after the DN-trim checkpoint:
+  - removed the generated `x509.c` heapless DN parser patch and generated `x509_crt.c` raw-DN compare patch from `esp8266-wifi-sys/build.rs`;
+  - kept the allocator, no-copy TLS input, peer-cert raw release, and EAP reserve/boost changes;
+  - rationale: the DN patch reduced memory pressure but changed the TLS failure to `unknown_ca`, so the next baseline should restore upstream mbedTLS certificate-verification semantics.
+- Separate fixture prepared under ignored `target/`:
+  - created `target/eap-radius-cn-tls` instead of overwriting `target/eap-radius-ecdsa-tls`;
+  - copied the existing EAP-TLS FreeRADIUS `raddb` and rewrote certificate paths from `target/eap-radius-ecdsa-tls` to `target/eap-radius-cn-tls`;
+  - generated P-256 ECDSA CA, server, and client certificates with single-component CN-only subjects/issuers:
+    - CA subject/issuer: `CN=esp8266-hal ECDSA Test CA`;
+    - server subject: `CN=esp8266-router-eap`;
+    - client subject: `CN=esp8266-client`;
+  - OpenSSL verified both `server.pem` and `client.pem` against the new CA;
+  - generated DER files for the hardware build: `ca.der` `434` bytes, `client.der` `316` bytes, and `client.key.der` `121` bytes.
+- Interpretation:
+  - the earlier 32-byte pressure was mapped to linked `mbedtls_x509_name` nodes while parsing multi-RDN fixture names;
+  - using a single-RDN fixture should remove those DN-node allocations without altering mbedTLS trust logic;
+  - this is a fixture minimization checkpoint, not a claim that arbitrary multi-RDN EAP-TLS certificate chains fit in the current ESP8266 memory budget.
+- Fast/static validation after reverting the DN patch and adding the CN-only fixture:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - CN-only image size: `text=499694 data=40280 bss=15236 dec=555210`;
+  - archive inspection confirmed `libmbedtls_all.a` contains original `x509.o` and `x509_crt.o`, while stale generated `x509_patched.c` files in the existing build output directory are not linked.
+- Focused CN-only hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-fixture`;
+  - scenario: `eap_client_cert-1782135663`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `54eec811f828fe662ce6d1ceb379a410`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- CN-only hardware evidence:
+  - UART showed heap `37028` before Wi-Fi init, `19872` after init, initial progress heap `16200`, then `15996`;
+  - workspace reached `attempts=5 made=3 used=24 released=24`;
+  - retained allocation-failure snapshot was `kind=C size=0x20 free=0x20 eap_active=3 eap_count=3 eap_usage=0x07010f0f eap_avail=0`;
+  - RADIUS saw ClientHello, sent the server Certificate/ServerKeyExchange/CertificateRequest/ServerHelloDone across two fragments, got the DUT ACK for the first server fragment, then got TLS fatal `unknown_ca` after sending the second fragment.
+- Interpretation:
+  - CN-only names restored upstream mbedTLS verification code but did not eliminate the final 32-byte allocation pressure;
+  - the final failure occurs at the server-certificate verification / second-server-fragment peak, not in the CertificateRequest parser itself;
+  - the linked image does not contain ECDSA restart allocation symbols, so the remaining 32-byte request is most likely an MPI/ASN.1 small allocation during ECDSA certificate verification rather than the prior generated DN patch path;
+  - because the CN-only DER fixture lowered `.data` by about 200 bytes compared with the previous multi-RDN EAP-TLS image, a fourth static 32-byte workspace cell is now a lower-risk checkpoint than it was in the earlier larger image.
+- Follow-up code-only adjustment:
+  - increased `EAP_RSA_WORKSPACE_EXTRA_SLOTS` from `3` to `4`;
+  - kept the CN-only fixture and upstream mbedTLS x509 source;
+  - rationale: target the exact final `calloc(0x20)` failure while relying on the smaller CN-only embedded material to avoid the earlier four-cell no-ClientHello regression.
+- Fast/static validation after the four-cell CN-only adjustment:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - four-cell CN-only image size: `text=499774 data=40280 bss=15268 dec=555322`;
+  - compared with the earlier failed four-cell multi-RDN image (`data=40456 bss=15276`), this image keeps `.data + .bss` 184 bytes lower despite the fourth tiny workspace cell.
+- Focused four-cell CN-only hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-extra4`;
+  - scenario: `eap_client_cert-1782136054`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `fea0bb9a0c8bbf3be8c6e5f8931781af`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- Four-cell CN-only hardware evidence:
+  - UART showed heap `36996` before Wi-Fi init, `19840` after init, initial progress heap `16168`, then `15964`;
+  - workspace reached `attempts=5 made=3 used=26 released=26`, so the fourth tiny cell was used and the run did not regress to the earlier no-ClientHello four-cell shape;
+  - retained allocation-failure snapshot moved from `calloc(0x20)` to `kind=C size=0x4 free=0x10 eap_usage=0x0f010f0f`;
+  - RADIUS still saw the DUT send TLS fatal `unknown_ca` after the second server fragment and then sent Access-Reject.
+- Interpretation:
+  - the fourth tiny cell fixed at least one 32-byte peak allocation but revealed one more tiny allocation at the same server-cert/second-fragment peak;
+  - adding more static tiny cells would likely work, but the current image can instead use a dynamic late-slot split to avoid permanent `.bss` growth.
+- Follow-up code-only adjustment:
+  - changed the late third workspace slot from a single `176`-byte block to `176 + 32` bytes;
+  - `find_eap_workspace_block()` can now satisfy <=32-byte requests from the late slot's second block after static tiny cells are exhausted;
+  - rationale: target the final `calloc(0x4)` failure with dynamic EAP-only memory while keeping the fourth static cell and upstream x509 code.
+- Fast/static validation after the late-slot split:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - late-split image size: `text=500030 data=40264 bss=15268 dec=555562`.
+
+### 2026-06-22 EAP-TLS CN-Only Late-Slot Second Tiny Block Follow-Up
+
+- Focused late-slot hardware checkpoint from the `176 + 32` dynamic split:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-late-split`;
+  - scenario: `eap_client_cert-1782136343`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `9bb8de76a0fd04292673eb9cff751a87`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- Late-slot `176 + 32` evidence:
+  - UART showed heap `37012` before Wi-Fi init, `19856` after init, initial progress heap `16184`, then `15948`;
+  - workspace reached `attempts=5 made=3 used=22 released=22`;
+  - retained allocation-failure snapshot was `kind=C size=0x20 free=0x24 eap_usage=0x0f030f0f`;
+  - usage bits show all four static tiny cells plus the late slot's `176` and first `32` byte blocks were consumed before another `calloc(0x20)` failed;
+  - RADIUS still saw the DUT send TLS fatal `unknown_ca` after the second server fragment and then sent Access-Reject.
+- Follow-up code-only adjustment:
+  - extended the late third workspace slot from `176 + 32` to `176 + 32 + 32`;
+  - rationale: add one more EAP-only tiny block exactly where the live usage bits showed pressure, without increasing the always-reserved static 32-byte cell count.
+- Validation status:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - second-tiny late-split image size: `text=500222 data=40288 bss=15268 dec=555778`.
+- Cadence decision:
+  - the next hardware checkpoint is one focused `eap_client_cert` run with the CN-only EAP-TLS fixture.
+- Focused `176 + 32 + 32` hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-late-split2`;
+  - scenario: `eap_client_cert-1782136729`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `a39025e07c20124f0a80da1d145119c1`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- `176 + 32 + 32` hardware evidence:
+  - UART showed heap `36996` before Wi-Fi init, `19840` after init, initial progress heap `16168`, then `15900`;
+  - workspace reached `attempts=5 made=3 used=29 released=29`;
+  - retained allocation-failure snapshot was `kind=C size=0x20 free=0x28 eap_active=3 eap_count=3 eap_usage=0x0f070f0f`;
+  - usage bits show all four static tiny cells and the late slot's `176 + 32 + 32` blocks were consumed before another `calloc(0x20)` failed;
+  - tcpdump showed the same server-handshake shape through Access-Reject, and FreeRADIUS reported the DUT's fatal `unknown_ca` alert after the final server fragment.
+- Follow-up code-only adjustment:
+  - extended the late third workspace slot again, from `176 + 32 + 32` to `176 + 32 + 32 + 32`;
+  - kept the static tiny cell count unchanged at four, so this targets the observed EAP-only peak without adding always-reserved `.bss`;
+  - rationale: the live run proved the third dynamic slot was still reservable and all existing tiny-capacity blocks were consumed before the next 32-byte allocation failure.
+- Fast/static validation after the third tiny late-slot adjustment:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - third-tiny late-split image size: `text=500278 data=40296 bss=15268 dec=555842`.
+- Focused `176 + 32 + 32 + 32` hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-late-split3`;
+  - scenario: `eap_client_cert-1782137051`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `535ddaa07cb8730f476a09476d77608e`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- Third tiny late-slot hardware evidence:
+  - UART showed heap `36980` before Wi-Fi init, `19824` after init, initial progress heap `16152`, then `15852`;
+  - workspace reached `attempts=5 made=3 used=38 released=38`;
+  - retained allocation-failure snapshot changed to `kind=C size=0x24 free=0x40 eap_active=3 eap_count=3 eap_usage=0x0f070f07`;
+  - usage bits show the final late 32-byte block was still free, but the next failed allocation needed `0x24` bytes, so another 32-byte cell is not sufficient;
+  - tcpdump and FreeRADIUS again showed the same server-handshake shape, ending with the DUT's fatal `unknown_ca` alert and Access-Reject.
+- Follow-up code-only adjustment:
+  - changed only the late slot's final tail block from `32` to `40` usable bytes, yielding a dynamic late slot layout of `176 + 32 + 32 + 40`;
+  - kept four static 32-byte cells and all other dynamic block sizes unchanged;
+  - rationale: target the observed `calloc(0x24)` request with a net +8 bytes in the EAP-only late slot instead of increasing static `.bss` or globally widening tiny cells.
+- Fast/static validation after the 40-byte tail adjustment:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - 40-byte tail image size: `text=500254 data=40296 bss=15268 dec=555818`.
+- Focused `176 + 32 + 32 + 40` hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-late-tail40`;
+  - scenario: `eap_client_cert-1782137333`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `10d2c05d4f0f0f4e27c6d0131e0a6d01`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- 40-byte tail hardware evidence:
+  - UART showed heap `36980` before Wi-Fi init, `19824` after init, initial progress heap `16152`, then `15844`;
+  - workspace reached `attempts=5 made=3 used=38 released=38`;
+  - retained allocation-failure snapshot remained `kind=C size=0x24 free=0x38`, but usage changed to `eap_usage=0x0f0f0707`;
+  - usage bits show the late slot's 40-byte tail was consumed, while the two normal 1024-byte slots still had their 32-byte tail blocks free and unusable for the next 36-byte request;
+  - tcpdump and FreeRADIUS again showed the same server-handshake shape ending in the DUT's fatal `unknown_ca` alert and Access-Reject.
+- Follow-up code-only adjustment:
+  - rebalanced each normal 1024-byte workspace slot from `500 + 316 + 176 + 32` to `492 + 316 + 176 + 40`;
+  - total normal-slot reserve size is unchanged, but the two otherwise-free normal tail blocks can now satisfy `calloc(0x24)`;
+  - rationale: the largest observed block0 request is `0x1ea` (490 bytes), so a 492-byte first block preserves headroom while freeing 8 bytes for a useful 40-byte tail.
+- Fast/static validation after the normal-slot tail rebalance:
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - normal-tail rebalance image size: `text=500254 data=40296 bss=15268 dec=555818`.
+- Focused normal-tail hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-normal-tail40`;
+  - scenario: `eap_client_cert-1782137631`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `3efda66bda2ed406089efa37166767c9`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`.
+- Normal-tail hardware evidence:
+  - UART showed heap `36980` before Wi-Fi init, `19824` after init, initial progress heap `16152`, then `15844`;
+  - workspace reached `attempts=5 made=3 used=305 released=305`, a large step forward from the prior `used=38` checkpoints;
+  - retained allocation-failure snapshot changed to `kind=C size=0x44 free=0x20 eap_active=3 eap_count=3 eap_usage=0x0305070f`, with two retained failures;
+  - usage bits show the four static tiny cells plus slot0 all active, slot1 blocks `0..2` active with its `40`-byte tail free, and slot2 blocks `0` and `2` active with its `32` and `40` byte blocks free; no remaining workspace block could satisfy a `68`-byte request;
+  - tcpdump and FreeRADIUS still showed the normal ClientHello/server-handshake exchange through the DUT ACK, followed by the DUT's TLS fatal `unknown_ca` alert and Access-Reject.
+- Interpretation:
+  - rebalancing the normal tails fixed the repeated `calloc(0x24)` pressure and let the handshake allocate substantially more through the server-certificate verification peak;
+  - the new `0x44` request matches the size class of a small `wpabuf`/EAP-TLS response wrapper, so it may be downstream of the fatal alert path rather than the first/root verifier failure;
+  - because the retained snapshot is currently the last allocation failure, not a durable first-failure record, the next checkpoint should add a compact allocation context marker before changing the workspace geometry again.
+- Follow-up diagnostic adjustment:
+  - added an allocator context word to `AllocFailureSnapshot` and the hidden `wifi::AllocFailureDebug` output;
+  - restored first-failure reporting as a compact packed record instead of a second full snapshot, keeping the latest full snapshot for last-failure detail;
+  - added `esp8266_hal_alloc_context_set()` / `esp8266_hal_alloc_context_clear()` and wrapped high-value generated C allocation phases:
+    - `0x1001`: EAP-TLS response wrapper allocation;
+    - `0x2001`: first `mbedtls_ssl_handshake_step()` after server input;
+    - `0x2002`: input-drain handshake step;
+    - `0x2003`: client-flight handshake step;
+    - `0x2004`: `tls_mbedtls_write()` output buffer allocation/resize;
+    - `0x2005`: post-flight handshake flush step;
+    - `0x3000`: `ssl_parse_certificate_chain()`;
+    - `0x3001`: `mbedtls_x509_crt_verify_restartable()`;
+    - `0x4001`: client CertificateVerify signing;
+  - `examples/wifi_eap.rs` now logs `_ctx=0x...` for first and last allocation failures.
+- Fast/static validation after the allocation-context diagnostic edit:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - diagnostic image size from host `size`: `text=501358 data=40296 bss=15308 dec=556962`.
+- Focused allocation-context hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-alloc-context`;
+  - scenario: `eap_client_cert-1782138644`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `fbeb23c0bc0b399738e170c33dbb5ae1`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1481290`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Allocation-context hardware evidence:
+  - UART showed heap `36940` before Wi-Fi init, `19784` after init, initial progress heap `16112`, then `15804`;
+  - workspace reached `attempts=5 made=3 used=308 released=308`;
+  - first retained allocation failure was `alloc_first_kind=Z size=0x1f4 free=0x1c8 task=P eap_active=1 eap_count=3 eap_usage=0x00000000 ctx=0x00000000`;
+  - last retained allocation failure was `alloc_last_kind=C size=0x48 free=0x44 task=? eap_active=3 eap_count=3 eap_usage=0x0701070f ctx=0x00003001`;
+  - tcpdump/RADIUS again showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - the first failure proves that reducing the normal slot's first block from `500` to `492` was too aggressive: a `zalloc(0x1f4)` arrived while all three EAP workspace slots were reserved but unused, and no block could satisfy it;
+  - the last failure is inside `mbedtls_x509_crt_verify_restartable()` and needs a `72`-byte block after the handshake has already consumed the known `500`, `316`, `176`, `40`, and tiny-cell shapes;
+  - next geometry should restore a `500`-byte first block, keep a `40`-byte normal tail by increasing normal slot usable bytes from `1024` to `1032`, and add a dynamic `72`-byte medium block to the late third slot.
+- Follow-up code-only adjustment:
+  - restored `EAP_RSA_WORKSPACE_BLOCK0_USABLE_BYTES` from `492` to `500`;
+  - increased normal workspace-slot usable bytes from `1024` to `1032`, preserving `500 + 316 + 176 + 40` in each normal slot;
+  - added a fifth late-slot block of `72` bytes, making the late slot `176 + 32 + 32 + 40 + 72`;
+  - rationale: cover both allocation-context findings without adding always-reserved static tiny cells.
+- Fast/static validation after the `500/40/72` workspace geometry edit:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - `500/40/72` image size from host `size`: `text=501686 data=40320 bss=15300 dec=557306`.
+- Focused `500/40/72` hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-geom-500-40-72`;
+  - scenario: `eap_client_cert-1782138973`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `f95c24673c1a4350399400e6e3bcbe67`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1485690`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- `500/40/72` hardware evidence:
+  - UART showed heap `36932` before Wi-Fi init, `19776` after init, initial progress heap `16088`, then `15708`;
+  - workspace reached `attempts=5 made=3 used=31 released=31`;
+  - the first and only retained allocation failure was `kind=C size=0x20 free=0x28 eap_active=3 eap_count=3 eap_usage=0x0f1f0f0f ctx=0x00003001`;
+  - usage bits show all four static tiny cells, both normal slots' four blocks, and the late slot's five blocks (`176 + 32 + 32 + 40 + 72`) were live during certificate verification before another `calloc(0x20)` failed;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - the `500` and `72` allocation-context failures were fixed, but ECDSA certificate verification still needs at least one more live 32-byte MPI limb allocation;
+  - the active ECP config is already constrained (`MBEDTLS_ECP_WINDOW_SIZE=2`, `MBEDTLS_ECP_FIXED_POINT_OPTIM=0`, `MBEDTLS_ECP_MAX_BITS=256`);
+  - peer certificate raw DER cannot be safely freed before this point because the verifier still needs TBS/signature buffers for signature verification;
+  - next geometry should add dynamic EAP-only tiny capacity in the late slot, preferably two extra `32`-byte blocks to avoid spending a flash cycle on a single-block miss.
+- Follow-up code-only adjustment:
+  - extended the late third workspace slot from `176 + 32 + 32 + 40 + 72` to `176 + 32 + 32 + 40 + 72 + 32 + 32`;
+  - kept the normal slots at `500 + 316 + 176 + 40` and kept the four static tiny cells unchanged;
+  - rationale: add EAP-only verifier tiny capacity while avoiding more always-reserved `.bss`.
+- Fast/static validation after the extra late-slot tiny blocks:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - extra-tiny image size from host `size`: `text=502334 data=40320 bss=15308 dec=557962`.
+- Focused extra-tiny hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-late-extra-tiny2`;
+  - scenario: `eap_client_cert-1782139310`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `4f5c09b87be08258d0f7a0033a81d455`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1494712`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Extra-tiny hardware evidence:
+  - UART showed heap `36924` before Wi-Fi init, `19768` after init, initial progress heap `16080`, then `15636`;
+  - workspace reached `attempts=5 made=3 used=32 released=32`;
+  - the first and only retained allocation failure was `kind=C size=0x4 free=0x20 eap_active=3 eap_count=3 eap_usage=0x0f7f0f0f ctx=0x00003001`;
+  - usage bits show all four static tiny cells, both normal slots' four blocks, and all seven late-slot blocks were live during certificate verification before a tiny `calloc(0x4)` failed;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - the two late-slot `32`-byte blocks moved the verifier failure from `calloc(0x20)` to a smaller `calloc(0x4)`, so this is still live tiny-capacity pressure during ECDSA certificate verification;
+  - the late slot has room for one more block before the `u8` usage bitmap is full;
+  - next geometry should add that eighth late-slot `32`-byte block and one additional static `32`-byte cell, giving two more tiny allocations while leaving large-block geometry unchanged.
+- Follow-up code-only adjustment:
+  - extended the late third workspace slot to `176 + 32 + 32 + 40 + 72 + 32 + 32 + 32`, filling the late slot's `u8` block-usage bitmap;
+  - increased static `EAP_RSA_WORKSPACE_EXTRA_SLOTS` from `4` to `5`;
+  - rationale: provide two more tiny-capacity allocations for the remaining `ctx=0x3001` verifier peak without changing the large normal-slot geometry.
+- Fast/static validation after the final late-slot block plus fifth static tiny cell:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - final-late-slot image size from host `size`: `text=501942 data=40344 bss=15348 dec=557634`.
+- Focused final-late-slot hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-final-late-static5`;
+  - scenario: `eap_client_cert-1782139601`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `5d5b2564fdb793af1628c16e73b969b3`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1498404`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Final-late-slot hardware evidence:
+  - UART showed heap `36852` before Wi-Fi init, `19696` after init, initial progress heap `16008`, then `15988`;
+  - workspace reached `attempts=5 made=2 used=26 released=26`, so the enlarged `448`-byte late slot did not reserve;
+  - the first and only retained allocation failure was `kind=C size=0x20 free=0x18 eap_active=3 eap_count=2 eap_usage=0x1f000f0f ctx=0x00003001`;
+  - usage bits show both normal slots and all five static tiny cells were live, but no late-slot blocks were available because only two dynamic slots were reserved;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - growing the late slot from `416` to `448` bytes crossed the live reserve limit for the current image;
+  - the next geometry should back the late slot down to the last hardware-proven reservable size (`416` bytes, seven blocks) while keeping the fifth static `32`-byte cell as the single extra tiny-capacity block needed after the `calloc(0x4)` checkpoint.
+- Follow-up code-only adjustment:
+  - backed the late third workspace slot down from `448` to `416` bytes (`176 + 32 + 32 + 40 + 72 + 32 + 32`);
+  - kept `EAP_RSA_WORKSPACE_EXTRA_SLOTS=5`;
+  - rationale: preserve the last hardware-proven dynamic reserve size while retaining one extra static tiny allocation.
+- Fast/static validation after the `416`-byte late-slot plus fifth static tiny cell backoff:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - `416`-byte-late/static5 image size from host `size`: `text=502398 data=40320 bss=15340 dec=558058`.
+- Focused `416`-byte-late/static5 hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-late416-static5`;
+  - scenario: `eap_client_cert-1782139870`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `0b1688e0b6e14cfbc5eea5e6f664cb41`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1506663`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- `416`-byte-late/static5 hardware evidence:
+  - UART showed heap `36892` before Wi-Fi init, `19736` after init, initial progress heap `16048`, then `16028`;
+  - workspace reached `attempts=5 made=2 used=21 released=21`, so the third dynamic slot still did not reserve even after backing the late slot down to `416` bytes when the fifth static cell was present;
+  - the first and only retained allocation failure was `kind=C size=0x4 free=0x18 eap_active=3 eap_count=2 eap_usage=0x1f000f0f ctx=0x00003001`;
+  - usage bits show both normal slots and all five static tiny cells were live, but no late-slot blocks were available because only two dynamic slots were reserved.
+- Interpretation:
+  - the fifth static tiny cell reduces available heap/fragmentation enough to lose the third dynamic slot, so static `.bss` is the wrong place for this extra verifier capacity;
+  - next adjustment should restore static tiny cells to four, keep the last hardware-proven late slot size (`416` bytes), and add one or two separately reserved dynamic `32`-byte cells from heap so the third slot does not need to become larger or depend on extra `.bss`.
+- Follow-up code-only adjustment:
+  - restored static `EAP_RSA_WORKSPACE_EXTRA_SLOTS` to `4`;
+  - kept the late third slot at the last hardware-proven reservable `416` bytes (`176 + 32 + 32 + 40 + 72 + 32 + 32`);
+  - added two heap-backed dynamic EAP-only `32`-byte tiny cells that are reserved only after all three workspace slots have been reserved/boosted;
+  - wired the dynamic cells through reserve availability, allocation, realloc-in-place, free, idle release, and allocation-failure diagnostics (`eap_usage` top byte now packs static tiny usage in low bits and dynamic tiny usage in high bits);
+  - rationale: provide the extra ECDSA verifier tiny capacity without adding `.bss` or increasing the third-slot reservation size that previously lost the third slot.
+- Fast/static validation after the dynamic tiny-cell adjustment:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - dynamic-tiny image size from host `size`: `text=503382 data=40120 bss=15324 dec=558826`.
+- Focused dynamic-tiny hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-dynamic-tiny2`;
+  - scenario: `eap_client_cert-1782140382`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `d1ea152d07e6959668c4b66f3036f7d9`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1520715`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Dynamic-tiny hardware evidence:
+  - UART showed heap `37100` before Wi-Fi init, `19944` after init, initial progress heap `16256`, then `15732`;
+  - workspace reached `attempts=5 made=3 used=302 released=302`, so the dynamic tiny-cell approach restored all three workspace slots and avoided the static fifth-cell reserve regression;
+  - the first and only retained allocation failure was `kind=C size=0x44 free=0x30 eap_active=3 eap_count=3 eap_usage=0x23110707 ctx=0x00003001`;
+  - packed usage bits show both normal slots' `500`, `316`, and `176` blocks were live, the late slot's `176` and `72` blocks were live, two static tiny cells were live, and one dynamic tiny cell was live; no `72`-byte block remained for the `calloc(0x44)`;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - the dynamic tiny cells fixed the tiny verifier pressure but exposed a second medium-sized verifier allocation inside `mbedtls_x509_crt_verify_restartable()`;
+  - because the failure is `0x44` and the only `72`-byte reserve block was already in use, add heap-backed dynamic `72`-byte medium cells rather than increasing slot size or `.bss`.
+- Follow-up code-only adjustment:
+  - added two heap-backed dynamic EAP-only `72`-byte medium cells, reserved only after all three workspace slots and dynamic tiny cells have been reserved/boosted;
+  - medium cells are preferred for allocations larger than the `40`-byte tail block and are used as a fallback for smaller allocations only if normal workspace blocks are unavailable;
+  - wired the medium cells through reserve availability, allocation, realloc-in-place, free, idle release, and packed allocation-failure diagnostics (`eap_usage` top byte now packs static tiny, dynamic tiny, and dynamic medium usage);
+  - rationale: cover the new verifier `calloc(0x44)` without changing the hardware-proven slot geometry.
+- Fast/static validation after the dynamic medium-cell adjustment:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - dynamic-medium image size from host `size`: `text=504166 data=40336 bss=15324 dec=559826`.
+- Focused dynamic-medium hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-dynamic-medium2`;
+  - scenario: `eap_client_cert-1782140745`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `4e9d3268d87e67d49d11ae14dc2d856e`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1525395`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Dynamic-medium hardware evidence:
+  - UART showed heap `36892` before Wi-Fi init, `19736` after init, initial progress heap `16048`, then `16028`;
+  - workspace reached only `attempts=5 made=2 used=20 released=20`, so the larger code/data footprint lost the third workspace slot before the medium cells could help;
+  - the first and only retained allocation failure was `kind=C size=0x20 free=0x18 eap_active=3 eap_count=2 eap_usage=0x0f000f0f ctx=0x00003001`;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - the dynamic-medium machinery crossed the same live reserve threshold as the failed fifth static tiny-cell attempt; adding new reserve machinery for `72`-byte cells is too expensive for this image;
+  - the replacement should keep the lower dynamic-tiny footprint and reshape the already-reserved `416`-byte late slot to provide a second `72`-byte block.
+- Follow-up code-only adjustment:
+  - removed the dynamic `72`-byte medium-cell machinery;
+  - kept the late third slot at `416` bytes but reshaped it from `176 + 32 + 32 + 40 + 72 + 32 + 32` to `176 + 32 + 32 + 32 + 72 + 72`;
+  - retained the four static tiny cells and two heap-backed dynamic tiny cells;
+  - rationale: provide a second medium verifier block without increasing `.data`, `.bss`, or any workspace reservation size.
+- Fast/static validation after the reshaped late-slot adjustment:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - reshaped-late image size from host `size`: `text=502982 data=40112 bss=15324 dec=558418`.
+- Focused reshaped-late hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-reshaped-late2`;
+  - scenario: `eap_client_cert-1782141055`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `94832aa4ae09914ca727307ca6c56191`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1537012`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Reshaped-late hardware evidence:
+  - UART showed heap `37116` before Wi-Fi init, `19960` after init, initial progress heap `16272`, then `15748`;
+  - workspace reached `attempts=5 made=3 used=304 released=304`, so the lower-footprint reshaped slot preserved all three workspace slots;
+  - the first and only retained allocation failure was `kind=C size=0x44 free=0x50 eap_active=3 eap_count=3 eap_usage=0x2131070f ctx=0x00003001`;
+  - usage bits show the late slot's `176` and both `72` blocks were live, the first normal slot used its `40`-byte residual tail, and the second normal slot's residual tail was still unused but too small for `calloc(0x44)`;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - the verifier now needs a third medium-sized block after both late `72` blocks are live;
+  - the least intrusive next geometry is to grow only the second normal slot from `1032` to `1064` usable bytes so its residual tail becomes `72` bytes, preserving the first normal slot and late-slot geometry.
+- Follow-up code-only adjustment:
+  - split normal-slot usable sizes into a primary `1032`-byte slot and a secondary `1064`-byte slot;
+  - block layout remains `500 + 316 + 176 + residual`, making slot 0's residual `40` bytes and slot 1's residual `72` bytes;
+  - rationale: add one more available `72`-byte reserve block at a 32-byte heap reservation cost and without increasing `.data`/`.bss`.
+- Fast/static validation after the asymmetric normal-slot adjustment:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - asymmetric-normal image size from host `size`: `text=502998 data=40112 bss=15324 dec=558434`.
+- Focused asymmetric-normal hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-asym-normal`;
+  - scenario: `eap_client_cert-1782141319`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `ebb83450be821ae57f4c1c45bf5b22ab`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1541527`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Asymmetric-normal hardware evidence:
+  - UART showed heap `37116` before Wi-Fi init, `19960` after init, initial progress heap `16240`, then `15716`;
+  - workspace reached `attempts=5 made=3 used=321 released=321`, so the additional 32-byte slot-1 reservation preserved all three workspace slots;
+  - the first and only retained allocation failure was `kind=C size=0x44 free=0x30 eap_active=3 eap_count=3 eap_usage=0x21310f0f ctx=0x00003001`;
+  - usage bits show both normal slots' residual tails were live, both late `72` blocks were live, and the verifier still needed another `0x44` allocation;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - the verifier consumed the added slot-1 `72`-byte tail and still needed another medium block;
+  - slot 0's `40`-byte residual tail is already used by a smaller allocation, so the next geometry should preserve that tail and add one extra `72`-byte block after it.
+- Follow-up code-only adjustment:
+  - grew the primary normal slot from `1032` to `1104` bytes;
+  - split primary slot block layout as `500 + 316 + 176 + 40 + 72`, while keeping the secondary slot as `500 + 316 + 176 + 72` and the late slot as `176 + 32 + 32 + 32 + 72 + 72`;
+  - rationale: add a fourth medium verifier block while preserving the first normal slot's known-live `40`-byte tail.
+- Fast/static validation after adding the primary extra medium block:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - primary-extra-medium image size from host `size`: `text=504854 data=40152 bss=15316 dec=560322`.
+- Focused primary-extra-medium hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-primary-extra-medium`;
+  - scenario: `eap_client_cert-1782141596`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `253c3bde2aa83ab11a3e712555594926`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1545840`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Primary-extra-medium hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16128`, then `15604`;
+  - workspace reached `attempts=5 made=3 used=34 released=34`, so the primary slot growth still preserved all three workspace slots;
+  - the first and only retained allocation failure was `kind=C size=0x20 free=0x28 eap_active=3 eap_count=3 eap_usage=0x3f3f0f1f ctx=0x00003001`;
+  - usage bits show all normal/late medium blocks were live, all four static tiny cells were live, and both heap-backed dynamic tiny cells were live before another `32`-byte verifier allocation failed;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - the verifier has enough medium capacity to get past the repeated `0x44` failures, but now needs additional tiny capacity;
+  - increasing heap-backed dynamic tiny cells is cheaper than static `.bss`: the three workspace slots are allocated before these cells, and each extra dynamic tiny cell costs one pointer plus a later heap allocation.
+- Follow-up code-only adjustment:
+  - increased heap-backed dynamic EAP-only `32`-byte tiny cells from `2` to `4`;
+  - kept static tiny cells at `4`, primary slot `1104`, secondary slot `1064`, and late slot `416`;
+  - rationale: add two more verifier tiny cells without the static fifth-cell reserve regression.
+- Fast/static validation after increasing dynamic tiny cells to four:
+  - `cargo fmt --all`: applied formatting;
+  - `cargo fmt --all -- --check`: passed;
+  - `git diff --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted default release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - dynamic-tiny4 image size from host `size`: `text=505678 data=40152 bss=15332 dec=561162`.
+- Focused dynamic-tiny4 hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-dynamic-tiny4`;
+  - scenario: `eap_client_cert-1782141851`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `49337a71a8a873300d6f125a5fdfb7ab`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1548987`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Dynamic-tiny4 hardware evidence:
+  - UART showed heap `37060` before Wi-Fi init, `19904` after init, initial progress heap `16112`, then `15588`;
+  - workspace reached `attempts=5 made=3 used=34 released=34`, so the primary/secondary/late slots still reserved successfully;
+  - the first and only retained allocation failure was `kind=C size=0x20 free=0x18 eap_active=3 eap_count=3 eap_usage=0x3f3f0f1f ctx=0x00003001`;
+  - only two of the four heap-backed dynamic tiny cells were actually reserved and used; increasing the count did not create additional verifier capacity under the current heap geometry;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - allocator reserve geometry is saturated in the current image: all available medium and tiny reserve blocks are live, and the ordinary heap has only `0x18` bytes at the next `32`-byte verifier allocation;
+  - adding more reserve cells is no longer productive unless the base heap pressure is reduced enough for those cells to reserve;
+  - the next batch should reduce verifier-time heap pressure, starting with the TLS input record buffer, before adding more allocator state.
+- Follow-up code-only adjustment:
+  - reduced generated mbedTLS `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN` from `896` to `768` while keeping `CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=512`;
+  - disabled generated `CONFIG_MBEDTLS_X509_CRL_PARSE_C`, since the HAL EAP surface does not configure a CRL chain and the client verification path passes `NULL` CRL state;
+  - rationale: free runtime heap from the inbound TLS record buffer and remove unused X.509 CRL code before adding more allocator reserve machinery.
+- Fast/static validation after the inbound-buffer/CRL adjustment:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `sdkconfig.h` contains `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN 768`, `CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN 512`, and leaves `CONFIG_MBEDTLS_X509_CRL_PARSE_C` commented out;
+  - inbound-buffer/CRL-adjusted image size from host `size`: `text=505230 data=40152 bss=15332 dec=560714`.
+- Focused inbound-buffer/CRL-off hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-in768-crl-off`;
+  - scenario: `eap_client_cert-1782142415`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `1c7b0cbece220d378de9cebe95f0feca`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1558551`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Inbound-buffer/CRL-off hardware evidence:
+  - UART showed heap `37060` before Wi-Fi init, `19904` after init, initial progress heap `16112`, then `15508`;
+  - workspace reached `attempts=5 made=3 used=325 released=325`, so the failure occurred after many more successful verifier reserve allocations than the dynamic-tiny4 run;
+  - the first and only retained allocation failure was `kind=C size=0x44 free=0x34 eap_active=3 eap_count=3 eap_usage=0x43310f1f ctx=0x00003001`;
+  - usage bits show all normal-slot medium/tail blocks and all late-slot medium blocks were live, while the late slot's `32`-byte blocks were unused at failure;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - the buffer/CRL change moved the verifier past the prior `0x20` failure but exposed another medium-sized `0x44` allocation;
+  - the current late slot should be reshaped from `176 + 3*32 + 2*72` to `176 + 3*72`, adding one medium verifier block while reducing the third-slot reservation from `416` to `392` bytes.
+- Follow-up code-only adjustment:
+  - reshaped the third EAP workspace slot to `176 + 72 + 72 + 72`;
+  - retained four static `32`-byte cells, four heap-backed dynamic `32`-byte cells, primary slot `500 + 316 + 176 + 40 + 72`, and secondary slot `500 + 316 + 176 + 72`;
+  - rationale: the latest failure needed medium capacity and did not use the late-slot tiny blocks, so this is a capacity improvement without increasing heap reservation size.
+- Fast/static validation after the late-slot medium reshape:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - reshaped-slot/in768 image size from host `size`: `text=505110 data=40136 bss=15332 dec=560578`.
+- Focused reshaped-slot/in768 hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-in768-late3medium`;
+  - scenario: `eap_client_cert-1782142693`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `5b31209ffd7119d2e14bfc5b541c513e`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1560771`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Reshaped-slot/in768 hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16128`, then `15548`;
+  - workspace reached `attempts=5 made=3 used=357 released=357`, showing still more successful verifier reserve traffic than the previous run;
+  - the first and only retained allocation failure was `kind=C size=0x40 free=0x3c eap_active=3 eap_count=3 eap_usage=0x7f0f0f1f ctx=0x00003001`;
+  - usage bits show all normal-slot blocks, all three late-slot medium blocks, all four static tiny cells, and three heap-backed dynamic tiny cells were live before another `64`-byte verifier allocation failed;
+  - tcpdump/RADIUS still showed the normal ClientHello/server flight, DUT ACK, DUT TLS fatal `unknown_ca`, and Access-Reject.
+- Interpretation:
+  - slot carving has been exhausted: the verifier now needs memory while every reserve class useful for `0x40` and below is live;
+  - because the server certificate record has been fully parsed before `mbedtls_x509_crt_verify_restartable()`, temporarily releasing `ssl->in_buf` during client certificate verification should free the actual TLS input buffer for the verifier rather than adding more reserve blocks or further shrinking TLS limits.
+- Follow-up code-only adjustment:
+  - patched generated `ssl_tls.c` to release `ssl->in_buf` only for client-side certificate verification and only when there is no current application-data stream, no pending input bytes, and no remaining handshake bytes in the current certificate record;
+  - the buffer is restored immediately after `mbedtls_x509_crt_verify_restartable()` before the handshake advances to later server-flight records;
+  - retained the allocation context tag `0x3001` around the verifier and the in768/CRL-off/reshaped-slot allocator geometry.
+- Fast/static validation after the temporary input-buffer release patch:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `ssl_tls_patched.c` contains the input-buffer release/restore helpers and calls them around `mbedtls_x509_crt_verify_restartable()`;
+  - input-buffer-release image size from host `size`: `text=505254 data=40136 bss=15332 dec=560722`.
+- Focused input-buffer-release hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-inbuf-release`;
+  - scenario: `eap_client_cert-1782143134`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `d0f72f88f34f75e5ff7b86fed24bbec8`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1564872`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Input-buffer-release hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16128`, then `15548`;
+  - workspace reached `attempts=5 made=3 used=1232 released=1232`, confirming the verifier ran far deeper under the same reserve geometry;
+  - the first and only retained allocation failure was `kind=C size=0x40 free=0x000000c0 eap_active=3 eap_count=3 eap_usage=0x000f0f17 ctx=0x00003001`;
+  - ordinary free space rose to `0xc0`, consistent with the input buffer being released, but heap fragmentation still prevented a contiguous `64`-byte allocation after all available medium reserve blocks were live;
+  - slot 0's old `40`-byte primary tail was unused at failure (`eap_usage` bit 3 clear), while the primary `72`, secondary `72`, and all three late `72` blocks were live.
+- Interpretation:
+  - temporary input-buffer release is effective and should be retained, but the verifier still needs one more medium reserve block;
+  - the least intrusive next adjustment is to grow the primary slot by `32` bytes, turning the unused `40`-byte primary tail into a `72`-byte medium block.
+- Follow-up code-only adjustment:
+  - increased `EAP_RSA_WORKSPACE_PRIMARY_USABLE_BYTES` from `1104` to `1136`;
+  - increased `EAP_RSA_WORKSPACE_PRIMARY_TAIL_USABLE_BYTES` from `40` to `72`, making the primary layout `500 + 316 + 176 + 72 + 72`;
+  - retained secondary `500 + 316 + 176 + 72`, late `176 + 72 + 72 + 72`, static tiny cells, dynamic tiny cells, in768, CRL-off, and temporary input-buffer release.
+- Fast/static validation after growing the primary tail:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - primary-tail-72 image size from host `size`: `text=505254 data=40136 bss=15332 dec=560722`.
+- Focused primary-tail-72 hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-primary-tail72`;
+  - scenario: `eap_client_cert-1782143386`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `42cef17dcfaf4b65c75ff094fcaf2c96`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1567003`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Primary-tail-72 hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16096`, then `15516`;
+  - workspace reached `attempts=5 made=3 used=3300 released=3300 usable=1136`;
+  - the first and only retained allocation failure was `kind=C size=0x40 free=0x38 eap_active=3 eap_count=3 eap_usage=0xff0f0f1f ctx=0x00002002`;
+  - tcpdump/RADIUS showed the normal ClientHello/server flight, then DUT TLS fatal `decrypt_error` and Access-Reject rather than the earlier `unknown_ca`.
+- Interpretation:
+  - the client now passes server certificate verification and fails while draining the remaining server flight;
+  - the `decrypt_error` maps to ServerKeyExchange signature verification (`mbedtls_pk_verify_restartable()`), where the peer certificate public key is still needed;
+  - the next memory-pressure reduction should free the verified CA chain immediately after `MBEDTLS_SSL_SERVER_CERTIFICATE` advances, before processing ServerKeyExchange, while keeping the peer certificate until after ECDHE verification.
+- Follow-up code-only adjustment:
+  - patched generated `tls_mbedtls.c` to drop the configured CA chain only for the client endpoint and only once `tls->ssl.state > MBEDTLS_SSL_SERVER_CERTIFICATE`;
+  - the helper calls `mbedtls_ssl_conf_ca_chain(&tls->conf, NULL, NULL)`, frees `tls->cacert`, and nulls `tls->cacert_ptr`; cleanup remains idempotent;
+  - normal and EAP-trace TLS patchers both call the helper after successful `mbedtls_ssl_handshake_step()` in the first server-input step and the input-drain loop.
+- Fast/static validation after dropping the verified CA:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `tls_mbedtls_patched.c` contains `esp8266_hal_tls_drop_verified_ca()` and calls it after successful `0x2001`/`0x2002` handshake steps;
+  - CA-drop image size from host `size`: `text=505334 data=40136 bss=15332 dec=560802`.
+- Focused CA-drop hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-ca-drop`;
+  - scenario: `eap_client_cert-1782143939`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1571772`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- CA-drop hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16096`, then `15516`;
+  - workspace reached `attempts=5 made=3 used=11314 released=11314 usable=1136`;
+  - the first and only retained allocation failure was `kind=C size=0x40 free=0xa4 eap_active=3 eap_count=3 eap_usage=0x000f0f1f ctx=0x00002002`;
+  - RADIUS still showed DUT TLS fatal `decrypt_error` after the server flight and then Access-Reject.
+- Interpretation:
+  - dropping the CA chain after certificate verification substantially reduced long-lived pressure and raised ordinary free space from `0x38` to `0xa4`, but the heap still could not provide a contiguous `64`-byte block during ServerKeyExchange verification;
+  - reserve usage shows all normal slot blocks live and no tiny cells live, so the next pressure point is specifically the TLS input record buffer containing the ServerKeyExchange message;
+  - because the ServerKeyExchange parameter hash is computed before `mbedtls_pk_verify_restartable()`, the short P-256 DER signature can be copied to stack and `ssl->in_buf` can be temporarily released around signature verification.
+- Follow-up code-only adjustment:
+  - patched generated `ssl_cli.c` to release `ssl->in_buf` during ServerKeyExchange signature verification only after copying signatures of up to 96 bytes to stack;
+  - the helper restores the input buffer and stream pointers immediately after `mbedtls_pk_verify_restartable()`;
+  - added allocation context `0x3002` around ServerKeyExchange signature verification to separate it from the outer `0x2002` input-drain context.
+- Fast/static validation after ServerKeyExchange input-buffer release:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `ssl_cli_patched.c` contains `esp8266_hal_ssl_release_in_buf_for_ske_verify()`, the bounded signature copy, and `0x3002` around `mbedtls_pk_verify_restartable()`;
+  - ServerKeyExchange-buffer image size from host `size`: `text=505574 data=40136 bss=15332 dec=561042`.
+- Focused ServerKeyExchange-buffer hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-ske-inbuf`;
+  - scenario: `eap_client_cert-1782144290`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `5678d17e401473f5ca64b342edc45449`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1575142`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- ServerKeyExchange-buffer hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16096`, then `15516`;
+  - workspace reached `attempts=6 made=3 used=9727 released=9727 usable=1136`;
+  - the first and only retained allocation failure was `kind=C size=0x40 free=0x44 eap_active=4 eap_count=3 eap_usage=0x000f0f1f ctx=0x00002003`;
+  - RADIUS saw the client certificate message from the DUT, created `TLS-Client-Cert-*` attributes for `CN=esp8266-client`, then failed waiting for the next TLS message.
+- Interpretation:
+  - ServerKeyExchange signature verification is now past the previous failure; the remaining allocation failure is inside the client-flight loop after the client certificate is sent and before ClientKeyExchange/CertificateVerify completes;
+  - the local client certificate raw/parsed data is no longer needed after `mbedtls_ssl_write_certificate()` serializes it, but the private key and non-null key-cert entry are still needed for CertificateVerify;
+  - the next reclaim should free the sent client certificate internals while preserving `conf->key_cert->cert` as a non-null pointer and keeping `conf->key_cert->key` intact.
+- Follow-up code-only adjustment:
+  - patched generated `ssl_tls.c` to call `mbedtls_x509_crt_free()` on the client own-certificate object after `mbedtls_ssl_write_handshake_msg()` succeeds for the Certificate message;
+  - the helper only runs for the client endpoint, keeps the `mbedtls_ssl_key_cert` entry and private key, and leaves later cleanup idempotent;
+  - generated active `ssl_tls_patched.c` contains `esp8266_hal_ssl_drop_sent_client_cert()` and calls it after successful certificate write.
+- Fast/static validation after dropping the sent client certificate:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - sent-client-cert-drop image size from host `size`: `text=505614 data=40136 bss=15332 dec=561082`.
+- Focused sent-client-cert-drop hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-client-cert-drop`;
+  - scenario: `eap_client_cert-1782144637`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `21a2f74dcfc271fc146c26ef9de57f39`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1578604`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Sent-client-cert-drop hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16096`;
+  - after the client certificate/write/sign region, workspace reached `attempts=7 made=3 used=13500 released=13497 usable=1136 in_use=1`, while ordinary heap was `956`;
+  - after cleanup, workspace showed `used=13500 released=13500 in_use=0`, and ordinary heap returned to `15516`;
+  - the decisive first allocation failure was `kind=C size=0x40 free=0xf4 eap_active=5 eap_count=3 eap_usage=0x020f0f1f ctx=0x00004001`;
+  - the retained last allocation failure was `kind=M size=0x1d2 free=0x23c eap_active=1 eap_count=3 eap_usage=0x00000303 ctx=0x00000000`;
+  - RADIUS received the server flight and then only ACKs from the DUT, eventually reporting that the EAP session did not finish.
+- Interpretation:
+  - dropping the sent client certificate moved the failure into client CertificateVerify signing;
+  - the first failure context `0x4001` is the signing call itself, before the DUT can deliver the rest of the client flight;
+  - the next pressure reduction should temporarily release `ssl->out_buf` while signing the P-256 ECDSA CertificateVerify signature, then restore the output record buffer before serializing the handshake message.
+- Follow-up code-only adjustment:
+  - patched generated `ssl_cli.c` to release `ssl->out_buf` only for the client endpoint, only when no outbound record bytes are pending, and only on the ECDSA client-key signing path;
+  - the signature is produced into a 96-byte stack buffer while allocation context `0x4001` and the EAP reserve are active;
+  - after signing, the output buffer is restored, TLS 1.2 signature-algorithm bytes are rewritten, and the stack signature is copied into `ssl->out_msg`;
+  - RSA client keys and ECP-restartable signing keep the existing direct `ssl->out_msg` signing path because the mbedTLS 2.x signing API does not accept a destination length.
+- Fast/static validation after CertificateVerify output-buffer release:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `ssl_cli_patched.c` contains `esp8266_hal_ssl_release_out_buf_for_cert_verify()`, `esp8266_hal_ssl_restore_out_buf_after_cert_verify()`, the 96-byte stack signature buffer, and `0x4001` around `mbedtls_pk_sign_restartable()`;
+  - CertificateVerify-output-buffer image size from host `size`: `text=505950 data=40136 bss=15332 dec=561418`.
+- Focused CertificateVerify-output-buffer hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-certverify-outbuf`;
+  - scenario: `eap_client_cert-1782145239`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `6bd71c2e97c394f9af547c99599b5785`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1585290`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- CertificateVerify-output-buffer hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16096`;
+  - after the client certificate/write/sign region, workspace reached `attempts=7 made=3 used=11060 released=11057 usable=1136 in_use=1`, while ordinary heap was `956`;
+  - after cleanup, workspace showed `used=11060 released=11060 in_use=0`, and ordinary heap returned to `15516`;
+  - the decisive first allocation failure was `kind=C size=0x84 free=0x1f0 eap_active=5 eap_count=3 eap_usage=0x00010707 ctx=0x00004001`;
+  - the retained last allocation failure remained `kind=M size=0x1d2 free=0x23c eap_active=1 eap_count=3 eap_usage=0x00000303 ctx=0x00000000`;
+  - RADIUS sent the fragmented server flight and then saw the DUT ACK only the second fragment; the EAP session did not finish.
+- Interpretation:
+  - releasing `ssl->out_buf` during ECDSA CertificateVerify signing is effective and exposed a deeper signer allocation;
+  - at `eap_usage=0x00010707`, all three 176-byte reserve blocks were live, while the remaining free reserve blocks were 72-byte tails;
+  - the signer now needs a `0x84`/132-byte allocation in context `0x4001`, so the next allocator adjustment should add a 132+ byte reserve block without removing the existing primary two-72-byte split.
+- Follow-up code-only adjustment:
+  - increased `EAP_RSA_WORKSPACE_SECONDARY_USABLE_BYTES` from `1064` to `1136`;
+  - under the current block carving, the secondary slot remains `500 + 316 + 176 + tail`, but the tail grows from `72` to `144` bytes;
+  - rationale: the latest failure has secondary slot blocks 0-2 live and block 3 free, so this creates one suitable `0x84` reserve block at the exact pressure point while preserving the previous block count.
+- Fast/static validation after the secondary-tail-144 allocator adjustment:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - secondary-tail-144 image size from host `size`: `text=505934 data=40136 bss=15332 dec=561402`.
+- Focused secondary-tail-144 hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-secondary-tail144`;
+  - scenario: `eap_client_cert-1782145587`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `b64ab7b4e7c3c467cbe058c914631c8e`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1587934`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Secondary-tail-144 hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16024`;
+  - workspace reached only `attempts=5 made=3 used=1468 released=1468 usable=1136`, then timed out;
+  - the first allocation failure regressed to server certificate verification: `kind=C size=0x40 free=0xa0 eap_active=3 eap_count=3 eap_usage=0x000f0f1f ctx=0x00003001`;
+  - RADIUS received the DUT TLS fatal `unknown_ca` and returned Access-Reject.
+- Interpretation:
+  - growing the secondary slot by 72 bytes created the intended 144-byte tail block but reduced verifier-time ordinary heap enough to regress the earlier server certificate verification path;
+  - the allocator growth was removed; the secondary slot is back to `1064` usable bytes;
+  - the next fix should reduce signer heap pressure without increasing the always-reserved EAP workspace footprint.
+- Follow-up code-only adjustment:
+  - kept the CertificateVerify ECDSA stack-signature path and output-buffer release;
+  - additionally releases `ssl->in_buf` under the same guarded conditions used for ServerKeyExchange verification before entering `mbedtls_pk_sign_restartable()`;
+  - restores the input buffer first and the output buffer second before copying the stack signature into the restored `ssl->out_msg`;
+  - this targets the `0x84` signing allocation without changing the workspace geometry.
+- Fast/static validation after CertificateVerify input+output buffer release:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `ssl_cli_patched.c` releases/restores both `ssl->in_buf` and `ssl->out_buf` in the `0x4001` CertificateVerify signing block;
+  - CertificateVerify-input-output-buffer image size from host `size`: `text=506022 data=40136 bss=15332 dec=561490`.
+- Focused CertificateVerify-input-output-buffer hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-certverify-inout`;
+  - scenario: `eap_client_cert-1782145947`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `a4856406febb52a14cf7125846a0d78b`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1591556`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- CertificateVerify-input-output-buffer hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16096`;
+  - workspace reached `attempts=7 made=3 used=10426 released=10426 usable=1136`, and ordinary heap returned to `15516` after cleanup;
+  - first allocation failure moved past signing to output-flight construction: `kind=R size=0x1fa free=0x2cc eap_active=4 eap_count=3 eap_usage=0x00000207 realloc_old=0x1f4 realloc_workspace=0x1f4 ctx=0x00002004`;
+  - retained last allocation failure was `kind=Z size=0x1fa free=0x2cc eap_active=2 eap_count=3 eap_usage=0x00000207 ctx=0x00001001`;
+  - RADIUS saw the DUT ACK the server fragments and then repeatedly ACK the final challenge; FreeRADIUS rejected the session as an EAP-TLS verification failure/misbehaving peer.
+- Interpretation:
+  - releasing both TLS buffers during CertificateVerify gets through the signer allocation path;
+  - the next failure is a workspace-backed output buffer realloc from `0x1f4`/500 bytes to `0x1fa`/506 bytes in `tls_mbedtls_write()`/EAP response construction;
+  - because the old workspace allocation is in block0 and `grow_eap_rsa_workspace()` can only grow in place, block0 itself must be large enough for the final EAP-TLS output size.
+- Follow-up code-only adjustment:
+  - increased `EAP_RSA_WORKSPACE_BLOCK0_USABLE_BYTES` from `500` to `508`;
+  - increased primary/secondary slot usable sizes from `1136`/`1064` to `1144`/`1072` so their existing `72`-byte tails are preserved;
+  - rationale: 508 bytes covers the observed `0x1fa` realloc while adding only 16 bytes total to the first two long-lived reservations, avoiding the 72-byte secondary-tail regression.
+- Fast/static validation after the block0-508 allocator adjustment:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - block0-508 image size from host `size`: `text=506022 data=40136 bss=15332 dec=561490`.
+- Focused block0-508 hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-block0-508`;
+  - scenario: `eap_client_cert-1782146264`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `b5fc19ef97476dc9b27a7b0160e69a33`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1594000`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Block0-508 hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16080`;
+  - workspace reached `attempts=7 made=3 used=10435 released=10435 usable=1144`, and ordinary heap returned to `15500` after cleanup;
+  - first allocation failure remained in output-flight construction but moved deeper: `kind=R size=0x233 free=0x2bc eap_active=4 eap_count=3 eap_usage=0x00000207 realloc_old=0x1fc realloc_workspace=0x1fc ctx=0x00002004`;
+  - retained last allocation failure was `kind=Z size=0x200 free=0x2bc eap_active=2 eap_count=3 eap_usage=0x00000207 ctx=0x00001001`;
+  - RADIUS still saw only ACKs after the server flight and then rejected the session as EAP-TLS verification failure/misbehaving peer.
+- Interpretation:
+  - block0-508 fixed the earlier `0x1fa` grow but exposed the true single-buffer client-flight output size of `0x233`/563 bytes;
+  - increasing reserve blocks enough to hold that output would add verifier-time pressure comparable to the regressing secondary-tail experiment;
+  - the better direction is to keep the TLS input buffer released for the entire client-flight write loop, not only during CertificateVerify signing, so the output `wpabuf` can grow from ordinary heap while mbedTLS is only emitting client messages.
+- Follow-up code-only adjustment:
+  - added generated `tls_mbedtls.c` helpers to release and restore `ssl->in_buf` around the client-flight loop after ServerHelloDone;
+  - both normal and EAP-trace TLS patchers now release `ssl->in_buf` before the `0x2003` loop and restore it after the loop before returning to the EAP state machine;
+  - retained the block0-508 geometry because it covers the smaller `0x1fa` EAP response realloc and keeps primary/secondary tails intact.
+- Fast/static validation after client-flight input-buffer release:
+  - `cargo fmt --all`: applied formatting;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `tls_mbedtls_patched.c` contains `esp8266_hal_tls_release_in_buf_for_client_flight()`, `esp8266_hal_tls_restore_in_buf_after_client_flight()`, and the release/restore calls around the `0x2003` loop;
+  - client-flight-input-buffer image size from host `size`: `text=506174 data=40136 bss=15332 dec=561642`.
+- Focused client-flight-input-buffer hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-client-flight-inbuf`;
+  - scenario: `eap_client_cert-1782146821`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `871ad133dd692c92f011ecf0f6d8da57`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1598490`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Client-flight-input-buffer hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16080`;
+  - workspace reached `attempts=7 made=3 used=8759 released=8759 usable=1144`, and ordinary heap returned to `15500` after cleanup;
+  - first allocation failure stayed in client-flight output construction: `kind=R size=0x232 free=0x4d4 eap_active=4 eap_count=3 eap_usage=0x00000005 realloc_old=0x1fc realloc_workspace=0x1fc ctx=0x00002004`;
+  - retained last allocation failure was `kind=Z size=0x1ff free=0x4d4 eap_active=2 eap_count=3 eap_usage=0x00000005 ctx=0x00001001`;
+  - RADIUS saw the DUT ACK the fragmented server flight, then ACK the final challenge again; FreeRADIUS rejected the session as a misbehaving EAP-TLS peer.
+- Interpretation:
+  - releasing `ssl->in_buf` through the whole client flight increased total free memory from `0x2bc` to `0x4d4`, but did not create a contiguous block large enough for `wpabuf_resize()` from the workspace-backed `0x1fc` output buffer to `0x232`;
+  - the next fix should stop growing the TLS client-flight output incrementally from a small workspace block;
+  - preallocating the TLS output `wpabuf` immediately after releasing the 768-byte mbedTLS input buffer should let the client flight use that contiguous span before signer/output construction fragments it.
+- Follow-up code-only adjustment:
+  - added a generated `tls_mbedtls.c` helper that preallocates a 704-byte TLS client-flight output `wpabuf` under allocation context `0x2006`;
+  - the client-flight loop now releases `ssl->in_buf`, preallocates that output buffer only when a client certificate is configured, then enters the existing EAP RSA workspace reserve/sign/write path;
+  - rationale: use the just-freed 768-byte mbedTLS input-buffer span for the outbound TLS flight before the signer and EAP response builders fragment ordinary heap.
+- Fast/static validation after client-flight output preallocation:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `tls_mbedtls_patched.c` contains `ESP8266_HAL_TLS_CLIENT_FLIGHT_OUT_PREALLOC_BYTES 704`, `esp8266_hal_tls_prealloc_client_flight_out()`, context `0x2006`, and the client-cert-gated call before the client-flight loop;
+  - client-flight-output-prealloc image size from host `size`: `text=506214 data=40136 bss=15332 dec=561682`.
+- Focused client-flight-output-prealloc hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-out-prealloc704`;
+  - scenario: `eap_client_cert-1782147895`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `cbc70bd50115b7053e5ce178203dad5e`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1606190`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Client-flight-output-prealloc hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16080`;
+  - workspace reached `attempts=7 made=3 used=10103 released=10103 usable=1144`, and ordinary heap returned to `15500` after cleanup;
+  - first allocation failure moved from the client-flight output grow to immediate mbedTLS input-buffer restore: `kind=C size=0x44d free=0x200 eap_active=3 eap_count=3 eap_usage=0x00000004 ctx=0x00000000`;
+  - retained last allocation failure was the EAP response allocation: `kind=Z size=0x239 free=0x200 eap_active=2 eap_count=3 eap_usage=0x00000004 ctx=0x00001001`;
+  - RADIUS saw only ACKs for the server flight fragments, then rejected the peer as misbehaving EAP-TLS.
+- Interpretation:
+  - the 704-byte preallocation got past the earlier `0x232` client-flight `wpabuf_resize()` failure;
+  - restoring `ssl->in_buf` immediately after the client flight reintroduced the roughly 1101-byte input-buffer allocation while the outbound TLS flight was still live;
+  - the fix should keep `ssl->in_buf` released until the outbound EAP fragments have been emitted, then restore it only when the next server TLS input arrives.
+- Follow-up code-only adjustment:
+  - added an `in_buf_restore_pending` flag to the generated TLS adapter state;
+  - client-flight input-buffer release now marks that flag instead of restoring immediately;
+  - added exported `esp8266_hal_tls_restore_deferred_input()` and changed `eap_peer_tls_process_helper()` so inbound server data first checks pending outbound fragments, then restores deferred mbedTLS input, then reserves the EAP RSA workspace;
+  - rationale: avoid competing with the live outbound client-flight buffer during EAP fragmentation, while ensuring mbedTLS input state is restored before the next inbound handshake step.
+- Fast/static validation after deferred client-flight input restore:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `eap_tls_common_patched.c` restores deferred input before `esp8266_hal_eap_rsa_reserve()`, and generated `tls_mbedtls_patched.c` marks `in_buf_restore_pending` instead of restoring at `esp8266_hal_client_flight_done`;
+  - deferred-restore image size from host `size`: `text=506262 data=40136 bss=15332 dec=561730`.
+- Focused deferred-restore hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-deferred-inbuf-restore`;
+  - scenario: `eap_client_cert-1782148467`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `2fa170f8568a9d36e40c9c9172c8841b`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1611070`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Deferred-restore hardware evidence:
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, initial progress heap `16080`;
+  - workspace reached `attempts=7 made=3 used=9727 released=9727 usable=1144`, and ordinary heap returned to `15500` after cleanup;
+  - the input-buffer restore failure disappeared;
+  - the only recorded allocation failure was the EAP response wrapper allocation: `kind=Z size=0x23a free=0x1fc eap_active=2 eap_count=3 eap_usage=0x00000004 ctx=0x00001001`;
+  - RADIUS still saw ACKs only for the server flight fragments, then rejected the peer as misbehaving EAP-TLS.
+- Interpretation:
+  - deferred input restore fixed the ~1101-byte `ssl->in_buf` restore failure;
+  - the remaining pressure is `eap_tls_msg_alloc()` wrapping the first outbound client TLS flight fragment;
+  - the generated EAP core still configures `fragment_size = 1400`, so the client tries to wrap too much TLS data into one EAP response under low heap.
+- Follow-up code-only adjustment:
+  - added a normal generated `eap.c` patcher and changed the active EAP core so `sm->config.fragment_size` remains `1400` by default but drops to `440` when a client certificate is configured;
+  - updated the EAP trace patcher with the same client-certificate cap;
+  - rationale: split only client-certificate EAP-TLS outbound flights into smaller EAP responses, leaving password-only PEAP/EAP behavior unchanged.
+- Fast/static validation after client-certificate fragment cap:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `eap_core_patched.c` contains `sm->config.fragment_size = 440` under the `g_wpa_client_cert && g_wpa_client_cert_len` guard;
+  - client-certificate-fragment-cap image size from host `size`: `text=506286 data=40192 bss=15332 dec=561810`.
+- Focused EAP-core fragment-cap hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-frag440`;
+  - scenario: `eap_client_cert-1782148824`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `a56c924785b58e6f86f3fbf267fb2033`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1614713`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- EAP-core fragment-cap hardware evidence:
+  - UART showed heap `37028` before Wi-Fi init, `19872` after init, initial progress heap `16032`;
+  - this was 48 bytes lower than the previous image and regressed server certificate verification;
+  - the first allocation failure was again verifier-time `kind=C size=0x40 free=0xa4 eap_active=3 eap_count=3 eap_usage=0x000f0f1f ctx=0x00003001`;
+  - RADIUS showed the DUT got far enough to send a TLS fatal `unknown_ca`, not the client certificate flight.
+- Interpretation:
+  - reducing the client-certificate fragment size is still needed, but applying it by patching `eap.c` changed the EAP core object footprint enough to reintroduce the verifier-time 64-byte allocation failure;
+  - the fragment cap should live in the already-patched TLS common path instead of replacing the EAP core object in normal builds.
+- Follow-up code-only adjustment:
+  - removed the normal generated `eap.c` patcher and the EAP-core fragment cap;
+  - moved the 440-byte cap to generated `eap_tls_common.c` after `data->tls_out_limit = config->fragment_size`;
+  - the cap is guarded by actual configured client-cert and private-key blobs via `eap_get_config_blob()`, so PEAP/password-only EAP keeps the default `1400` limit;
+  - rationale: preserve the previous EAP core footprint while still fragmenting the client-certificate EAP-TLS output wrapper.
+- Fast/static validation after moving the fragment cap to TLS common:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `eap_tls_common_patched.c` contains the blob-guarded `data->tls_out_limit = 440` cap, and image `data` returned to `40136`;
+  - TLS-common-fragment-cap image size from host `size`: `text=506294 data=40136 bss=15332 dec=561762`.
+- Focused TLS-common 440-byte fragment-cap hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-frag440-tls-common`;
+  - scenario: `eap_client_cert-1782149258`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - RADIUS showed the DUT ACKed the fragmented server flight and then stopped after the final server flight fragment;
+  - UART first/last allocation failure was `kind=M size=0x1f8 free~=0x1fc/0x218`, with the workspace still active.
+- Follow-up code-only adjustment:
+  - increased the generated EAPOL stack fallback in both normal and trace `esp_wpa2.c` patchers from 256 to 512 bytes;
+  - rationale: the client TLS response had moved past signer allocation and needed a larger no-heap EAPOL wrapper fallback.
+- Focused EAPOL stack512 hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-eapol-stack512`;
+  - scenario: `eap_client_cert-1782149753`;
+  - result: failed with the same RADIUS shape: no client response after the final server flight fragment;
+  - interpretation: EAPOL wrapper allocation was not the only remaining limit because the underlying `esp_wifi_internal_tx()` path still needed memory for the first large client response.
+- Trace diagnostic checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-trace-final-frag`;
+  - scenario: `eap_client_cert-1782150023`;
+  - trace image size from host `size`: `text=508430 data=40248 bss=15332 dec=564010`;
+  - result: failed, but trace showed the final server fragment was processed and the TLS client flight generated total `0x227` bytes;
+  - the first client response with the 440-byte cap attempted raw EAPOL TX length `0x1d4` (`468`) and `wpa2_sendto_wrapper` logged `~W000001D4~X00000101`, i.e. `esp_wifi_internal_tx()` returned `ESP_ERR_NO_MEM`;
+  - interpretation: cap the client-certificate EAP-TLS output lower so the driver TX path sees smaller EAPOL frames.
+- Follow-up code-only adjustment:
+  - lowered the client-certificate EAP-TLS output cap in generated `eap_tls_common.c` from 440 to 256 bytes, still guarded by configured client-cert and private-key blobs;
+  - retained the 512-byte EAPOL stack fallback.
+- Fast/static validation after the 256-byte client-cert output cap:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `eap_tls_common_patched.c` contains `data->tls_out_limit = 256`, and `esp_wpa2_patched.c` contains the 512-byte stack fallback;
+  - image size from host `size` stayed `text=506294 data=40136 bss=15332 dec=561762`.
+- Focused 256-byte cap hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-frag256`;
+  - scenario: `eap_client_cert-1782150348`;
+  - result: xtask still failed because UART reported `wifi eap connect err`, but RADIUS completed EAP-TLS and sent `Access-Accept`;
+  - RADIUS evidence: FreeRADIUS accepted three client TLS fragments (`256`, `256`, `40` bytes), processed client Certificate, ClientKeyExchange, CertificateVerify, Finished, sent its final Finished challenge, received the DUT ACK, sent EAP Success, then sent `Access-Accept Id 68`;
+  - tcpdump confirmed the `Access-Accept` at `20:46:19.388672`;
+  - UART ended with `wifi eap error detail error=timeout disconnect=15` and first allocation failure `kind=C size=0x44d free=0x494 eap_active=1 eap_reserved=1 eap_usable=1144 eap_in_use=0 eap_count=3 eap_usage=0x00000000 ctx=0x00000000`;
+  - interpretation: the TLS client-certificate handshake now succeeds at the RADIUS layer, but the DUT fails before deriving/installing usable WPA2 keys because the deferred mbedTLS input-buffer restore still needs about 1101 contiguous bytes before processing the final server Finished; the EAP-TLS failure path ACKs that packet, causing the server to send Access-Accept while the client remains failed.
+- Follow-up code-only adjustment:
+  - added a context-gated full-slot workspace borrow for the deferred mbedTLS input-buffer restore;
+  - allocator behavior remains split-block based for ordinary EAP RSA/TLS allocations, but when allocation context `0x2007` is active and a request is larger than the split block budget, an entirely idle EAP workspace slot may be borrowed as one allocation;
+  - generated normal and trace `tls_mbedtls.c` now wrap `mbedtls_calloc(1, MBEDTLS_SSL_IN_BUFFER_LEN)` in `esp8266_hal_tls_restore_in_buf_after_client_flight()` with `esp8266_hal_alloc_context_set(0x2007u)` / clear;
+  - rationale: the final restore needs a single `0x44d` buffer and the latest UART showed the 1144-byte reserved workspace slot was idle, but the split-block allocator did not expose it as one contiguous allocation.
+- Fast/static validation after context-gated full-slot input restore:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `tls_mbedtls_patched.c` contains the `0x2007` restore allocation context, `eap_tls_common_patched.c` still contains `data->tls_out_limit = 256`, and `esp_wpa2_patched.c` still contains the 512-byte EAPOL stack fallback;
+  - whole-slot-restore image size from host `size`: `text=505782 data=40336 bss=15324 dec=561442`.
+- Focused context-gated full-slot restore hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-whole-slot-restore`;
+  - scenario: `eap_client_cert-1782151034`;
+  - result: failed with `Error: uart reported failure marker wifi eap connect err`;
+  - PEAP FreeRADIUS was restored afterward as PID `1636951`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Context-gated full-slot restore hardware evidence:
+  - UART heap before Wi-Fi init dropped to `36892`, after init to `19736`, and first progress to `15896`;
+  - workspace reached only `attempts=5 made=2 used=33 released=33 usable=1144`, i.e. the third slot was not reserved;
+  - first allocation failure regressed to verifier context `ctx=0x3001`: `kind=C size=0x40 free=0x88 eap_active=3 eap_count=2 eap_usage=0x00000f1f`;
+  - RADIUS saw a TLS fatal `unknown_ca` and sent `Access-Reject`, so this did not reach the client flight or final restore.
+- Interpretation:
+  - the whole-slot allocator machinery increased the active image DRAM footprint by about 192 bytes (`data+bss`), enough to lose the verifier path that the cap256 build had already passed;
+  - keep the final restore idea, but do not add allocator machinery or `.data` growth.
+- Replacement code-only adjustment:
+  - removed the context-gated whole-slot allocator path and restored the allocator to the prior split-block behavior;
+  - generated normal and trace `tls_mbedtls.c` now call `esp8266_hal_eap_rsa_release()` immediately before the deferred `mbedtls_calloc(1, MBEDTLS_SSL_IN_BUFFER_LEN)` restore;
+  - rationale: at the final server Finished step the long-lived EAP reserve is idle; releasing it returns the reserved contiguous workspace spans to the ordinary heap so the input-buffer restore can allocate normally, while avoiding new allocator/data footprint.
+- Fast/static validation after release-before-restore:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build with absolute CN-only DER env paths: passed with existing dead-code warnings;
+  - generated active `tls_mbedtls_patched.c` releases the EAP reserve before the deferred input restore, `eap_tls_common_patched.c` still contains `data->tls_out_limit = 256`, and `esp_wpa2_patched.c` still contains the 512-byte EAPOL stack fallback;
+  - release-before-restore image size from host `size`: `text=506302 data=40136 bss=15332 dec=561770`, restoring the same DRAM footprint as the cap256 build.
+- Focused release-before-restore hardware checkpoint:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-release-before-restore`;
+  - scenario: `eap_client_cert-1782151465`;
+  - result: passed; `eap-diagnostics.log` recorded `runtime_result=pass`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `a9fecad6238b460f1894f88a28cdcbe0`;
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, progress heap `16080`, then `wifi eap associated` and `eap-ok`;
+  - RADIUS processed the client `Certificate`, `ClientKeyExchange`, `CertificateVerify`, and `Finished`, accepted client cert subject `/CN=esp8266-client`, completed TLS with cipher `ECDHE-ECDSA-AES128-SHA`, sent EAP Success, and sent `Access-Accept Id 79`;
+  - tcpdump confirmed the Access-Accept at `21:04:56.791404`;
+  - PEAP FreeRADIUS was restored afterward as PID `1640834`, listening on UDP `1812`/`1813` plus inner-tunnel `127.0.0.1:18120`.
+- Interpretation:
+  - releasing the idle EAP RSA reserve immediately before the deferred mbedTLS input-buffer restore fixes the final server-Finished processing without the DRAM footprint regression from the whole-slot allocator experiment;
+  - WPA2 Enterprise EAP-TLS with client certificate is now hardware-validated on the OpenWrt/Netgear fixture;
+  - next validation should keep this image shape and run password/PEAP EAP regression before moving on to WPS, SmartConfig, promiscuous-control, and remaining Wi-Fi edge cases.
+- PEAP regression after release-before-restore:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-peap-regression`;
+  - scenario: `eap_sta_assoc-1782151657`;
+  - result: failed with `wifi eap connect err`;
+  - UART showed no EAP reserve, then timeout disconnect `23`;
+  - RADIUS/tcpdump showed the DUT ACKed the server PEAP flight, then sent TLS fatal `decode_error`, ending in `Access-Reject` at `21:08:00.996593`;
+  - interpretation: the release-before-restore client-cert fix regressed password PEAP because generated `tls_mbedtls.c` released `ssl->in_buf` at `MBEDTLS_SSL_SERVER_HELLO_DONE` before mbedTLS consumed the pending ServerHelloDone handshake bytes buffered from the same TLS record.
+- Trace confirmation for the PEAP decode error:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-peap-trace-decode`;
+  - scenario: `eap_sta_assoc-1782152229`;
+  - trace UART showed final server fragment reassembled as `0x2a0`, mbedTLS progressed through states `3`, `4`, `5`, and `6`, then returned `0xffff8480`;
+  - `0xffff8480` maps to `MBEDTLS_ERR_SSL_BAD_HS_SERVER_HELLO_DONE` while state `6` is `MBEDTLS_SSL_SERVER_HELLO_DONE`;
+  - interpretation: the no-copy/contiguous-read path was working, but the client-flight buffer-release hook was too early for PEAP.
+- Follow-up code adjustment:
+  - generated normal and trace `tls_mbedtls.c` now pre-steps `MBEDTLS_SSL_SERVER_HELLO_DONE` with `mbedtls_ssl_handshake_step()`;
+  - `esp8266_hal_tls_drop_verified_ca()` runs only after that step succeeds;
+  - the input/output buffer release and client-flight logic now starts only if the state advances to `MBEDTLS_SSL_CLIENT_CERTIFICATE`;
+  - rationale: let mbedTLS consume ServerHelloDone from the existing input buffer before freeing that buffer for client-certificate flight memory.
+- Fast/static validation after the ServerHelloDone pre-step:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed;
+  - targeted release `wifi_eap` Xtensa build for PEAP/password config: passed with existing dead-code warnings;
+  - targeted release `wifi_eap` Xtensa build with absolute DER client-cert env paths: passed with existing dead-code warnings;
+  - generated active `tls_mbedtls_patched.c` contains a standalone `MBEDTLS_SSL_SERVER_HELLO_DONE` pre-step before the `MBEDTLS_SSL_CLIENT_CERTIFICATE` client-flight block, and still drains `in_ext_data` plus `in_ext_extra_data` in one `tls_mbedtls_read()` call.
+- Focused PEAP hardware validation after the ServerHelloDone pre-step:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-peap-shd-prestep`;
+  - scenario: `eap_sta_assoc-1782152636`;
+  - result: passed; `eap-diagnostics.log` recorded `runtime_result=pass`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `ee2e89f9467a43307228fe9289261d9f`;
+  - UART showed heap `37972` before Wi-Fi init, `20816` after init, progress heap `19228`, then `wifi eap associated` and `eap-ok`;
+  - RADIUS tcpdump showed the PEAP exchange ending in `Access-Accept` id `0x64` at `21:24:23.478296`;
+  - FreeRADIUS stayed on the PEAP fixture before and after the run: `/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/sbin/freeradius -X -D /home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/share/freeradius -d /home/bogdan/Coding/Personal/esp8266-hal/target/eap-radius-ecdsa/raddb`, listening on UDP `1812`/`1813` plus inner `127.0.0.1:18120`;
+  - interpretation: the ServerHelloDone boundary fix restores PEAP while preserving the client-cert EAP-TLS memory path shape.
+- Focused negative PEAP validation after the ServerHelloDone pre-step:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-wrong-password-shd-prestep`;
+  - scenario: `eap_wrong_password-1782152728`;
+  - result: passed; `eap-diagnostics.log` recorded `runtime_result=pass`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `a06c7ef0c2352ac77d8a845dfbf53d45`;
+  - UART showed heap `37956` before Wi-Fi init, `20800` after init, progress heap `19204`, timeout disconnect `23`, `wifi eap connect err`, then the expected harness marker `eap-negative-ok`;
+  - RADIUS tcpdump showed the PEAP exchange ending in `Access-Reject` id `0x6c` at `21:25:55.341004`;
+  - router hostapd logs showed `CTRL-EVENT-EAP-FAILURE2`, `IEEE 802.1X: authentication failed - EAP type: 25 (PEAP)`, and local deauth afterward;
+  - FreeRADIUS remained the PEAP fixture on UDP `1812`/`1813` plus inner `127.0.0.1:18120`;
+  - interpretation: wrong-password PEAP still fails cleanly after the SHD boundary fix, without being mistaken for the success path.
+- Client-certificate EAP-TLS rerun after the ServerHelloDone pre-step:
+  - artifact root: `target/wifi-hw-artifacts-20260622-eap-cn-shd-prestep`;
+  - scenario: `eap_client_cert-1782152925`;
+  - result: passed; `eap-diagnostics.log` recorded `runtime_result=pass`;
+  - `flash.log` recorded `flash_action=written` with image fingerprint `066f35cbf97b3ba467dd27cc4f574e44`;
+  - UART showed heap `37076` before Wi-Fi init, `19920` after init, progress heap `16080`, EAP workspace reserved/active with usable `1144`, then `wifi eap associated` and `eap-ok`;
+  - RADIUS/tcpdump showed EAP-TLS ending in `Access-Accept` id `0x73` at `21:29:18.298157`;
+  - FreeRADIUS processed client `Certificate`, `ClientKeyExchange`, `CertificateVerify`, and `Finished`, accepted the TLS session with cipher `ECDHE-ECDSA-AES128-SHA`, sent EAP Success, and included `MS-MPPE-Recv-Key`/`MS-MPPE-Send-Key` in the Access-Accept;
+  - the EAP-TLS fixture was launched with `LD_LIBRARY_PATH=/home/bogdan/Coding/Personal/esp-hal/.esp8266-wifi-hw/freeradius-root/usr/lib/freeradius`;
+  - the EXIT trap restored the PEAP FreeRADIUS fixture as PID `1657219`, listening on UDP `1812`/`1813` plus inner `127.0.0.1:18120`;
+  - interpretation: WPA2 Enterprise now has hardware evidence for PEAP success, PEAP wrong-password failure, and EAP-TLS client certificate success on the OpenWrt/Netgear fixture after the ServerHelloDone boundary fix.
+- WPS PBC orchestration baseline:
+  - initial artifact root: `target/wifi-hw-artifacts-20260622-wps-pbc-baseline`;
+  - scenario: `wps-1782153061`;
+  - result: harness was interrupted after no live xtask/serial process was visible, but router inspection showed the temporary WPS fixture remained active;
+  - router state after the interrupted run was `ssid=esp8266-hal-wps`, `wps_state=configured`, backup `/tmp/esp8266-hal-wireless-wps-1782153061-1658187` still present, and hostapd log showed `WPS-PBC-ACTIVE` followed by `WPS-TIMEOUT`;
+  - manual restore copied the backup config back, removed the backup, restarted radio0, and verified `ssid=esp8266-router-eap`, `key_mgmt=WPA-EAP`, and `wps_state=disabled`;
+  - interpretation: WPS HAL behavior was not yet implicated; the xtask WPS runner armed the router after flashing/resetting the DUT and could block or fail before UART watch/restore.
+- WPS runner adjustments:
+  - `xtask/src/wifi_hw.rs` now configures/arms the router WPS fixture before flashing/resetting the DUT, so the DUT starts with an active WPS window;
+  - WPS runner now restores the router if flashing fails after router setup;
+  - WPS setup no longer calls `hostapd_cli wps_get_status` during setup, avoiding a nonessential call before UART watch;
+  - WPS and SmartConfig router setup/restore scripts now treat `wifi up radio0` as best-effort and rely on explicit hostapd readiness/config checks afterward, because OpenWrt sometimes returns `Request timed out` while hostapd still comes up.
+- Fast/static validation after WPS runner adjustments:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed.
+- Focused WPS PBC hardware validation:
+  - artifact root: `target/wifi-hw-artifacts-20260622-wps-pbc-armed-before-flash`;
+  - attempts `wps-1782193422` and `wps-1782193570` failed before DUT flash/watch due router setup/reload timing, but each restored the router to the previous EAP config;
+  - attempt `wps-1782193761` passed;
+  - `flash.log` recorded image fingerprint `71c8c4b4172fa9ad151fb8db93bf444e` and `flash_action=skipped-unchanged`;
+  - UART showed WPS trace progress through scan selection and WPS expanded EAP states, then `wps-ok`;
+  - router `wps_get_status` after the run showed `Last WPS result: Success` and `Peer Address: 48:3f:da:68:e3:04`;
+  - hostapd log showed `WPS-REG-SUCCESS 48:3f:da:68:e3:04 df2d477b-b793-51e8-a89b-5aec91edcbf9`, `WPS-PBC-DISABLE`, and `WPS-SUCCESS`;
+  - restore completed afterward and live router verification showed `ssid=esp8266-router-eap`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, channel `11`, and RADIUS auth server `10.42.0.1:1812`;
+  - interpretation: WPS PBC is hardware-validated on the OpenWrt/Netgear fixture, and the runner now preserves the router config across setup failures and success.
+- WPS PIN retry adjustment:
+  - full PIN run `target/wifi-hw-artifacts-20260623-wps-pin-complete/wps_pin-1782194675` reached DUT watch but failed after internal DUT retries;
+  - UART showed `wps pin=12345670`, repeated retries, disconnect reason `8`, and final `wps-failed`;
+  - router log showed `WPS-PIN-NEEDED` for UUID `df2d477b-b793-51e8-a89b-5aec91edcbf9`, indicating the router-side PIN registration was not effectively reused across DUT-only retries;
+  - code adjustment: WPS PIN hardware runs now compile the example with `ESP8266_HAL_WPS_MAX_ATTEMPTS=1`, leaving the outer xtask retry loop to rearm hostapd between attempts; PBC keeps the prior internal `3` attempts;
+  - rationale: PIN enrollment state lives on the registrar/router, so retrying only on the DUT can consume or miss the registered PIN.
+- Fast/static validation after WPS PIN retry adjustment:
+  - `cargo fmt --all`: passed;
+  - `git diff --check`: passed;
+  - `cargo fmt --all -- --check`: passed;
+  - `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`: passed;
+  - `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`: passed.
+- Focused WPS PIN hardware validation after single-attempt adjustment:
+  - artifact root: `target/wifi-hw-artifacts-20260623-wps-pin-single-attempt`;
+  - attempt `wps_pin-1782195228` failed before DUT watch due router setup/reload timing and restored to the EAP config;
+  - attempt `wps_pin-1782195479` passed;
+  - `flash.log` recorded the fixed-PIN image fingerprint `05cb24a9fe9f7f3f008400ec73c00a66`;
+  - UART showed `wps max-attempts=1`, `wps pin=12345670`, WPS expanded EAP progress, then `wps-ok`;
+  - router setup log showed `wps_pin_uuid=OK`, confirming the fixture armed hostapd for UUID `df2d477b-b793-51e8-a89b-5aec91edcbf9` and PIN `12345670`;
+  - router `wps_get_status` after the run showed `Last WPS result: Success` and peer `48:3f:da:68:e3:04`;
+  - hostapd log showed `WPS-REG-SUCCESS 48:3f:da:68:e3:04 df2d477b-b793-51e8-a89b-5aec91edcbf9` and `WPS-SUCCESS`;
+  - restore completed afterward and live router verification showed `ssid=esp8266-router-eap`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, channel `11`, and no remaining `/tmp/esp8266-hal-wireless-wps-*` backup in the status output;
+  - interpretation: WPS PIN is hardware-validated on the OpenWrt/Netgear fixture when each DUT attempt is paired with a fresh router-side PIN registration.
+- SmartConfig repeatability investigation:
+  - baseline normal run before the latest SmartConfig fixes used artifact root `target/wifi-hw-artifacts-20260623-smartconfig-current`, scenario `smartconfig-1782195917`, image fingerprint `ca4ed363b783fc6b339ce7a974502fc1`, and failed with the DUT reaching `smartconfig ready` and `smartconfig scan done` but never finding credentials; the ESP32 companion ended with `ESP_ERR_TIMEOUT` at `ack-timeout`;
+  - diagnostic trace run `target/wifi-hw-artifacts-20260623-smartconfig-rxtrace/smartconfig-1782196086`, built with SmartConfig log/diag/RX/event/sniffer trace env, passed and showed scan done, found channel, credentials, association, static ACK to `192.168.4.1:18266`, and `smartconfig-ok`;
+  - normal rerun `target/wifi-hw-artifacts-20260623-smartconfig-normal-rerun/smartconfig-1782196150` failed before `smartconfig scan done`, with UART stopping at `smartconfig ready` and the companion sender never starting because the harness waited for scan-done;
+  - AP-settle-only run `target/wifi-hw-artifacts-20260623-smartconfig-ap-settle/smartconfig-1782196500` also failed before `smartconfig scan done`, so the companion AP startup race was not the sole issue;
+  - isolated `ESP8266_HAL_SMARTCONFIG_ENABLE_LOG=1` run `target/wifi-hw-artifacts-20260623-smartconfig-enable-log-only/smartconfig-1782196717` passed without RX wrappers or wait diagnostics, isolating the closed SDK `enable_log` path as a reliability input.
+- SmartConfig code/harness adjustments:
+  - `src/wifi/smartconfig.rs` and the typestate target backend now force `smartconfig_start_config_t.enable_log = true` on ESP8266; `esp_log` is stubbed here, and hardware showed the closed SmartConfig library can stall before `SC_EVENT_SCAN_DONE` when its internal log path is disabled;
+  - the SmartConfig companion-AP harness now records a 2s AP settle after `AP_START`;
+  - the companion-AP sender default now starts at `smartconfig ready` instead of waiting for `smartconfig scan done`; the old delayed trigger remains available by setting `ESP8266_HAL_SMARTCONFIG_START_AFTER_SCAN`;
+  - rationale: waiting for scan-done was circular on repeat runs, because the ESPTouch sender did not launch when the SDK stalled before posting scan-done.
+- SmartConfig validation after forced-log and ready-trigger fixes:
+  - fast/static validation passed: `cargo fmt --all -- --check`, `git diff --check`, `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`, and `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`;
+  - targeted release `wifi_smartconfig` Xtensa build with `ESP8266_HAL_SMARTCONFIG_STATIC_ACK=1`, no diagnostic env, and features `interrupt,rt,wifi-sta,wifi-smartconfig` passed with existing dead-code warnings;
+  - forced-log normal hardware run `target/wifi-hw-artifacts-20260623-smartconfig-forced-log-normal/smartconfig-1782196946` passed, wrote image fingerprint `22fb08c2215dd2d66ab91a52b0da1f58`, and reached `smartconfig scan done`, `smartconfig found channel`, credentials `ssid-len=17`, association, static ACK, and `smartconfig-ok`;
+  - forced-log repeat with the old delayed sender trigger `target/wifi-hw-artifacts-20260623-smartconfig-forced-log-repeat/smartconfig-1782196999` failed before `smartconfig scan done`; flash was skipped unchanged, UART stopped at `smartconfig ready`, and the companion log showed only `AP_START`;
+  - ready-trigger run `target/wifi-hw-artifacts-20260623-smartconfig-ready-trigger/smartconfig-1782197358` passed with `flash_action=skipped-unchanged`, `smartconfig_start_after_scan=0`, scan done, found channel, credentials, association, static ACK, and `smartconfig-ok`;
+  - second ready-trigger repeat `target/wifi-hw-artifacts-20260623-smartconfig-ready-trigger-repeat/smartconfig-1782197394` also passed with the same skipped image fingerprint and `smartconfig_start_after_scan=0`;
+  - interpretation: SmartConfig is hardware-validated on the OpenWrt/Netgear plus ESP32 companion fixture when the ESP8266 target forces the SDK log path and the harness starts ESPTouch traffic as soon as the DUT reports `smartconfig ready`.
+- Current promiscuous-control validation:
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'promisc_control|rig-blocked|manual|pending'` listed `promisc_control_filter_api` and `promisc_control_filters` as implemented and showed no promiscuous rig-block/manual/pending state;
+  - targeted release `wifi_promisc` Xtensa build with features `interrupt,rt,wifi-sta,wifi-promiscuous` passed with the existing warning set;
+  - API-only hardware run `target/wifi-hw-artifacts-20260623-promisc-control-current/promisc_control_filter_api-1782197513` passed, wrote image fingerprint `9ebe3d57b0a21ed8338cbede8e301fa9`, and UART reached `promisc ctrl filter ack ok`, `promisc ctrl filter none ok`, `promisc stop ok`, and `promisc-control-api-ok`;
+  - RF control-capture hardware run `target/wifi-hw-artifacts-20260623-promisc-control-current/promisc_control_filters-1782197537` passed, wrote image fingerprint `fd401119945288369f8785d3750ff62b`, and UART reached `promisc filter control`, `promisc ctrl filter all`, `promisc ctrl filter ok`, `promisc frame type=control ch=6 len=0`, and `promisc-control-ok`;
+  - companion log for the RF run showed repeated `RAW80211_TX kind=beacon channel=6 count=32 interval_ms=5 dest=48:3f:da:68:e3:04` commands returning `OK`;
+  - interpretation: the current promiscuous control-filter API and positive RF control-frame capture paths are hardware-green on the ESP32 companion fixture.
+- EAP client-certificate registry status:
+  - `eap_client_cert` is now listed as `implemented` instead of `rig-blocked`; focused runs still validate that the active FreeRADIUS process uses the EAP-TLS config root before build/flash;
+  - default `wifi-hw matrix` and `matrix --dry-run` exclude `eap_client_cert` unless `ESP8266_HAL_WIFI_HW_INCLUDE_EAP_CLIENT_CERT=1` is set, because the default router/RADIUS fixture remains PEAP for `eap_sta_assoc` and `eap_wrong_password`;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list | rg 'eap_client_cert|rig-blocked|manual|pending|promisc_control'` listed `eap_client_cert` as implemented, with no `rig-blocked`, `manual`, or `pending` lines in that filtered output;
+  - `cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw matrix --dry-run | rg 'eap_client_cert|opt_in|rig-blocked|manual|pending|scenario_count'` printed `opt_in_skipped: eap_client_cert reason=requires the EAP-TLS FreeRADIUS/client-certificate fixture; run directly or set ESP8266_HAL_WIFI_HW_INCLUDE_EAP_CLIENT_CERT=1`;
+  - fast validation after this registry/matrix change passed: `cargo fmt --all -- --check`, `git diff --check`, and `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`.
+- Full matrix static-IP follow-up:
+  - full matrix root `target/wifi-hw-artifacts-20260623-full-after-eap-wps-smartconfig-promisc` failed only `sta_static_ip` after three attempts: `sta_static_ip-1782198128`, `sta_static_ip-1782198208`, and `sta_static_ip-1782198274`;
+  - each failing static-IP UART reached `sta_static_ip start`, `wifi init ok`, `wifi started`, repeated connect progress, then `static ip wifi err`;
+  - the adjacent `tcp_client-1782198357` scenario passed on the same companion AP/static IP fixture and no channel hint, reaching `wifi connected`, `static ip up`, `tcp client connected`, `recv:32`, and `done`;
+  - follow-up focused run `target/wifi-hw-artifacts-20260623-sta-static-ip-no-channel/sta_static_ip-1782200966` verified that the harness removed `ESP8266_HAL_WIFI_CHANNEL`, but the image then failed before `wifi init ok` with `wifi alloc fail kind=M size=0x00000400 free=0x0000042c ...`, exposing pre-init DRAM pressure rather than fixture setup;
+  - code adjustment: `sta_static_ip` now uses `NetDriverStateWithMtu<640, 1, 1>` and `wifi_net::new_with_mtu`, matching the proven `tcp_client`/`tcp_server` bridge MTU shape; the scenario still validates Rust-owned static IPv4 config and retains the tiny TCP smoke code path;
+  - harness adjustment: `sta_static_ip` now removes `ESP8266_HAL_WIFI_CHANNEL` like `sta_scan_connect` and `tcp_client`, so this scenario validates static IPv4 rather than a channel-hinted fast-scan variant covered elsewhere;
+  - focused validation after the MTU reduction passed: `cargo fmt --all`, `cargo fmt --all -- --check`, `git diff --check`, `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`, and targeted release `sta_static_ip` Xtensa build with features `interrupt,rt,wifi-embassy-net,wifi-sta`;
+  - `xtensa-lx106-elf-size` after the MTU change reported `sta_static_ip` as `text=566334 data=52384 bss=20292 dec=639010`, down from the failing `bss=22044` shape and matching `tcp_client`'s `bss=20292`;
+  - focused hardware root `target/wifi-hw-artifacts-20260623-sta-static-ip-mtu640`, scenario `sta_static_ip-1782201278`, passed with image fingerprint `1dc9053f95eae2af3d2bfd9809dbac1a`; UART reached `wifi init ok`, `wifi started`, `wifi connected`, and `static ip up`;
+  - focused repeat root `target/wifi-hw-artifacts-20260623-sta-static-ip-mtu640-repeat`, scenario `sta_static_ip-1782201323`, passed with `flash_action=skipped-unchanged` on the same fingerprint and reached the same UART success markers;
+  - interpretation: the static-IP regression was an example footprint/channel-hint interaction, not a core static IPv4 failure; the reduced-MTU bridge restores pre-init heap headroom while keeping the static config validation meaningful.
+- WPS/router harness hang hardening and final matrix:
+  - matrix root `target/wifi-hw-artifacts-20260623-full-after-static-mtu640` progressed through static IP, EAP, AP, ESP-NOW, and promiscuous scenarios, but the PTY was stopped after a stale/hung WPS setup session left the router temporarily on `ssid=esp8266-hal-wps` with backup `/tmp/esp8266-hal-wireless-wps-1782202161-1787221`;
+  - manual router recovery copied that backup back to `/etc/config/wireless`, removed it, restarted radio0, and verified `ssid=esp8266-router-eap`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, channel `11`, RADIUS server `10.42.0.1:1812`, and no remaining WPS backups;
+  - code adjustment: `router_run_with_rig()` now spawns SSH commands with a host-side timeout, default `240s`, overridable by `ESP8266_HAL_ROUTER_COMMAND_TIMEOUT_MS`; on timeout it kills the child, appends any collected stdout/stderr plus `router_command_timeout_ms=...` to the existing artifact log, and returns an error so the scenario-level restore logic can run instead of wedging the matrix;
+  - focused WPS PBC validation after the timeout wrapper used root `target/wifi-hw-artifacts-20260623-wps-router-timeout-wrapper`, scenario `wps-1782202707`, and passed; UART reached `wps-ok`, router status showed `Last WPS result: Success` for peer `48:3f:da:68:e3:04`, and the router was verified afterward as restored to `esp8266-router-eap` with `wps_state=disabled` and no backups;
+  - final full matrix root `target/wifi-hw-artifacts-20260623-full-after-wps-timeout-wrapper` was run with output redirected to `matrix-command.log` and status captured in `matrix-command.status`; status file contained `0`, and the log ended with `wifi-hw matrix: pass`;
+  - final matrix recovered expected transient retries: `ap_net_attach_companion` failed attempt `1/3` then passed, `ap_dhcp_bind_companion` failed attempt `1/3` then passed, and SmartConfig failed attempts `1/3` and `2/3` before `smartconfig-1782204380` passed;
+  - final matrix `sta_static_ip-1782203139` used image fingerprint `1dc9053f95eae2af3d2bfd9809dbac1a` and reached `static ip up`, confirming the reduced-MTU static-IP fix inside the full matrix;
+  - final matrix EAP evidence: `eap_sta_assoc-1782203195` used fingerprint `ee2e89f9467a43307228fe9289261d9f`, UART reached `eap-ok`, and tcpdump showed `Access-Accept` at `11:27:01.316946`; `eap_wrong_password-1782203224` used fingerprint `a06c7ef0c2352ac77d8a845dfbf53d45`, UART reached `wifi eap connect err` and `eap-negative-ok`, and tcpdump showed `Access-Reject` at `11:27:31.338407`;
+  - final matrix WPS evidence: `wps-1782203797` used fingerprint `71c8c4b4172fa9ad151fb8db93bf444e` and reached `wps-ok`; `wps_pin-1782203961` used fingerprint `74c1df53ec218b43f7c3a9932f976562` and reached `wps-ok` after router setup logged `wps_pin_uuid=OK`;
+  - final matrix SmartConfig evidence: `smartconfig-1782204380` used fingerprint `22fb08c2215dd2d66ab91a52b0da1f58`, reached credentials, association, static ACK to `192.168.4.1:18266`, and `smartconfig-ok`;
+  - final matrix promiscuous-control evidence: `promisc_control_filter_api-1782204472` used fingerprint `9ebe3d57b0a21ed8338cbede8e301fa9` and reached `promisc-control-api-ok`; `promisc_control_filters-1782204482` used fingerprint `fd401119945288369f8785d3750ff62b` and reached `promisc-control-ok`;
+  - final matrix intentionally skipped opt-in `eap_client_cert` with the documented reason; EAP-TLS client-certificate remains covered by the focused `target/wifi-hw-artifacts-20260622-eap-cn-shd-prestep/eap_client_cert-1782152925` pass;
+  - post-matrix router verification showed `ssid=esp8266-router-eap`, `encryption=wpa2`, channel `11`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, and no `/tmp/esp8266-hal-wireless-wps-*` or `/tmp/esp8266-hal-wireless-smartconfig-*` backups.
+  - final static validation after the matrix passed: `cargo fmt --all -- --check`, `git diff --check`, `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`, `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`, and `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q` with the existing warning set;
+  - scenario registry check after the final matrix showed no `manual`, `rig-blocked`, or `pending` Wi-Fi hardware scenarios in the filtered output; `eap_client_cert` is `implemented` but remains opt-in for default matrix runs because it requires the EAP-TLS fixture.

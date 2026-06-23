@@ -3,3 +3,4 @@ Cargo.lock
 examples/pass
 examples/ssid
 .tools/
+.envrc.local
