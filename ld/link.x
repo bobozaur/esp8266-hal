@@ -14,6 +14,10 @@ ENTRY(Reset)
 
 INCLUDE memory.x
 
+/* Wi-Fi builds replace this marker with their vendored symbol maps and Rust
+   SDK entry points. Non-Wi-Fi builds leave it empty. */
+/* WIFI_LINK_INPUTS */
+
 /* after memory.x to allow override */
 PROVIDE(__pre_init = DefaultPreInit);
 PROVIDE(__zero_bss = default_mem_hook);

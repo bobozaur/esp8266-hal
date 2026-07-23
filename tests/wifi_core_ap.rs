@@ -1,13 +1,12 @@
 use esp8266_hal::wifi_core::{
-    AccessPointConfig, ApStationInfo, Channel, DriverError, InitConfig, LinkState, RawMode,
-    RawRxRecord, Ssid, WifiApBackend, WifiDriver, WifiEvent, WifiFeatureBackend,
-    WifiLifecycleBackend, WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend,
-    WifiStaBackend,
+    AccessPointConfig, ApStationInfo, Channel, DriverError, InitConfig, LinkState, RawMode, Ssid,
+    WifiApBackend, WifiDriver, WifiFeatureBackend, WifiLifecycleBackend, WifiPacketBackend,
+    WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
 };
 
 #[derive(Default)]
 struct FakeApBackend {
-    deauth_aid: Option<u16>,
+    deauth_all: bool,
     ap_rx_attached: bool,
     ap_rx_detached: bool,
     ap_tx_len: Option<usize>,
@@ -43,6 +42,10 @@ impl WifiLifecycleBackend for FakeApBackend {
 }
 
 impl WifiApBackend for FakeApBackend {
+    fn configure_ap(&mut self, _config: &AccessPointConfig) -> Result<(), DriverError> {
+        Ok(())
+    }
+
     fn connected_ap_stations<const N: usize>(
         &mut self,
     ) -> Result<heapless::Vec<ApStationInfo, N>, DriverError> {
@@ -53,8 +56,8 @@ impl WifiApBackend for FakeApBackend {
         Ok(stations)
     }
 
-    fn deauth_ap_station(&mut self, aid: u16) -> Result<(), DriverError> {
-        self.deauth_aid = Some(aid);
+    fn deauth_all_ap_stations(&mut self) -> Result<(), DriverError> {
+        self.deauth_all = true;
         Ok(())
     }
 
@@ -84,8 +87,8 @@ impl WifiScanBackend for FakeApBackend {}
 impl WifiFeatureBackend for FakeApBackend {}
 
 #[test]
-fn ap_handle_lists_and_deauths_stations() {
-    let resources = WifiResources::<8, 4, 2>::new();
+fn ap_handle_lists_stations() {
+    let resources = WifiResources::<8, 4>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeApBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -97,20 +100,18 @@ fn ap_handle_lists_and_deauths_stations() {
         .start()
         .unwrap();
 
-    let mut ap = driver.ap().unwrap();
+    let mut ap = driver.ap();
     let stations = ap.connected_stations::<4>().unwrap();
 
     assert_eq!(stations[0].mac(), [1, 2, 3, 4, 5, 6]);
     assert!(stations[0].supports_11b());
     assert!(stations[0].supports_11g());
     assert!(!stations[0].supports_11n());
-
-    ap.deauth_station(7).unwrap();
 }
 
 #[test]
-fn ap_link_uses_ap_rx_queue_and_ap_tx_interface() {
-    let resources = WifiResources::<8, 2, 2>::new();
+fn ap_link_uses_ap_tx_interface() {
+    let resources = WifiResources::<8, 2, 0, 0, 0, 2, 1514>::new();
     let driver = WifiDriver::with_backend(&resources, FakeApBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -122,25 +123,35 @@ fn ap_link_uses_ap_rx_queue_and_ap_tx_interface() {
         .start()
         .unwrap();
 
-    resources.publish_event(WifiEvent::ApStarted).unwrap();
-    resources
-        .enqueue_ap_rx(unsafe { RawRxRecord::fake(42) })
-        .unwrap();
-
     let mut link = driver.ap_link().unwrap();
-    assert_eq!(link.link_state(), LinkState::Up);
+    assert_eq!(link.link_state(), LinkState::Down);
     assert_eq!(
         link.mac_address().unwrap(),
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
     );
-    assert_eq!(link.queued_rx(), 1);
 
     let mut frame = [0u8; 64];
-    assert_eq!(link.receive(&mut frame), Some(42));
-    assert_eq!(link.queued_rx(), 0);
+    assert_eq!(link.receive(&mut frame), Ok(None));
     link.transmit(&[1, 2, 3, 4]).unwrap();
 
     let mut driver = link.into_driver().unwrap();
-    let mut ap = driver.ap().unwrap();
+    let mut ap = driver.ap();
     ap.deauth_all().unwrap();
+}
+
+#[test]
+fn ap_link_rejects_zero_copied_rx_capacity() {
+    let resources = WifiResources::<8, 2>::new();
+    let driver = WifiDriver::with_backend(&resources, FakeApBackend::default())
+        .initialize(InitConfig::default())
+        .unwrap()
+        .configure_ap(AccessPointConfig::open(
+            Ssid::try_from("core-ap").unwrap(),
+            Channel::try_from(6).unwrap(),
+        ))
+        .unwrap()
+        .start()
+        .unwrap();
+
+    assert!(matches!(driver.ap_link(), Err(DriverError::PacketOverflow)));
 }

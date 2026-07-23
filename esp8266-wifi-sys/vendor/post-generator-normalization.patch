@@ -1,0 +1,448 @@
+--- a/eap_tls_common_patched.c
++++ b/eap_tls_common_patched.c
+@@ -542,18 +542,11 @@
+ 		length_included = 1;
+ 	}
+ 
+-	{
+-		extern void esp8266_hal_alloc_context_set(unsigned int context);
+-		extern void esp8266_hal_alloc_context_clear(void);
+-		esp8266_hal_alloc_context_set(0x1001u);
+-		*out_data = eap_tls_msg_alloc(eap_type, 1 + length_included * 4 + len,
++	*out_data = eap_tls_msg_alloc(eap_type, 1 + length_included * 4 + len,
+ 				      EAP_CODE_RESPONSE, id);
+-		esp8266_hal_alloc_context_clear();
+-	}
+ 	if (*out_data == NULL) {
+-	    printf("[Debug] out_data is null, return \n");
+ 		return -1;
+-    } 
++    }
+ 
+ 	flags = wpabuf_put(*out_data, 1);
+ 	*flags = peap_version;
+--- a/esp_wpa2_patched.c
++++ b/esp_wpa2_patched.c
+@@ -11,7 +11,11 @@
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
++//
++// Modified by esp8266-hal for its vendored Rust-first Wi-Fi runtime. See
++// ../README.md for the pinned source and reproduction details.
+ 
++#line 15
+ #include <string.h>
+ 
+ #include "freertos/FreeRTOS.h"
+@@ -1174,4 +1178,3 @@
+     *disable = wifi_sta_get_enterprise_disable_time_check();
+     return ESP_OK;
+ }
+-
+--- a/esp_wps_patched.c
++++ b/esp_wps_patched.c
+@@ -11,7 +11,11 @@
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
++//
++// Modified by esp8266-hal for its vendored Rust-first Wi-Fi runtime. See
++// ../README.md for the pinned source and reproduction details.
+ 
++#line 15
+ #include <string.h>
+ 
+ #include "utils/includes.h"
+@@ -31,26 +35,6 @@
+ static unsigned char esp8266_hal_wps_pin_override[9];
+ static unsigned char esp8266_hal_wps_target_ssid[32];
+ static unsigned char esp8266_hal_wps_target_ssid_len;
+-static void esp8266_hal_wps_trace_char(char c) {
+-    volatile unsigned int *status = (volatile unsigned int *)(0x60000000 + 0x1c);
+-    volatile unsigned int *fifo = (volatile unsigned int *)0x60000000;
+-    if ((((*status) >> 16) & 0xffu) < 126u) {
+-        *fifo = (unsigned int)c;
+-    }
+-}
+-static void esp8266_hal_wps_trace_hex_nibble(unsigned int value) {
+-    value &= 0xFu;
+-    esp8266_hal_wps_trace_char((char)(value < 10u ? ('0' + value) : ('A' + (value - 10u))));
+-}
+-static void esp8266_hal_wps_trace_hex8(unsigned int value) {
+-    esp8266_hal_wps_trace_hex_nibble(value >> 4);
+-    esp8266_hal_wps_trace_hex_nibble(value);
+-}
+-static void esp8266_hal_wps_trace_hex32(unsigned int value) {
+-    for (int shift = 28; shift >= 0; shift -= 4) {
+-        esp8266_hal_wps_trace_hex_nibble(value >> (unsigned int)shift);
+-    }
+-}
+ void esp8266_hal_wps_set_pin(const unsigned char *pin) {
+     if (pin) {
+         memcpy(esp8266_hal_wps_pin_override, pin, 8);
+@@ -628,15 +612,9 @@
+         if (!esp8266_hal_wps_selected && esp8266_hal_wps_target_ssid_len != 0 &&
+                 scan->ssid[1] == esp8266_hal_wps_target_ssid_len &&
+                 memcmp(&scan->ssid[2], esp8266_hal_wps_target_ssid, esp8266_hal_wps_target_ssid_len) == 0) {
+-            esp8266_hal_wps_trace_char('~');
+-            esp8266_hal_wps_trace_char('t');
+-            esp8266_hal_wps_trace_hex8(scan->chan);
+             esp8266_hal_wps_selected = true;
+         }
+         if (esp8266_hal_wps_selected) {
+-            esp8266_hal_wps_trace_char('~');
+-            esp8266_hal_wps_trace_char('S');
+-            esp8266_hal_wps_trace_hex8(scan->chan);
+             wpabuf_free(buf);
+ 
+             if (sm->is_wps_scan == false) {
+@@ -955,16 +933,10 @@
+ 
+     ret = esp_wifi_get_assoc_bssid_internal(bssid);
+     if (ret != 0) {
+-        esp8266_hal_wps_trace_char('~');
+-        esp8266_hal_wps_trace_char('e');
+-        esp8266_hal_wps_trace_hex8((unsigned int)(-ret));
+         wpa_printf(MSG_ERROR, "bssid is empty!");
+         return ret;
+     }
+ 
+-    esp8266_hal_wps_trace_char('~');
+-    esp8266_hal_wps_trace_char('E');
+-
+     if (!sm) {
+         return ESP_FAIL;
+     }
+@@ -1266,8 +1238,6 @@
+         eap_type = ((u8 *)ehdr)[sizeof(*ehdr)];
+         switch (eap_type) {
+         case EAP_TYPE_IDENTITY:
+-            esp8266_hal_wps_trace_char('~');
+-            esp8266_hal_wps_trace_char('I');
+             wpa_printf(MSG_DEBUG, "=========identity===========");
+             sm->current_identifier = ehdr->identifier;
+             ets_timer_disarm(&sm->wps_eapol_start_timer);
+@@ -1276,9 +1246,6 @@
+             ets_timer_arm(&sm->wps_eapol_start_timer, 3000, 0);
+             break;
+         case EAP_TYPE_EXPANDED:
+-            esp8266_hal_wps_trace_char('~');
+-            esp8266_hal_wps_trace_char('X');
+-            esp8266_hal_wps_trace_hex8(sm->wps->state);
+             wpa_printf(MSG_DEBUG, "=========expanded plen[%d], %d===========", plen, sizeof(*ehdr));
+             if (ehdr->identifier == sm->current_identifier) {
+                 ret = 0;
+@@ -1289,11 +1256,6 @@
+ 
+             tmp = (u8 *)(ehdr + 1) + 1;
+             ret = wps_process_wps_mX_req(tmp, plen - sizeof(*ehdr) - 1, &res);
+-            esp8266_hal_wps_trace_char('~');
+-            esp8266_hal_wps_trace_char('x');
+-            esp8266_hal_wps_trace_hex8(sm->wps->state);
+-            esp8266_hal_wps_trace_hex8(res);
+-            esp8266_hal_wps_trace_hex8((unsigned int)(-ret));
+             if (ret == 0 && res != WPS_FAILURE && res != WPS_IGNORE && res != WPS_FRAGMENT) {
+                 ret = wps_send_wps_mX_rsp(ehdr->identifier);
+                 if (ret == 0) {
+@@ -1529,11 +1491,6 @@
+         return;
+     }
+ 
+-    esp8266_hal_wps_trace_char('~');
+-    esp8266_hal_wps_trace_char('T');
+-    esp8266_hal_wps_trace_hex8(sm->wps->state);
+-    esp8266_hal_wps_trace_hex8(wps_get_status());
+-
+     esp_wifi_disarm_sta_connection_timer_internal();
+ 
+     wps_set_status(WPS_STATUS_DISABLE);
+@@ -1563,10 +1520,6 @@
+         return;
+     }
+ 
+-    esp8266_hal_wps_trace_char('~');
+-    esp8266_hal_wps_trace_char('M');
+-    esp8266_hal_wps_trace_hex8(sm->wps->state);
+-
+     if (sm->wps->state == WPS_FINISHED) {
+         wpa_printf(MSG_DEBUG, "wps msg timeout WPS_FINISHED");
+         wps_finish();
+@@ -1875,11 +1828,6 @@
+         return;
+     }
+ 
+-    esp8266_hal_wps_trace_char('~');
+-    esp8266_hal_wps_trace_char('D');
+-    esp8266_hal_wps_trace_hex8(sm->discover_ssid_cnt);
+-    esp8266_hal_wps_trace_hex8(wps_get_status());
+-
+     if (sm->discover_ssid_cnt == 1) {
+         wps_set_status(WPS_STATUS_PENDING);
+     } else if (sm->discover_ssid_cnt == 0)  {
+@@ -1943,11 +1891,6 @@
+         return ESP_FAIL;
+     }
+ 
+-    esp8266_hal_wps_trace_char('~');
+-    esp8266_hal_wps_trace_char('B');
+-    esp8266_hal_wps_trace_hex8(wps_get_type());
+-    esp8266_hal_wps_trace_hex8(wps_get_status());
+-
+     ets_timer_arm(&sm->wps_timeout_timer, 120000, 0); /* 120s total */
+ 
+     switch (wps_get_status()) {
+@@ -1955,8 +1898,6 @@
+         sm->is_wps_scan = true;
+ 
+         if (wps_build_public_key(sm->wps, NULL, WPS_CALC_KEY_PRE_CALC) != 0) {
+-            esp8266_hal_wps_trace_char('~');
+-            esp8266_hal_wps_trace_char('K');
+             return ESP_ERR_NO_MEM;
+         }
+ 
+@@ -1968,12 +1909,7 @@
+     case WPS_STATUS_SCANNING:
+         sm->scan_cnt = 0;
+         ets_timer_disarm(&sm->wps_timeout_timer);
+-        esp8266_hal_wps_trace_char('~');
+-    esp8266_hal_wps_trace_char('B');
+-    esp8266_hal_wps_trace_hex8(wps_get_type());
+-    esp8266_hal_wps_trace_hex8(wps_get_status());
+-
+-    ets_timer_arm(&sm->wps_timeout_timer, 120000, 0); /* 120s total */
++        ets_timer_arm(&sm->wps_timeout_timer, 120000, 0); /* 120s total */
+         break;
+     default:
+         break;
+@@ -2299,4 +2235,3 @@
+ 
+     return false;
+ }
+-
+--- a/ssl_cli_patched.c
++++ b/ssl_cli_patched.c
+@@ -16,9 +16,13 @@
+  *  See the License for the specific language governing permissions and
+  *  limitations under the License.
+  *
++ *  Modified by esp8266-hal for its vendored Rust-first Wi-Fi runtime. See
++ *  ../README.md for the pinned source and reproduction details.
++ *
+  *  This file is part of mbed TLS (https://tls.mbed.org)
+  */
+ 
++#line 22
+ #if !defined(MBEDTLS_CONFIG_FILE)
+ #include "mbedtls/config.h"
+ #else
+@@ -2776,8 +2780,6 @@
+             const unsigned char *esp8266_hal_sig = p;
+             int esp8266_hal_in_buf_released = 0;
+             int esp8266_hal_restore_ret;
+-            extern void esp8266_hal_alloc_context_set(unsigned int context);
+-            extern void esp8266_hal_alloc_context_clear(void);
+ 
+             if( sig_len <= sizeof( esp8266_hal_sig_copy ) )
+             {
+@@ -2787,11 +2789,9 @@
+                     esp8266_hal_ssl_release_in_buf_for_ske_verify( ssl );
+             }
+ 
+-            esp8266_hal_alloc_context_set(0x3002u);
+             ret = mbedtls_pk_verify_restartable(
+                         &ssl->session_negotiate->peer_cert->pk,
+                         md_alg, hash, hashlen, esp8266_hal_sig, sig_len, rs_ctx );
+-            esp8266_hal_alloc_context_clear();
+ 
+             esp8266_hal_restore_ret =
+                 esp8266_hal_ssl_restore_in_buf_after_ske_verify(
+@@ -3553,8 +3553,6 @@
+         int esp8266_hal_use_stack_sig = 0;
+         unsigned char esp8266_hal_hash_sig_alg = ssl->out_msg[4];
+         unsigned char esp8266_hal_sig_alg = ssl->out_msg[5];
+-        extern void esp8266_hal_alloc_context_set(unsigned int context);
+-        extern void esp8266_hal_alloc_context_clear(void);
+ 
+         if( mbedtls_pk_can_do( mbedtls_ssl_own_key( ssl ), MBEDTLS_PK_ECDSA ) )
+         {
+@@ -3575,12 +3573,10 @@
+         }
+ 
+         esp8266_hal_eap_rsa_reserve();
+-        esp8266_hal_alloc_context_set(0x4001u);
+         ret = mbedtls_pk_sign_restartable( mbedtls_ssl_own_key( ssl ),
+                          md_alg, hash_start, hashlen,
+                          esp8266_hal_sig_out, &n,
+                          ssl->conf->f_rng, ssl->conf->p_rng, rs_ctx );
+-        esp8266_hal_alloc_context_clear();
+ 
+         if( esp8266_hal_use_stack_sig )
+         {
+--- a/ssl_tls_patched.c
++++ b/ssl_tls_patched.c
+@@ -16,8 +16,12 @@
+  *  See the License for the specific language governing permissions and
+  *  limitations under the License.
+  *
++ *  Modified by esp8266-hal for its vendored Rust-first Wi-Fi runtime. See
++ *  ../README.md for the pinned source and reproduction details.
++ *
+  *  This file is part of mbed TLS (https://tls.mbed.org)
+  */
++#line 21
+ /*
+  *  The SSL 3.0 specification was drafted by Netscape in 1996,
+  *  and became an IETF standard in 1999.
+@@ -5839,13 +5843,7 @@
+         return( ret );
+     }
+ 
+-    {
+-        extern void esp8266_hal_alloc_context_set(unsigned int context);
+-        extern void esp8266_hal_alloc_context_clear(void);
+-        esp8266_hal_alloc_context_set(0x3000u);
+-        ret = ssl_parse_certificate_chain( ssl );
+-        esp8266_hal_alloc_context_clear();
+-    }
++    ret = ssl_parse_certificate_chain( ssl );
+     if( ret != 0 )
+     {
+ #if defined(MBEDTLS_SSL_SRV_C)
+@@ -5891,13 +5889,10 @@
+          * Main check: verify certificate
+          */
+         {
+-            extern void esp8266_hal_alloc_context_set(unsigned int context);
+-            extern void esp8266_hal_alloc_context_clear(void);
+             int esp8266_hal_in_buf_released;
+             int esp8266_hal_restore_ret;
+ 
+             esp8266_hal_in_buf_released = esp8266_hal_ssl_release_in_buf_for_verify( ssl );
+-            esp8266_hal_alloc_context_set(0x3001u);
+             ret = mbedtls_x509_crt_verify_restartable(
+                                     ssl->session_negotiate->peer_cert,
+                                     ca_chain, ca_crl,
+@@ -5905,7 +5900,6 @@
+                                     ssl->hostname,
+                                    &ssl->session_negotiate->verify_result,
+                                     ssl->conf->f_vrfy, ssl->conf->p_vrfy, rs_ctx );
+-            esp8266_hal_alloc_context_clear();
+ 
+             esp8266_hal_restore_ret = esp8266_hal_ssl_restore_in_buf_after_verify(
+                                                     ssl, esp8266_hal_in_buf_released );
+--- a/tls_mbedtls_patched.c
++++ b/tls_mbedtls_patched.c
+@@ -12,8 +12,12 @@
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
++ *
++ * Modified by esp8266-hal for its vendored Rust-first Wi-Fi runtime. See
++ * ../README.md for the pinned source and reproduction details.
+  */
+ 
++#line 17
+ #include "utils/includes.h"
+ #include "utils/common.h"
+ 
+@@ -130,15 +134,11 @@
+ static int esp8266_hal_tls_prealloc_client_flight_out(struct tls_connection *conn)
+ {
+ 	struct tls_data *data = &conn->tls_io_data;
+-	extern void esp8266_hal_alloc_context_set(unsigned int context);
+-	extern void esp8266_hal_alloc_context_clear(void);
+ 
+ 	if (data->out_data != NULL)
+ 		return 0;
+ 
+-	esp8266_hal_alloc_context_set(0x2006u);
+ 	data->out_data = wpabuf_alloc(ESP8266_HAL_TLS_CLIENT_FLIGHT_OUT_PREALLOC_BYTES);
+-	esp8266_hal_alloc_context_clear();
+ 
+ 	return data->out_data == NULL ? MBEDTLS_ERR_SSL_ALLOC_FAILED : 0;
+ }
+@@ -147,21 +147,15 @@
+ {
+ 	struct tls_connection *conn = (struct tls_connection *)ctx;
+ 	struct tls_data *data = &conn->tls_io_data;
+-	extern void esp8266_hal_alloc_context_set(unsigned int context);
+-	extern void esp8266_hal_alloc_context_clear(void);
+ 
+ 	if (data->out_data) {
+ 		int resize_ret;
+-		esp8266_hal_alloc_context_set(0x2004u);
+ 		resize_ret = wpabuf_resize(&data->out_data, len);
+-		esp8266_hal_alloc_context_clear();
+ 		if (resize_ret < 0) {
+ 			return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+ 		}
+ 	} else {
+-		esp8266_hal_alloc_context_set(0x2004u);
+ 		data->out_data = wpabuf_alloc(len);
+-		esp8266_hal_alloc_context_clear();
+ 	}
+ 	if (!data->out_data) {
+ 		return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+@@ -801,15 +795,9 @@
+ 		conn->tls_io_data.in_ext_len = wpabuf_len(in_data);
+ 		conn->tls_io_data.in_ext_pos = 0;
+ 	}
+-	{
+-		extern void esp8266_hal_alloc_context_set(unsigned int context);
+-		extern void esp8266_hal_alloc_context_clear(void);
+-		esp8266_hal_alloc_context_set(0x2001u);
+-		ret = mbedtls_ssl_handshake_step(&tls->ssl);
+-		esp8266_hal_alloc_context_clear();
+-		if (ret >= 0)
+-			esp8266_hal_tls_drop_verified_ca(tls);
+-	}
++	ret = mbedtls_ssl_handshake_step(&tls->ssl);
++	if (ret >= 0)
++		esp8266_hal_tls_drop_verified_ca(tls);
+ 	if (ret < 0) {
+ 		wpa_printf(MSG_ERROR, "%s:%d", __func__, __LINE__);
+ 		goto end;
+@@ -818,11 +806,7 @@
+ 	/* Multiple reads */
+ 	while (conn->tls_io_data.in_data || conn->tls_io_data.in_ext_data ||
+ 	       conn->tls_io_data.in_ext_extra_data) {
+-		extern void esp8266_hal_alloc_context_set(unsigned int context);
+-		extern void esp8266_hal_alloc_context_clear(void);
+-		esp8266_hal_alloc_context_set(0x2002u);
+ 		ret = mbedtls_ssl_handshake_step(&tls->ssl);
+-		esp8266_hal_alloc_context_clear();
+ 		if (ret < 0)
+ 			break;
+ 		esp8266_hal_tls_drop_verified_ca(tls);
+@@ -857,8 +841,6 @@
+ 		/* trigger state machine multiple times to reach till finish */
+ 		extern void esp8266_hal_eap_rsa_reserve(void);
+ 		extern void esp8266_hal_eap_rsa_release(void);
+-		extern void esp8266_hal_alloc_context_set(unsigned int context);
+-		extern void esp8266_hal_alloc_context_clear(void);
+ 		int esp8266_hal_client_flight_in_buf_released;
+ 		esp8266_hal_client_flight_in_buf_released =
+ 			esp8266_hal_tls_release_in_buf_for_client_flight(&tls->ssl);
+@@ -871,9 +853,7 @@
+ 		}
+ 		esp8266_hal_eap_rsa_reserve();
+ 		while (tls->ssl.state <= MBEDTLS_SSL_CLIENT_FINISHED) {
+-			esp8266_hal_alloc_context_set(0x2003u);
+ 			ret = mbedtls_ssl_handshake_step(&tls->ssl);
+-			esp8266_hal_alloc_context_clear();
+ 			if (ret < 0) {
+ 				break;
+ 			}
+@@ -886,11 +866,7 @@
+ 	/* Trigger state machine till handshake is complete or error occures */
+ 	if (tls->ssl.state == MBEDTLS_SSL_FLUSH_BUFFERS) {
+ 		while (tls->ssl.state < MBEDTLS_SSL_HANDSHAKE_OVER) {
+-			extern void esp8266_hal_alloc_context_set(unsigned int context);
+-			extern void esp8266_hal_alloc_context_clear(void);
+-			esp8266_hal_alloc_context_set(0x2005u);
+ 			ret = mbedtls_ssl_handshake_step(&tls->ssl);
+-			esp8266_hal_alloc_context_clear();
+ 			if (ret < 0) {
+ 				break;
+ 			}

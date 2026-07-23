@@ -1,0 +1,17 @@
+[package]
+name = "downstream-wifi-link"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+esp8266-hal = { path = "../../..", default-features = false, features = ["interrupt", "rt", "wifi"] }
+panic-halt = "1"
+static_cell = "2"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"

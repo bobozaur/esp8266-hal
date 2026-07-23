@@ -37,6 +37,7 @@ const WPS_PIN: &str = "12345670";
 const WPS_HARNESS_MAX_ATTEMPTS: &str = "3";
 const DEFAULT_WPS_DUT_MAC: &str = "48:3f:da:68:e3:04";
 const DEFAULT_WPS_DUT_UUID: &str = "df2d477b-b793-51e8-a89b-5aec91edcbf9";
+const ESPNOW_SHARED_PMK_HEX: &str = "24242424242424242424242424242424";
 const SMARTCONFIG_ROUTER_SSID: &str = "esp8266-hal-smart";
 const SMARTCONFIG_ROUTER_PASSPHRASE: &str = "esp8266smart";
 const DEFAULT_SMARTCONFIG_CHANNEL: u8 = 6;
@@ -293,7 +294,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "sta_connect",
         description: "associate and report WiFi link-up from the typestate core path",
         example: Some("wifi_core_connect"),
-        features: &["interrupt", "rt", "wifi-core", "wifi", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -311,7 +312,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "sta_wrong_password",
         description: "fail cleanly when station credentials do not match a secured AP",
         example: Some("wifi_core_connect"),
-        features: &["interrupt", "rt", "wifi-core", "wifi", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -329,7 +330,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "sta_wpa2_connect",
         description: "associate with a visible WPA2-PSK AP through the typestate core path",
         example: Some("wifi_core_connect"),
-        features: &["interrupt", "rt", "wifi-core", "wifi", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -347,7 +348,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "sta_stale_channel_hint",
         description: "associate when a station channel hint points away from the target AP",
         example: Some("wifi_core_connect"),
-        features: &["interrupt", "rt", "wifi-core", "wifi", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -365,7 +366,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "sta_hidden_ssid",
         description: "associate with a non-broadcast WPA2 SSID through the typestate core path",
         example: Some("wifi_core_connect"),
-        features: &["interrupt", "rt", "wifi-core", "wifi", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -383,7 +384,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "sta_scan_connect",
         description: "associate from the typestate core path without a station channel hint",
         example: Some("wifi_core_connect"),
-        features: &["interrupt", "rt", "wifi-core", "wifi", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -401,7 +402,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "sta_scan",
         description: "perform a station active scan through the typestate core path",
         example: Some("raw_scan"),
-        features: &["interrupt", "rt", "wifi-core", "wifi", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -414,7 +415,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "sta_dhcp",
         description: "bring the station link up and observe DHCP completion",
         example: Some("wifi_core_dhcp_probe"),
-        features: &["interrupt", "rt", "wifi-embassy-net", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi-embassy-net"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -434,7 +435,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "sta_static_ip",
         description: "bring the station link up with a Rust-owned static IPv4 config",
         example: Some("sta_static_ip"),
-        features: &["interrupt", "rt", "wifi-embassy-net", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi-embassy-net"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -454,7 +455,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "tcp_server",
         description: "run the embassy-net TCP server and verify first-attempt echo",
         example: Some("tcp_server"),
-        features: &["interrupt", "rt", "wifi-embassy-net", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi-embassy-net"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::TcpEcho {
@@ -482,7 +483,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "tcp_client",
         description: "run the embassy-net TCP client and verify outbound connect/send",
         example: Some("tcp_client"),
-        features: &["interrupt", "rt", "wifi-embassy-net", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi-embassy-net"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::TcpClient {
@@ -510,7 +511,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "eap_sta_assoc",
         description: "associate to the OpenWrt WPA2 Enterprise AP through the RADIUS fixture",
         example: Some("wifi_eap"),
-        features: &["interrupt", "rt", "wifi-enterprise", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi-enterprise"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -530,7 +531,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "eap_wrong_password",
         description: "fail closed when WPA2 Enterprise credentials are rejected by RADIUS",
         example: Some("wifi_eap"),
-        features: &["interrupt", "rt", "wifi-enterprise", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi-enterprise"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -551,7 +552,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "eap_client_cert",
         description: "validate optional WPA2 Enterprise CA/client-certificate material against an EAP-TLS-capable fixture",
         example: Some("wifi_eap"),
-        features: &["interrupt", "rt", "wifi-enterprise", "wifi-sta"],
+        features: &["interrupt", "rt", "wifi-enterprise"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -572,7 +573,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_station_list_companion",
         description: "join the soft-AP with the ESP32 companion and validate station list/deauth",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi-ap"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -581,7 +582,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_rejoin_companion",
         description: "rejoin the soft-AP with the ESP32 companion after DUT-initiated deauth",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi-ap"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -590,7 +591,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_attach_companion",
         description: "join the soft-AP after attaching the AP RX path without embassy-net",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi-ap"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -599,7 +600,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_net_attach_companion",
         description: "join the soft-AP after creating the AP network runtime but before entering the DHCP loop",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi-ap"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -608,7 +609,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_dhcp_bind_companion",
         description: "join the soft-AP after binding the Rust DHCP socket but before entering the DHCP poll loop",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi-ap"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -617,7 +618,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_dhcp_companion",
         description: "join the soft-AP with the ESP32 companion and validate Rust DHCP service",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi-ap"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -626,7 +627,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_sta_downstream_companion",
         description: "validate AP+STA mixed mode with the ESP32 companion as downstream client",
         example: Some("wifi_ap_sta"),
-        features: &["interrupt", "rt", "wifi-ap", "wifi-sta", "wifi-embassy-net"],
+        features: &["interrupt", "rt", "wifi-embassy-net"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -635,7 +636,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_unicast_companion",
         description: "exchange ESP-NOW unicast payloads with the ESP32 companion",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-esp-now"],
+        features: &["interrupt", "rt", "wifi-esp-now"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -644,7 +645,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_encrypted_companion",
         description: "exchange encrypted ESP-NOW payloads with the ESP32 companion",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-esp-now"],
+        features: &["interrupt", "rt", "wifi-esp-now"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -653,7 +654,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_bad_key_companion",
         description: "validate encrypted ESP-NOW failure cases with the ESP32 companion",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-esp-now"],
+        features: &["interrupt", "rt", "wifi-esp-now"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -662,7 +663,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "promisc_data_companion",
         description: "validate promiscuous data capture with repeatable ESP32 companion traffic",
         example: Some("wifi_promisc"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-promiscuous"],
+        features: &["interrupt", "rt", "wifi-promiscuous"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -671,7 +672,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_start",
         description: "start the soft-AP and validate a client join path",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi-ap"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -684,7 +685,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_station_list",
         description: "join the soft-AP with a client, enumerate it, and deauth all stations",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi-ap"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -703,7 +704,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_dhcp",
         description: "join the soft-AP with a client and validate Rust DHCP lease service",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi-ap"],
+        features: &["interrupt", "rt", "wifi"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -722,7 +723,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_sta",
         description: "run AP+STA mixed mode with upstream and downstream connectivity",
         example: Some("wifi_ap_sta"),
-        features: &["interrupt", "rt", "wifi-ap", "wifi-sta", "wifi-embassy-net"],
+        features: &["interrupt", "rt", "wifi-embassy-net"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -746,7 +747,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "wps",
         description: "complete WPS PBC enrollment on supported router hardware",
         example: Some("wifi_wps"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-wps"],
+        features: &["interrupt", "rt", "wifi-wps"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -767,7 +768,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "wps_pin",
         description: "complete WPS fixed-PIN enrollment on supported router hardware",
         example: Some("wifi_wps"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-wps"],
+        features: &["interrupt", "rt", "wifi-wps"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -788,7 +789,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "smartconfig",
         description: "complete SmartConfig provisioning from an ESPTouch-compatible sender",
         example: Some("wifi_smartconfig"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-smartconfig"],
+        features: &["interrupt", "rt", "wifi-smartconfig"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -804,7 +805,6 @@ const WIFI_SCENARIOS: &[Scenario] = &[
                 "smartconfig stop err",
                 "smartconfig net err",
                 "smartconfig mac err",
-                "smartconfig alloc err",
                 "smartconfig dhcp err",
                 "smartconfig ack err",
                 "smartconfig ack bind err",
@@ -818,7 +818,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_unicast",
         description: "exchange ESP-NOW unicast payloads between two boards",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-esp-now"],
+        features: &["interrupt", "rt", "wifi-esp-now"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -828,6 +828,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
                 "esp-now start err",
                 "esp-now session err",
                 "esp-now channel err",
+                "esp-now pmk err",
                 "esp-now peer err",
                 "esp-now send err",
                 "esp-now send status failed",
@@ -841,7 +842,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_broadcast",
         description: "send ESP-NOW broadcast payloads from one board and validate SDK send path",
         example: Some("wifi_esp_now_tx"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-esp-now"],
+        features: &["interrupt", "rt", "wifi-esp-now"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -851,6 +852,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
                 "esp-now start err",
                 "esp-now session err",
                 "esp-now channel err",
+                "esp-now pmk err",
                 "esp-now peer err",
                 "esp-now send err",
                 "esp-now send status failed",
@@ -864,7 +866,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_encrypted",
         description: "exchange encrypted ESP-NOW payloads between two boards",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-esp-now"],
+        features: &["interrupt", "rt", "wifi-esp-now"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -874,6 +876,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
                 "esp-now start err",
                 "esp-now session err",
                 "esp-now channel err",
+                "esp-now pmk err",
                 "esp-now peer err",
                 "esp-now send err",
                 "esp-now send status failed",
@@ -887,7 +890,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "promisc_capture",
         description: "capture management/data/control frames in promiscuous mode",
         example: Some("wifi_promisc"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-promiscuous"],
+        features: &["interrupt", "rt", "wifi-promiscuous"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -898,8 +901,6 @@ const WIFI_SCENARIOS: &[Scenario] = &[
                 "promisc set channel err",
                 "promisc enable err",
                 "promisc ctrl filter err",
-                "promisc api state err",
-                "promisc api restart err",
                 "promisc stop err",
                 "promisc session err",
                 "promisc timeout",
@@ -912,7 +913,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "promisc_filters",
         description: "validate promiscuous packet and control filters",
         example: Some("wifi_promisc"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-promiscuous"],
+        features: &["interrupt", "rt", "wifi-promiscuous"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -923,33 +924,6 @@ const WIFI_SCENARIOS: &[Scenario] = &[
                 "promisc set channel err",
                 "promisc enable err",
                 "promisc ctrl filter err",
-                "promisc api state err",
-                "promisc api restart err",
-                "promisc stop err",
-                "promisc session err",
-                "promisc timeout",
-                "panic",
-                "Guru Meditation",
-            ],
-        },
-    },
-    Scenario {
-        name: "promisc_control_filter_api",
-        description: "validate promiscuous control-subtype filter setup without RF control-frame injection",
-        example: Some("wifi_promisc"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-promiscuous"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::UartWatch {
-            timeout: Duration::from_secs(25),
-            success_markers: &["promisc-control-api-ok"],
-            failure_markers: &[
-                "promisc start err",
-                "promisc set channel err",
-                "promisc enable err",
-                "promisc ctrl filter err",
-                "promisc api state err",
-                "promisc api restart err",
                 "promisc stop err",
                 "promisc session err",
                 "promisc timeout",
@@ -962,7 +936,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "promisc_control_filters",
         description: "validate promiscuous control-frame capture with RF traffic",
         example: Some("wifi_promisc"),
-        features: &["interrupt", "rt", "wifi-sta", "wifi-promiscuous"],
+        features: &["interrupt", "rt", "wifi-promiscuous"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -973,8 +947,6 @@ const WIFI_SCENARIOS: &[Scenario] = &[
                 "promisc set channel err",
                 "promisc enable err",
                 "promisc ctrl filter err",
-                "promisc api state err",
-                "promisc api restart err",
                 "promisc stop err",
                 "promisc session err",
                 "promisc timeout",
@@ -1923,6 +1895,16 @@ fn run_scenario_with_root(
         }
     }
 
+    if scenario.name == "eap_wrong_password" {
+        if !eap_diagnostics_enabled() {
+            bail!(
+                "scenario `eap_wrong_password` requires {EAP_DIAGNOSTICS_ENV}=1 so its failure can be verified independently"
+            );
+        }
+        command_available("tcpdump")
+            .context("scenario `eap_wrong_password` requires a RADIUS packet capture")?;
+    }
+
     if scenario_requires_radius(scenario.name) {
         ensure_radius_listener()?;
     }
@@ -2055,6 +2037,10 @@ fn run_scenario_with_root(
 
             if let Some(diagnostics) = eap_diagnostics.as_mut() {
                 diagnostics.finish(&run_dir, runtime_result.is_ok())?;
+            }
+
+            if runtime_result.is_ok() && scenario.name == "eap_wrong_password" {
+                verify_eap_access_reject(&run_dir)?;
             }
 
             runtime_result
@@ -2592,9 +2578,10 @@ fn start_eap_tcpdump(run_dir: &Path, router_host: &str) -> Option<Child> {
         .arg(&iface)
         .arg("-nn")
         .arg("-l")
+        .arg("-vv")
         .args(&filter);
 
-    let _ = writeln!(log, "$ tcpdump -i {iface} -nn -l {}", filter.join(" "));
+    let _ = writeln!(log, "$ tcpdump -i {iface} -nn -l -vv {}", filter.join(" "));
     let _ = append_manifest_line(run_dir, "eap_capture_iface", &iface);
     let _ = append_manifest_line(run_dir, "eap_tcpdump_log", &log_path.display().to_string());
     let stdout = match log.try_clone() {
@@ -2622,6 +2609,31 @@ fn start_eap_tcpdump(run_dir: &Path, router_host: &str) -> Option<Child> {
             None
         }
     }
+}
+
+fn verify_eap_access_reject(run_dir: &Path) -> Result<()> {
+    let capture_path = run_dir.join("eap-radius-tcpdump.log");
+    let capture = fs::read_to_string(&capture_path).with_context(|| {
+        format!(
+            "negative EAP result lacks a readable RADIUS capture at {}",
+            capture_path.display()
+        )
+    })?;
+
+    if !contains_radius_access_reject(&capture) {
+        bail!(
+            "negative EAP result lacks RADIUS Access-Reject evidence; see {}",
+            capture_path.display()
+        );
+    }
+
+    append_manifest_line(run_dir, "eap_negative_evidence", "radius-access-reject")
+}
+
+fn contains_radius_access_reject(capture: &str) -> bool {
+    let capture = capture.to_ascii_lowercase();
+    capture.contains("radius")
+        && (capture.contains("access-reject") || capture.contains("access reject"))
 }
 
 fn stop_eap_tcpdump(run_dir: &Path, tcpdump: Option<Child>) {
@@ -3238,9 +3250,7 @@ fn run_companion_smartconfig_sta_sender(
         ),
         Duration::from_secs(160),
     )?;
-    if let Err(error) = ensure_ok_response(&response, "SMARTCONFIG_STA_PROVISION") {
-        return Err(error);
-    }
+    ensure_ok_response(&response, "SMARTCONFIG_STA_PROVISION")?;
     Ok(())
 }
 
@@ -3259,9 +3269,7 @@ fn run_companion_smartconfig_ap_sender(
         ),
         Duration::from_secs(160),
     )?;
-    if let Err(error) = ensure_ok_response(&response, "SMARTCONFIG_AP_PROVISION") {
-        return Err(error);
-    }
+    ensure_ok_response(&response, "SMARTCONFIG_AP_PROVISION")?;
     Ok(())
 }
 
@@ -4736,6 +4744,42 @@ enum EspNowMode {
     BadKey,
 }
 
+fn esp_now_companion_tx_command(mode: EspNowMode, dut_mac: &str) -> String {
+    match mode {
+        EspNowMode::Unicast => format!(
+            "ESPNOW_TX channel=6 peer={dut_mac} encrypt=0 lmk=none pmk=none payload=657370383236362d68616c2d6573702d6e6f77 timeout_ms=10000"
+        ),
+        EspNowMode::Encrypted => format!(
+            "ESPNOW_TX channel=6 peer={dut_mac} encrypt=1 lmk=42424242424242424242424242424242 pmk={ESPNOW_SHARED_PMK_HEX} payload=657370383236362d68616c2d6573702d6e6f77 timeout_ms=10000"
+        ),
+        EspNowMode::BadKey => format!(
+            "ESPNOW_TX channel=6 peer={dut_mac} encrypt=1 lmk=41414141414141414141414141414141 pmk={ESPNOW_SHARED_PMK_HEX} payload=6261646b6579 timeout_ms=10000"
+        ),
+    }
+}
+
+fn ensure_esp_now_attempt_completed(response: &str) -> Result<()> {
+    let terminal = response
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("OK ") || line.starts_with("ERR "))
+        .ok_or_else(|| anyhow!("ESP-NOW command produced no terminal response: {response}"))?;
+
+    if terminal.starts_with("OK ESPNOW_TX ")
+        && response_field(terminal, "status") == Some("success")
+    {
+        return Ok(());
+    }
+    if terminal.starts_with("ERR ")
+        && response_field(terminal, "code") == Some("espnow-status")
+        && response_field(terminal, "detail") == Some("failed")
+    {
+        return Ok(());
+    }
+
+    bail!("ESP-NOW command failed before send callback completion: {terminal}")
+}
+
 fn run_esp_now_companion(
     run_dir: &Path,
     serial_port: &Path,
@@ -4748,6 +4792,7 @@ fn run_esp_now_companion(
         "esp-now start err",
         "esp-now session err",
         "esp-now channel err",
+        "esp-now pmk err",
         "esp-now peer err",
         "panic",
         "Guru Meditation",
@@ -4796,17 +4841,7 @@ fn run_esp_now_companion(
                     );
                 }
                 if !sent && text.contains("esp-now rx ready") {
-                    let command = match mode {
-                        EspNowMode::Unicast => format!(
-                            "ESPNOW_TX channel=6 peer={dut_mac} encrypt=0 lmk=none pmk=none payload=657370383236362d68616c2d6573702d6e6f77 timeout_ms=10000"
-                        ),
-                        EspNowMode::Encrypted => format!(
-                            "ESPNOW_TX channel=6 peer={dut_mac} encrypt=1 lmk=42424242424242424242424242424242 pmk=none payload=657370383236362d68616c2d6573702d6e6f77 timeout_ms=10000"
-                        ),
-                        EspNowMode::BadKey => format!(
-                            "ESPNOW_TX channel=6 peer={dut_mac} encrypt=1 lmk=41414141414141414141414141414141 pmk=none payload=6261646b6579 timeout_ms=10000"
-                        ),
-                    };
+                    let command = esp_now_companion_tx_command(mode, &dut_mac);
                     let mut response = String::new();
                     for attempt in 1..=TX_ATTEMPTS {
                         response = companion_session_command(
@@ -4815,16 +4850,21 @@ fn run_esp_now_companion(
                             &command,
                             Duration::from_secs(15),
                         )?;
-                        if mode == EspNowMode::BadKey
-                            || ensure_ok_response(&response, "ESPNOW_TX").is_ok()
-                        {
+                        let complete = if mode == EspNowMode::BadKey {
+                            ensure_esp_now_attempt_completed(&response)
+                        } else {
+                            ensure_ok_response(&response, "ESPNOW_TX").map(|_| ())
+                        };
+                        if complete.is_ok() {
                             break;
                         }
                         if attempt < TX_ATTEMPTS {
                             thread::sleep(TX_RETRY_BACKOFF);
                         }
                     }
-                    if mode != EspNowMode::BadKey {
+                    if mode == EspNowMode::BadKey {
+                        ensure_esp_now_attempt_completed(&response)?;
+                    } else {
                         ensure_ok_response(&response, "ESPNOW_TX")?;
                     }
                     sent = true;
@@ -4870,8 +4910,6 @@ fn run_promisc_companion(
         "promisc set channel err",
         "promisc enable err",
         "promisc ctrl filter err",
-        "promisc api state err",
-        "promisc api restart err",
         "promisc stop err",
         "promisc session err",
         "promisc timeout",
@@ -5063,7 +5101,7 @@ fn build_example(
     let feature_list = scenario.features.join(",");
     let env_prefix = build_env_prefix(run_dir, scenario, extra_env)?;
     let command = format!(
-        "set -euo pipefail; source .envrc && {}cargo build --{} --example {} --target {} {} --no-default-features --features {}",
+        "set -euo pipefail; {}cargo build --{} --example {} --target {} {} --no-default-features --features {}",
         env_prefix,
         scenario.profile,
         example,
@@ -5074,8 +5112,9 @@ fn build_example(
     writeln!(log, "$ {command}")?;
 
     let output = Command::new("bash")
-        .arg("-lc")
+        .arg("-c")
         .arg(&command)
+        .env_remove("RUSTUP_TOOLCHAIN")
         .current_dir(repo_root()?)
         .output()
         .context("failed to build example")?;
@@ -5112,20 +5151,8 @@ fn build_env_prefix(
         ));
     }
 
-    if env::var_os("ESP8266_HAL_WIFI_START_TRACE").is_some() {
-        prefix.push_str("ESP8266_HAL_WIFI_START_TRACE=1 ");
-    }
-
     if scenario.name == "promisc_filters" {
         prefix.push_str("ESP8266_HAL_PROMISC_FILTER=management ");
-    }
-
-    if scenario.name == "promisc_control_filter_api" {
-        prefix.push_str("ESP8266_HAL_PROMISC_API_ONLY=1 ");
-    }
-
-    if !scenario.features.contains(&"wifi-ap") {
-        prefix.push_str("ESP8266_HAL_AP_RX_FRAME_BYTES=256 ");
     }
 
     if scenario.name == "promisc_control_filters" {
@@ -5153,20 +5180,10 @@ fn build_env_prefix(
     }
 
     if scenario.name == "smartconfig" {
-        for key in [
-            "ESP8266_HAL_SMARTCONFIG_ENABLE_LOG",
-            "ESP8266_HAL_SMARTCONFIG_EVENT_TRACE",
-            "ESP8266_HAL_SMARTCONFIG_SNIFFER_TRACE",
-            "ESP8266_HAL_SMARTCONFIG_DIAG",
-            "ESP8266_HAL_SMARTCONFIG_DIAG_WAIT",
-            "ESP8266_HAL_SMARTCONFIG_RX_TRACE",
-            "ESP8266_HAL_SMARTCONFIG_RX_DIAG",
-            "ESP8266_HAL_SMARTCONFIG_STATIC_ACK",
-        ] {
-            if env::var_os(key).is_some() {
-                prefix.push_str(key);
-                prefix.push_str("=1 ");
-            }
+        const STATIC_ACK: &str = "ESP8266_HAL_SMARTCONFIG_STATIC_ACK";
+        if env::var_os(STATIC_ACK).is_some() {
+            prefix.push_str(STATIC_ACK);
+            prefix.push_str("=1 ");
         }
     }
 
@@ -5174,22 +5191,22 @@ fn build_env_prefix(
         scenario.name,
         "ap_station_list" | "ap_station_list_companion" | "ap_rejoin_companion"
     ) {
-        prefix.push_str("ESP8266_HAL_AP_WAIT_CLIENT=1 ESP8266_HAL_AP_RX_FRAME_BYTES=640 ");
+        prefix.push_str("ESP8266_HAL_AP_WAIT_CLIENT=1 ");
     }
 
     if scenario.name == "ap_attach_companion" {
-        prefix.push_str("ESP8266_HAL_AP_ATTACH_ONLY=1 ESP8266_HAL_AP_RX_RELEASE_ONLY=1 ESP8266_HAL_AP_RX_FRAME_BYTES=640 ");
+        prefix.push_str("ESP8266_HAL_AP_ATTACH_ONLY=1 ");
     }
 
     if scenario.name == "ap_net_attach_companion" {
         prefix.push_str(
-            "ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_DELAY_BEFORE_NET_MS=0 ESP8266_HAL_AP_DHCP_GRACE_MS=3000 ESP8266_HAL_AP_NET_ATTACH_ONLY=1 ESP8266_HAL_AP_RX_FRAME_BYTES=640 ",
+            "ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_DELAY_BEFORE_NET_MS=0 ESP8266_HAL_AP_DHCP_GRACE_MS=3000 ESP8266_HAL_AP_NET_ATTACH_ONLY=1 ",
         );
     }
 
     if scenario.name == "ap_dhcp_bind_companion" {
         prefix.push_str(
-            "ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_DELAY_BEFORE_NET_MS=0 ESP8266_HAL_AP_DHCP_GRACE_MS=3000 ESP8266_HAL_AP_DHCP_BIND_ONLY=1 ESP8266_HAL_AP_RX_FRAME_BYTES=640 ",
+            "ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_DELAY_BEFORE_NET_MS=0 ESP8266_HAL_AP_DHCP_GRACE_MS=3000 ESP8266_HAL_AP_DHCP_BIND_ONLY=1 ",
         );
     }
 
@@ -5198,12 +5215,10 @@ fn build_env_prefix(
             env::var("ESP8266_HAL_AP_DELAY_BEFORE_NET_MS").unwrap_or_else(|_| "5000".to_owned());
         let dhcp_grace = env::var("ESP8266_HAL_AP_DHCP_GRACE_MS").ok();
         let dhcp_poll = env::var("ESP8266_HAL_AP_DHCP_POLL_MS").ok();
-        prefix.push_str(
-            &format!(
-                "ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_DELAY_BEFORE_NET_MS={} ESP8266_HAL_AP_RX_FRAME_BYTES=512 ",
-                delay_ms
-            ),
-        );
+        prefix.push_str(&format!(
+            "ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_DELAY_BEFORE_NET_MS={} ",
+            delay_ms
+        ));
         if let Some(dhcp_grace) = dhcp_grace {
             prefix.push_str(&shell_env_assignment(
                 "ESP8266_HAL_AP_DHCP_GRACE_MS",
@@ -5221,7 +5236,7 @@ fn build_env_prefix(
     }
 
     if scenario.name == "ap_sta" || scenario.name == "ap_sta_downstream_companion" {
-        prefix.push_str("ESP8266_HAL_AP_STA_WAIT_CLIENT=1 ESP8266_HAL_AP_RX_FRAME_BYTES=640 ");
+        prefix.push_str("ESP8266_HAL_AP_STA_WAIT_CLIENT=1 ");
     }
 
     if matches!(
@@ -6774,17 +6789,19 @@ mod tests {
 
     use super::{
         bounded_companion_command_timeout, build_env_prefix, command_field,
-        eap_tcpdump_filter_args, env_flag_default, flash_cache_key, flash_images_fingerprint,
+        contains_radius_access_reject, eap_tcpdump_filter_args, ensure_esp_now_attempt_completed,
+        env_flag_default, esp_now_companion_tx_command, flash_cache_key, flash_images_fingerprint,
         flash_skip_status_from_value, focused_run_attempt_limit, matrix_secondary_lane_candidate,
         parse_matrix_options, parse_proc_cmdline, parse_radius_listener_pids,
         partition_matrix_lanes, path_presence, promisc_raw_kind, radius_default_eap_type,
         scenario_by_name, scenario_matrix_lane_label, scenario_requires_radius,
         scenario_resource_labels, scenario_uses_companion_resource, scenario_uses_router,
-        ss_line_has_udp_port, udp_port_status, wrong_channel_hint, FlashImage, UdpPortStatus,
-        WpsRouterMode, DEFAULT_MATRIX_ATTEMPTS, EAP_CA_CERT_DER_FILE_ENV, EAP_CA_CERT_FILE_ENV,
-        EAP_CA_CERT_PEM_NUL_FILE_ENV, EAP_CLIENT_CERT_DER_FILE_ENV, EAP_CLIENT_CERT_FILE_ENV,
-        EAP_CLIENT_CERT_PEM_NUL_FILE_ENV, EAP_PRIVATE_KEY_DER_FILE_ENV, EAP_PRIVATE_KEY_FILE_ENV,
-        EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV, EAP_RADIUS_CONFIG_ROOT_ENV, EAP_TLS_ROOT_ENV,
+        ss_line_has_udp_port, udp_port_status, wrong_channel_hint, EspNowMode, FlashImage,
+        UdpPortStatus, WpsRouterMode, DEFAULT_MATRIX_ATTEMPTS, EAP_CA_CERT_DER_FILE_ENV,
+        EAP_CA_CERT_FILE_ENV, EAP_CA_CERT_PEM_NUL_FILE_ENV, EAP_CLIENT_CERT_DER_FILE_ENV,
+        EAP_CLIENT_CERT_FILE_ENV, EAP_CLIENT_CERT_PEM_NUL_FILE_ENV, EAP_PRIVATE_KEY_DER_FILE_ENV,
+        EAP_PRIVATE_KEY_FILE_ENV, EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV, EAP_RADIUS_CONFIG_ROOT_ENV,
+        EAP_TLS_ROOT_ENV,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -6842,6 +6859,40 @@ mod tests {
         assert_eq!(promisc_raw_kind("promisc_capture"), "ap-beacon");
         assert_eq!(promisc_raw_kind("promisc_filters"), "beacon");
         assert_eq!(promisc_raw_kind("promisc_data_companion"), "data");
+    }
+
+    #[test]
+    fn encrypted_esp_now_commands_share_pmk_and_vary_only_lmk() {
+        let encrypted = esp_now_companion_tx_command(EspNowMode::Encrypted, "aa:bb:cc:dd:ee:ff");
+        let bad_key = esp_now_companion_tx_command(EspNowMode::BadKey, "aa:bb:cc:dd:ee:ff");
+
+        for command in [&encrypted, &bad_key] {
+            assert!(command.contains("pmk=24242424242424242424242424242424"));
+            assert!(!command.contains("pmk=none"));
+            assert!(command.contains("encrypt=1"));
+        }
+        assert!(encrypted.contains("lmk=42424242424242424242424242424242"));
+        assert!(bad_key.contains("lmk=41414141414141414141414141414141"));
+    }
+
+    #[test]
+    fn bad_key_requires_send_callback_completion() {
+        for completed in [
+            "OK ESPNOW_TX status=success\n",
+            "EV noise\nERR code=espnow-status detail=failed\n",
+        ] {
+            ensure_esp_now_attempt_completed(completed).unwrap();
+        }
+
+        for infrastructure_failure in [
+            "ERR code=espnow-init detail=ESP_FAIL\n",
+            "ERR code=espnow-peer detail=ESP_ERR_INVALID_ARG\n",
+            "ERR code=espnow-send detail=ESP_ERR_NO_MEM\n",
+            "ERR code=espnow-timeout detail=10000ms\n",
+            "ERR code=espnow-status detail=missing\n",
+        ] {
+            assert!(ensure_esp_now_attempt_completed(infrastructure_failure).is_err());
+        }
     }
 
     #[test]
@@ -7031,6 +7082,20 @@ udp UNCONN 0 0 0.0.0.0:9999 0.0.0.0:* users:(("other",pid=42,fd=3))
             .map(str::to_owned)
             .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn eap_negative_evidence_requires_radius_access_reject() {
+        assert!(contains_radius_access_reject(
+            "IP router.1812 > host.41234: RADIUS, Access-Reject (3), id: 0x4"
+        ));
+        assert!(contains_radius_access_reject(
+            "radius response\nAccess Reject"
+        ));
+        assert!(!contains_radius_access_reject(
+            "IP router.1812 > host.41234: RADIUS, Access-Challenge (11)"
+        ));
+        assert!(!contains_radius_access_reject("eap-negative-ok"));
     }
 
     #[test]

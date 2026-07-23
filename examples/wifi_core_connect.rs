@@ -4,23 +4,23 @@
 use panic_halt as _;
 
 use esp8266_hal::wifi::{
-    Channel, ClientConfig, Credential, Esp8266TargetBackend, InitConfig, Passphrase, Ssid,
-    WifiDriver, WifiResources,
+    Channel, ClientConfig, InitConfig, Passphrase, Ssid, StationCredential, WifiDriver,
+    WifiResources,
 };
 use static_cell::StaticCell;
 
 const WIFI_SSID: &str = match option_env!("ESP8266_HAL_WIFI_SSID") {
     Some(ssid) => ssid,
-    None => include_str!("ssid"),
+    None => "esp8266-hal",
 };
 const WIFI_PASS: &str = match option_env!("ESP8266_HAL_WIFI_PASS") {
     Some(pass) => pass,
-    None => include_str!("pass"),
+    None => "esp8266-pass",
 };
 const WIFI_CHANNEL: Option<&str> = option_env!("ESP8266_HAL_WIFI_CHANNEL");
 const WIFI_CONNECT_TIMEOUT_MS: Option<&str> = option_env!("ESP8266_HAL_WIFI_CONNECT_TIMEOUT_MS");
 
-static RESOURCES: StaticCell<WifiResources<8, 4, 2>> = StaticCell::new();
+static RESOURCES: StaticCell<WifiResources<8, 4>> = StaticCell::new();
 
 #[esp8266_hal::main]
 fn main() -> ! {
@@ -28,16 +28,15 @@ fn main() -> ! {
     esp8266_hal::logger::write_newline();
 
     let resources = RESOURCES.init_with(WifiResources::new);
-    let backend = Esp8266TargetBackend::new(resources);
-    let driver = WifiDriver::with_backend(resources, backend);
+    let driver = WifiDriver::new(resources);
     let driver = driver.initialize(InitConfig::default()).expect("init");
     esp8266_hal::logger::write_bytes(b"wifi core initialized");
     esp8266_hal::logger::write_newline();
 
     let credential = if WIFI_PASS.trim().is_empty() {
-        Credential::Open
+        StationCredential::open()
     } else {
-        Credential::Wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("pass"))
+        StationCredential::wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("pass"))
     };
 
     let mut config = ClientConfig::new(Ssid::try_from(WIFI_SSID.trim()).expect("ssid"), credential);
@@ -59,7 +58,7 @@ fn main() -> ! {
         .and_then(parse_u32_literal)
         .unwrap_or(60_000);
     {
-        let mut sta = driver.sta().expect("sta");
+        let mut sta = driver.sta();
         if let Err(error) = sta.connect_blocking(connect_timeout_ms) {
             esp8266_hal::logger::write_bytes(b"wifi-connect-error=");
             esp8266_hal::logger::write_bytes(driver_error_name(error).as_bytes());
@@ -121,6 +120,7 @@ fn driver_error_name(error: esp8266_hal::wifi::DriverError) -> &'static str {
         esp8266_hal::wifi::DriverError::PacketOverflow => "packet-overflow",
         esp8266_hal::wifi::DriverError::PeerOverflow => "peer-overflow",
         esp8266_hal::wifi::DriverError::PayloadTooLong => "payload-too-long",
+        esp8266_hal::wifi::DriverError::InvalidFrameSize => "invalid-frame-size",
         esp8266_hal::wifi::DriverError::OutOfMemory => "out-of-memory",
         esp8266_hal::wifi::DriverError::NotStarted => "not-started",
         esp8266_hal::wifi::DriverError::WouldBlock => "would-block",

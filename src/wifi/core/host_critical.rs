@@ -1,13 +1,14 @@
 extern crate std;
 
-use std::cell::Cell;
-use std::mem::MaybeUninit;
+use std::cell::{Cell, RefCell};
 use std::sync::{Mutex, MutexGuard};
 
 static GLOBAL_MUTEX: Mutex<()> = Mutex::new(());
-static mut GLOBAL_GUARD: MaybeUninit<MutexGuard<'static, ()>> = MaybeUninit::uninit();
 
-std::thread_local!(static IS_LOCKED: Cell<bool> = const { Cell::new(false) });
+std::thread_local! {
+    static IS_LOCKED: Cell<bool> = const { Cell::new(false) };
+    static THREAD_GUARD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+}
 
 struct HostCriticalSection;
 critical_section::set_impl!(HostCriticalSection);
@@ -19,12 +20,12 @@ unsafe impl critical_section::Impl for HostCriticalSection {
                 return 1;
             }
 
-            locked.set(true);
             let guard = match GLOBAL_MUTEX.lock() {
                 Ok(guard) => guard,
                 Err(error) => error.into_inner(),
             };
-            unsafe { GLOBAL_GUARD.write(guard) };
+            THREAD_GUARD.with(|slot| *slot.borrow_mut() = Some(guard));
+            locked.set(true);
             0
         })
     }
@@ -34,8 +35,7 @@ unsafe impl critical_section::Impl for HostCriticalSection {
             return;
         }
 
-        #[allow(let_underscore_lock)]
-        let _ = unsafe { GLOBAL_GUARD.assume_init_read() };
+        THREAD_GUARD.with(|slot| drop(slot.borrow_mut().take()));
         IS_LOCKED.with(|locked| locked.set(false));
     }
 }

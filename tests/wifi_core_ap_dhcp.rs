@@ -61,7 +61,7 @@ fn write_option(packet: &mut [u8], offset: &mut usize, kind: u8, data: &[u8]) {
     *offset += 2 + data.len();
 }
 
-fn option_value<'a>(packet: &'a [u8], kind: u8) -> Option<&'a [u8]> {
+fn option_value(packet: &[u8], kind: u8) -> Option<&[u8]> {
     let mut offset = DHCP_MIN_LEN;
     while offset < packet.len() {
         match packet[offset] {
@@ -101,7 +101,7 @@ fn dhcp_server_offers_first_lease_for_discover() {
     let mut response = [0u8; 320];
 
     let reply = server
-        .handle(&request, &mut response)
+        .handle(0, &request, &mut response)
         .unwrap()
         .expect("discover should produce offer");
 
@@ -144,7 +144,7 @@ fn dhcp_server_preserves_unicast_reply_preference() {
     let mut response = [0u8; 320];
 
     let reply = server
-        .handle(&request, &mut response)
+        .handle(0, &request, &mut response)
         .unwrap()
         .expect("discover should produce offer");
 
@@ -164,7 +164,7 @@ fn dhcp_server_acks_request_for_its_offer() {
     let mut response = [0u8; 320];
 
     let reply = server
-        .handle(&request, &mut response)
+        .handle(0, &request, &mut response)
         .unwrap()
         .expect("request should produce ack");
 
@@ -186,7 +186,7 @@ fn dhcp_server_ignores_request_for_another_server() {
     );
     let mut response = [0u8; 320];
 
-    assert_eq!(server.handle(&request, &mut response), Ok(None));
+    assert_eq!(server.handle(0, &request, &mut response), Ok(None));
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn dhcp_server_naks_request_outside_pool() {
     let mut response = [0u8; 320];
 
     let reply = server
-        .handle(&request, &mut response)
+        .handle(0, &request, &mut response)
         .unwrap()
         .expect("bad request should produce nak");
 
@@ -291,7 +291,7 @@ fn dhcp_server_renders_max_lease_without_overflowing_rebind_time() {
     let request = request_packet(1, None, None);
     let mut response = [0u8; 320];
 
-    let reply = server.handle(&request, &mut response).unwrap().unwrap();
+    let reply = server.handle(0, &request, &mut response).unwrap().unwrap();
 
     assert_eq!(
         option_value(&response[..reply.len()], OPT_RENEWAL_TIME),
@@ -301,4 +301,45 @@ fn dhcp_server_renders_max_lease_without_overflowing_rebind_time() {
         option_value(&response[..reply.len()], OPT_REBINDING_TIME),
         Some(&(u32::MAX - (u32::MAX / 8)).to_be_bytes()[..])
     );
+}
+
+#[test]
+fn dhcp_server_reuses_expired_lease_slots() {
+    let mut server = DhcpServer::<1>::new(server_config());
+    let first = request_packet(1, None, None);
+    let mut second = request_packet(1, None, None);
+    second[28..34].copy_from_slice(&[3, 4, 5, 6, 7, 8]);
+    let mut response = [0u8; 320];
+
+    let first_reply = server.handle(10, &first, &mut response).unwrap().unwrap();
+    assert_eq!(first_reply.leased_ip(), Ipv4Addr::new(192, 168, 4, 2));
+    assert_eq!(server.leases().next().unwrap().expires_at_seconds(), 3610);
+    assert_eq!(
+        server.handle(3609, &second, &mut response),
+        Err(DhcpServerError::LeasePoolFull)
+    );
+
+    let second_reply = server
+        .handle(3610, &second, &mut response)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second_reply.leased_ip(), Ipv4Addr::new(192, 168, 4, 2));
+    assert_eq!(second_reply.client_mac(), [3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn dhcp_release_frees_lease_immediately() {
+    let mut server = DhcpServer::<1>::new(server_config());
+    let first = request_packet(1, None, None);
+    let release = request_packet(7, None, None);
+    let mut second = request_packet(1, None, None);
+    second[28..34].copy_from_slice(&[3, 4, 5, 6, 7, 8]);
+    let mut response = [0u8; 320];
+
+    server.handle(0, &first, &mut response).unwrap().unwrap();
+    assert_eq!(server.handle(1, &release, &mut response), Ok(None));
+    assert_eq!(server.leases().count(), 0);
+
+    let reply = server.handle(2, &second, &mut response).unwrap().unwrap();
+    assert_eq!(reply.leased_ip(), Ipv4Addr::new(192, 168, 4, 2));
 }

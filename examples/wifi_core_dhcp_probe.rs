@@ -7,29 +7,28 @@ use embassy_time::Duration;
 
 use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverState};
 use esp8266_hal::wifi::{
-    Channel, ClientConfig, Credential, Esp8266TargetBackend, InitConfig, Passphrase, Ssid, StaMode,
-    Started, WifiDriver, WifiResources,
+    Channel, ClientConfig, Esp8266TargetBackend, InitConfig, Passphrase, Ssid, StaMode, Started,
+    StationCredential, WifiDriver, WifiResources,
 };
 use static_cell::StaticCell;
 
 const WIFI_SSID: &str = match option_env!("ESP8266_HAL_WIFI_SSID") {
     Some(ssid) => ssid,
-    None => include_str!("ssid"),
+    None => "esp8266-hal",
 };
 const WIFI_PASS: &str = match option_env!("ESP8266_HAL_WIFI_PASS") {
     Some(pass) => pass,
-    None => include_str!("pass"),
+    None => "esp8266-pass",
 };
 const WIFI_CHANNEL: Option<&str> = option_env!("ESP8266_HAL_WIFI_CHANNEL");
 const NET_RX_PACKETS: usize = 1;
 const NET_TX_PACKETS: usize = 1;
 
 type ProbeNetState = NetDriverState<NET_RX_PACKETS, NET_TX_PACKETS>;
-type ProbeResources = WifiResources<8, 4, 2>;
-type ProbeDriver =
-    WifiDriver<'static, Started<StaMode>, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
+type ProbeResources = WifiResources<8, 4>;
+type ProbeDriver = WifiDriver<'static, Started<StaMode>, Esp8266TargetBackend<'static, 8, 4>, 8, 4>;
 type WifiNetRunner =
-    wifi_net::Runner<'static, 'static, StaMode, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
+    wifi_net::Runner<'static, 'static, StaMode, Esp8266TargetBackend<'static, 8, 4>, 8, 4>;
 type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDevice<'static>>;
 
 static NET_STATE: StaticCell<ProbeNetState> = StaticCell::new();
@@ -55,29 +54,24 @@ fn log_dhcp_up(config: embassy_net::StaticConfigV4) {
 }
 
 #[inline(never)]
-fn log_dhcp_timeout(stack: &embassy_net::Stack<'static>, resources: &'static ProbeResources) {
+fn log_dhcp_timeout(stack: &embassy_net::Stack<'static>) {
     esp8266_hal::logger::write_bytes(b"dhcp timeout link=");
     esp8266_hal::logger::write_dec_u32(stack.is_link_up() as u32);
     esp8266_hal::logger::write_bytes(b" cfg=");
     esp8266_hal::logger::write_dec_u32(stack.is_config_up() as u32);
-    esp8266_hal::logger::write_bytes(b" queued=");
-    esp8266_hal::logger::write_dec_u32(resources.queued_rx() as u32);
-    esp8266_hal::logger::write_bytes(b" drops=");
-    esp8266_hal::logger::write_dec_u32(resources.rx_drops());
     esp8266_hal::logger::write_newline();
 }
 
 fn init_wifi() -> (ProbeDriver, &'static ProbeResources) {
     let resources = WIFI_RESOURCES.init_with(ProbeResources::new);
-    let backend = Esp8266TargetBackend::new(resources);
-    let driver = WifiDriver::with_backend(resources, backend)
+    let driver = WifiDriver::new(resources)
         .initialize(InitConfig::new(14, 4, 4).expect("init config"))
         .expect("wifi init");
 
     let credential = if WIFI_PASS.trim().is_empty() {
-        Credential::Open
+        StationCredential::open()
     } else {
-        Credential::Wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("passphrase"))
+        StationCredential::wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("passphrase"))
     };
 
     let mut config = ClientConfig::new(Ssid::try_from(WIFI_SSID.trim()).expect("ssid"), credential);
@@ -98,8 +92,8 @@ fn init_wifi() -> (ProbeDriver, &'static ProbeResources) {
 }
 
 fn connect_wifi(driver: &mut ProbeDriver) -> Result<(), esp8266_hal::wifi::DriverError> {
-    let mut sta = driver.sta().expect("sta");
-    let _session = sta.connect_blocking(60_000)?;
+    let mut sta = driver.sta();
+    sta.connect_blocking(60_000)?;
     log_line(b"wifi connected");
     Ok(())
 }
@@ -167,7 +161,7 @@ async fn main(spawner: Spawner) {
                 log_line(b"dhcp wake no-v4");
             }
         }
-        Either::Second(()) => log_dhcp_timeout(&stack, resources),
+        Either::Second(()) => log_dhcp_timeout(&stack),
     }
 
     loop {
@@ -204,6 +198,7 @@ fn driver_error_name(error: esp8266_hal::wifi::DriverError) -> &'static str {
         esp8266_hal::wifi::DriverError::PacketOverflow => "packet-overflow",
         esp8266_hal::wifi::DriverError::PeerOverflow => "peer-overflow",
         esp8266_hal::wifi::DriverError::PayloadTooLong => "payload-too-long",
+        esp8266_hal::wifi::DriverError::InvalidFrameSize => "invalid-frame-size",
         esp8266_hal::wifi::DriverError::OutOfMemory => "out-of-memory",
         esp8266_hal::wifi::DriverError::NotStarted => "not-started",
         esp8266_hal::wifi::DriverError::WouldBlock => "would-block",

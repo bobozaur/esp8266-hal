@@ -7,11 +7,16 @@ keywords = ["esp8266", "esp8266-hal", "runtime", "startup"]
 license = "MIT OR Apache-2.0"
 name = "esp8266-hal-proc-macros"
 repository = "https://github.com/esp-rs/esp8266-hal"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+include = ["src/**", "LICENSE-APACHE", "LICENSE-MIT"]
 
 [lib]
 proc-macro = true
+
+[features]
+default = []
+wifi = []
 
 [dependencies]
 quote = "1"

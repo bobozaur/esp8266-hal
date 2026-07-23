@@ -11,9 +11,9 @@ use embassy_futures::select::select;
 use embassy_time::{Duration, Instant, Timer};
 use esp8266_hal::wifi::smoltcp::ApWifiDevice;
 use esp8266_hal::wifi::{
-    AccessPointConfig, ApClientLimit, ApMode, BeaconInterval, Channel, Credential, DhcpMessageType,
-    DhcpServer, DhcpServerConfig, DriverError, Esp8266TargetBackend, InitConfig, Ipv4Addr, Ssid,
-    Started, WifiDriver, WifiResources,
+    AccessPointConfig, ApClientLimit, ApCredential, ApMode, BeaconInterval, Channel,
+    DhcpMessageType, DhcpServer, DhcpServerConfig, DriverError, Esp8266TargetBackend, InitConfig,
+    Ipv4Addr, Ssid, Started, WifiDriver, WifiResources,
 };
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{
@@ -34,11 +34,11 @@ const DHCP_REPLY_FRAME_BYTES: usize =
     ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN + DHCP_PACKET_BYTES;
 const DHCP_REPLY_HEADERS: usize = ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN;
 
-type ApResources = WifiResources<8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type ApBackend = Esp8266TargetBackend<'static, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type ApResources = WifiResources<8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type ApBackend = Esp8266TargetBackend<'static, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
 type ApDriver =
-    WifiDriver<'static, Started<ApMode>, ApBackend, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type ApNetDevice = ApWifiDevice<'static, ApMode, ApBackend, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+    WifiDriver<'static, Started<ApMode>, ApBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type ApNetDevice = ApWifiDevice<'static, ApMode, ApBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
 
 struct ApNetRuntime {
     device: ApNetDevice,
@@ -76,20 +76,6 @@ fn write_hex16(value: u16) {
     esp8266_hal::logger::write_byte(HEX[((value >> 8) & 0x0f) as usize]);
     esp8266_hal::logger::write_byte(HEX[((value >> 4) & 0x0f) as usize]);
     esp8266_hal::logger::write_byte(HEX[(value & 0x0f) as usize]);
-}
-
-#[inline(always)]
-fn write_hex32(value: u32) {
-    write_hex16((value >> 16) as u16);
-    write_hex16(value as u16);
-}
-
-#[inline(never)]
-fn log_free_heap(label: &[u8]) {
-    esp8266_hal::logger::write_bytes(label);
-    esp8266_hal::logger::write_bytes(b" free=0x");
-    write_hex32(esp8266_hal::wifi::free_heap_bytes());
-    esp8266_hal::logger::write_newline();
 }
 
 fn wait_for_client_enabled() -> bool {
@@ -148,7 +134,6 @@ async fn run_dhcp_server(runtime: &'static mut ApNetRuntime) -> ! {
     log_stage(b"dhcp-task-enter");
     if ap_dhcp_bind_only_enabled() {
         log_line(b"ap-dhcp-bind-ready");
-        log_free_heap(b"ap-dhcp-bind-ready");
         loop {
             Timer::after(Duration::from_secs(1)).await;
         }
@@ -174,7 +159,6 @@ async fn run_dhcp_server(runtime: &'static mut ApNetRuntime) -> ! {
     let mut last_wait_log = Instant::now();
 
     log_line(b"ap-dhcp-ready");
-    log_free_heap(b"ap-dhcp-ready");
     if let Some(delay_ms) = ap_dhcp_grace_ms() {
         if delay_ms > 0 {
             log_line(b"ap-dhcp-grace");
@@ -185,10 +169,21 @@ async fn run_dhcp_server(runtime: &'static mut ApNetRuntime) -> ! {
     loop {
         let mut reply = None;
 
-        while let Some(frame_len) = runtime.device.receive_frame(rx_frame) {
+        loop {
+            let frame_len = match runtime.device.receive_frame(rx_frame) {
+                Ok(Some(frame_len)) => frame_len,
+                Ok(None) => break,
+                Err(_) => {
+                    log_line(b"ap-rx-drop");
+                    continue;
+                }
+            };
             match dhcp_payload(&rx_frame[..frame_len]) {
-                Some(packet) => match server.handle(packet, &mut reply_frame[DHCP_REPLY_HEADERS..])
-                {
+                Some(packet) => match server.handle(
+                    Instant::now().as_secs(),
+                    packet,
+                    &mut reply_frame[DHCP_REPLY_HEADERS..],
+                ) {
                     Ok(result) => {
                         reply = result;
                         last_wait_log = Instant::now();
@@ -326,14 +321,13 @@ fn start_ap_network(driver: ApDriver) -> Result<&'static mut ApNetRuntime, &'sta
     let link = driver
         .ap_link()
         .map_err(|_| b"ap-net link err" as &'static [u8])?;
-    log_free_heap(b"ap-net-link");
-    let device = ApWifiDevice::new(link);
+    let device =
+        ApWifiDevice::new(link).map_err(|_| b"ap-net frame size err" as &'static [u8])?;
     let _mac = device
         .mac_address()
         .map_err(|_| b"ap-net mac err" as &'static [u8])?;
 
     log_stage(b"net-ready");
-    log_free_heap(b"ap-net-ready");
     Ok(AP_RUNTIME.init(ApNetRuntime { device }))
 }
 
@@ -342,26 +336,23 @@ async fn main(_spawner: Spawner) {
     log_line(b"wifi_ap start");
 
     let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let backend = Esp8266TargetBackend::new(resources);
     log_stage(b"wifi-init");
-    let driver =
-        match WifiDriver::with_backend(resources, backend).initialize(InitConfig::default()) {
-            Ok(driver) => driver,
-            Err(_error) => {
-                log_line(b"wifi init err");
-                loop {
-                    Timer::after(Duration::from_secs(60)).await;
-                }
+    let driver = match WifiDriver::new(resources).initialize(InitConfig::default()) {
+        Ok(driver) => driver,
+        Err(_error) => {
+            log_line(b"wifi init err");
+            loop {
+                Timer::after(Duration::from_secs(60)).await;
             }
-        };
+        }
+    };
     log_line(b"wifi init ok");
-    log_free_heap(b"wifi-init");
 
     let config = AccessPointConfig::builder(
         Ssid::try_from(AP_SSID).expect("ap ssid"),
         Channel::try_from(6).expect("ap channel"),
     )
-    .credential(Credential::Open)
+    .credential(ApCredential::Open)
     .max_clients(ApClientLimit::try_from(4).expect("ap clients"))
     .beacon_interval(BeaconInterval::try_from(100).expect("beacon"))
     .build();
@@ -388,7 +379,7 @@ async fn main(_spawner: Spawner) {
     };
     log_line(b"ap started");
 
-    let station_count = match driver.ap().and_then(|mut ap| ap.connected_stations::<10>()) {
+    let station_count = match driver.ap().connected_stations::<10>() {
         Ok(stations) => stations.len(),
         Err(_error) => {
             log_line(b"ap start err");
@@ -410,7 +401,6 @@ async fn main(_spawner: Spawner) {
             }
         };
         log_line(b"ap-link-ready");
-        log_free_heap(b"ap-link-ready");
         loop {
             Timer::after(Duration::from_secs(60)).await;
         }
@@ -433,12 +423,10 @@ async fn main(_spawner: Spawner) {
             }
         };
         log_line(b"ap-net-up");
-        log_free_heap(b"ap-net-ready");
         log_line(b"ap-start-ok");
         if ap_network_attach_only_enabled() {
             let _runtime = runtime;
             log_line(b"ap-net-attach-ready");
-            log_free_heap(b"ap-net-attach-ready");
             loop {
                 Timer::after(Duration::from_secs(1)).await;
             }
@@ -450,7 +438,7 @@ async fn main(_spawner: Spawner) {
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut saw_client = false;
         while Instant::now() < deadline {
-            match driver.ap().and_then(|mut ap| ap.connected_stations::<10>()) {
+            match driver.ap().connected_stations::<10>() {
                 Ok(stations) if !stations.is_empty() => {
                     log_station_count(stations.len());
                     saw_client = true;
@@ -474,7 +462,7 @@ async fn main(_spawner: Spawner) {
             }
         }
 
-        if driver.ap().and_then(|mut ap| ap.deauth_all()).is_err() {
+        if driver.ap().deauth_all().is_err() {
             log_line(b"ap deauth err");
             loop {
                 Timer::after(Duration::from_secs(60)).await;

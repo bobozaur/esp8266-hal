@@ -28,9 +28,8 @@ use portable_atomic::{AtomicBool, AtomicUsize, Ordering};
 // Pender flag
 // ---------------------------------------------------------------------------
 
-/// Atomic flag set by the pender, cleared by the executor after `poll()`.
-/// Public so SoftIsrHdl can check if the soft interrupt was from the pender.
-pub static PEND: AtomicBool = AtomicBool::new(false);
+/// Atomic flag set by the pender and cleared by the executor after `poll()`.
+static PEND: AtomicBool = AtomicBool::new(false);
 static EXECUTOR_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 #[inline(always)]

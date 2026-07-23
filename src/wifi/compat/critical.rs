@@ -5,6 +5,7 @@
 //! and other compiled C code.
 
 use core::arch::asm;
+use core::sync::atomic::{compiler_fence, Ordering};
 
 // ---------------------------------------------------------------------------
 // Hardware register addresses (from eagle_soc.h)
@@ -16,7 +17,7 @@ const INT_ENA_WDEV: u32 = 0x3ff2_0c18;
 const WDEV_TSF0_REACH_INT: u32 = 1 << 27;
 
 // ---------------------------------------------------------------------------
-// Globals required by the port layer (accessed from C and assembly)
+// Globals required by the port layer and native SDK objects
 // ---------------------------------------------------------------------------
 
 /// Saved PS register for interrupt disable/enable pairs.
@@ -36,10 +37,6 @@ extern "C" {
     pub static mut NMIIrqIsOn: u8;
 }
 
-/// Persistent NMI call counter — incremented in nmi_handler.S.
-#[no_mangle]
-pub static mut g_nmi_call_count: u32 = 0;
-
 // ---------------------------------------------------------------------------
 // Inline helpers
 // ---------------------------------------------------------------------------
@@ -52,8 +49,9 @@ unsafe fn disable_interrupts() {
         asm!(
             "rsil {0}, 3",
             out(reg) saved,
-            options(nomem, nostack),
+            options(nostack),
         );
+        compiler_fence(Ordering::Acquire);
         cpu_sr = saved;
     }
 }
@@ -62,11 +60,13 @@ unsafe fn disable_interrupts() {
 #[inline(always)]
 unsafe fn enable_interrupts() {
     unsafe {
+        compiler_fence(Ordering::Release);
         let val = cpu_sr;
         asm!(
             "wsr {0}, ps",
+            "rsync",
             in(reg) val,
-            options(nomem, nostack),
+            options(nostack),
         );
     }
 }
@@ -102,6 +102,7 @@ pub unsafe extern "C" fn vPortEnterCritical() {
             }
             CRITICAL_NESTING += 1;
         }
+        compiler_fence(Ordering::Acquire);
     }
 }
 
@@ -111,6 +112,7 @@ pub unsafe extern "C" fn vPortEnterCritical() {
 #[link_section = ".iram1"]
 pub unsafe extern "C" fn vPortExitCritical() {
     unsafe {
+        compiler_fence(Ordering::Release);
         if NMIIrqIsOn == 0 {
             if CRITICAL_NESTING > 0 {
                 CRITICAL_NESTING -= 1;
@@ -129,6 +131,11 @@ static mut WDEV_READY: bool = false;
 /// Mark WDEV hardware as accessible. Call before `esp_wifi_init`.
 pub unsafe fn mark_wdev_ready() {
     unsafe { WDEV_READY = true };
+}
+
+/// Mark WDEV hardware as unavailable after Wi-Fi teardown.
+pub unsafe fn clear_wdev_ready() {
+    unsafe { WDEV_READY = false };
 }
 
 /// Lock WiFi device interrupts (SDK-compatible).
@@ -178,37 +185,6 @@ pub unsafe extern "C" fn vPortETSIntrUnlock() {
 }
 
 // ---------------------------------------------------------------------------
-// critical-section crate implementation
-// ---------------------------------------------------------------------------
-
-struct XtensaCriticalSection;
-critical_section::set_impl!(XtensaCriticalSection);
-
-unsafe impl critical_section::Impl for XtensaCriticalSection {
-    unsafe fn acquire() -> critical_section::RawRestoreState {
-        let saved: u32;
-        unsafe {
-            core::arch::asm!(
-                "rsil {0}, 3",
-                out(reg) saved,
-                options(nomem, nostack),
-            );
-        }
-        saved as critical_section::RawRestoreState
-    }
-
-    unsafe fn release(token: critical_section::RawRestoreState) {
-        unsafe {
-            core::arch::asm!(
-                "wsr {0}, ps",
-                in(reg) token as u32,
-                options(nomem, nostack),
-            );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Interrupt query
 // ---------------------------------------------------------------------------
 
@@ -224,11 +200,4 @@ pub unsafe extern "C" fn interrupt_is_disable() -> bool {
         );
     }
     (ps & 0xF) != 0
-}
-
-/// Show critical section debug info (called from panic paths).
-#[no_mangle]
-pub unsafe extern "C" fn show_critical_info() {
-    // Minimal stub — real implementation would call ets_printf.
-    // The C code that calls this is in the panic handler which we keep compiled.
 }

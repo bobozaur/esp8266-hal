@@ -8,25 +8,15 @@ use embassy_futures::yield_now;
 use embassy_time::{Duration, Instant, Timer};
 
 use esp8266_hal::wifi::{
-    Channel, Esp8266TargetBackend, InitConfig, PromiscuousControlFilter, PromiscuousFilter,
-    PromiscuousPacketType, PromiscuousRxFrame, WifiDriver, WifiResources,
+    Channel, InitConfig, PromiscuousControlFilter, PromiscuousFilter, PromiscuousPacketType,
+    PromiscuousRxFrame, WifiDriver, WifiResources,
 };
 use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
-type PromiscResources = WifiResources<8, 4, 2, 0, 0, 2>;
+type PromiscResources = WifiResources<8, 4, 0, 0, 2>;
 
 static WIFI_RESOURCES: StaticCell<PromiscResources> = StaticCell::new();
-
-// Keep capture and API-validation paths linked in the same hardware shape; the
-// ESP8266 promiscuous enable path is sensitive enough that a tiny API-only
-// binary is not representative of the production capture path.
-#[used]
-static API_ONLY: u8 = if option_env!("ESP8266_HAL_PROMISC_API_ONLY").is_some() {
-    1
-} else {
-    0
-};
 
 #[inline(always)]
 fn log_line(message: &[u8]) {
@@ -61,10 +51,6 @@ fn selected_control_filter() -> (&'static [u8], PromiscuousControlFilter) {
         Some("all") => (b"all", PromiscuousControlFilter::all()),
         _ => (b"none", PromiscuousControlFilter::empty()),
     }
-}
-
-fn api_only() -> bool {
-    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(API_ONLY)) == 1 }
 }
 
 fn selected_channel() -> Channel {
@@ -128,8 +114,7 @@ async fn main(_spawner: Spawner) {
     log_line(b"wifi_promisc start");
 
     let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let backend = Esp8266TargetBackend::new(resources);
-    let driver = WifiDriver::with_backend(resources, backend)
+    let driver = WifiDriver::new(resources)
         .initialize(InitConfig::default())
         .expect("wifi init");
     log_line(b"wifi init ok");
@@ -177,49 +162,6 @@ async fn main(_spawner: Spawner) {
         }
     }
     log_line(b"promisc enable ok");
-
-    if api_only() {
-        if session
-            .set_control_filter(PromiscuousControlFilter::ACK)
-            .is_err()
-            || session.control_filter() != PromiscuousControlFilter::ACK
-            || !session.is_active()
-            || session.filter() != filter
-        {
-            log_line(b"promisc ctrl filter err");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-        log_line(b"promisc ctrl filter ack ok");
-
-        if session
-            .set_control_filter(PromiscuousControlFilter::empty())
-            .is_err()
-            || session.control_filter() != PromiscuousControlFilter::empty()
-        {
-            log_line(b"promisc ctrl filter err");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-        log_line(b"promisc ctrl filter none ok");
-
-        if session.stop().is_err()
-            || session.is_active()
-            || session.filter() != PromiscuousFilter::empty()
-        {
-            log_line(b"promisc stop err");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-        log_line(b"promisc stop ok");
-        log_line(b"promisc-control-api-ok");
-        loop {
-            Timer::after(Duration::from_secs(60)).await;
-        }
-    }
 
     if !control_filter.is_empty() && session.set_control_filter(control_filter).is_err() {
         log_line(b"promisc ctrl filter err");

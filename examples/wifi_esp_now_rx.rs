@@ -6,15 +6,19 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 
-use esp8266_hal::wifi::{
-    Channel, Esp8266TargetBackend, EspNowPeerConfig, InitConfig, WifiDriver, WifiResources,
-};
+use esp8266_hal::wifi::{Channel, EspNowPeerConfig, InitConfig, WifiDriver, WifiResources};
 use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
-type EspNowResources = WifiResources<8, 4, 2, 2, 2, 0>;
+const ESP_NOW_PEER_CAPACITY: usize = if option_env!("ESP8266_HAL_ESPNOW_PEER").is_some() {
+    1
+} else {
+    0
+};
+type EspNowResources = WifiResources<8, 4, ESP_NOW_PEER_CAPACITY, 2, 0>;
 
 static WIFI_RESOURCES: StaticCell<EspNowResources> = StaticCell::new();
+const ESP_NOW_PMK: [u8; 16] = [0x24; 16];
 
 #[inline(always)]
 fn log_line(message: &[u8]) {
@@ -82,8 +86,7 @@ async fn main(_spawner: Spawner) {
     log_line(b"wifi_esp_now_rx start");
 
     let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let backend = Esp8266TargetBackend::new(resources);
-    let driver = WifiDriver::with_backend(resources, backend)
+    let driver = WifiDriver::new(resources)
         .initialize(InitConfig::new(14, 4, 4).expect("init config"))
         .expect("wifi init");
     log_line(b"wifi init ok");
@@ -122,6 +125,12 @@ async fn main(_spawner: Spawner) {
 
     if session.start().is_err() {
         log_line(b"esp-now start err");
+        loop {
+            Timer::after(Duration::from_secs(60)).await;
+        }
+    }
+    if encrypted_peer_enabled() && session.set_pmk(&ESP_NOW_PMK).is_err() {
+        log_line(b"esp-now pmk err");
         loop {
             Timer::after(Duration::from_secs(60)).await;
         }

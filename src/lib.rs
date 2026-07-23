@@ -1,11 +1,21 @@
 #![no_std]
-#![cfg_attr(feature = "rt", feature(asm_experimental_arch))]
+#![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch))]
 #![cfg_attr(feature = "rt", feature(naked_functions))]
-#![cfg_attr(feature = "wifi", feature(raw_ref_op))]
+#![cfg_attr(all(feature = "wifi", target_arch = "xtensa"), feature(raw_ref_op))]
+
+#[cfg(all(
+    feature = "wifi",
+    target_arch = "xtensa",
+    not(all(feature = "rt", feature = "interrupt"))
+))]
+compile_error!("ESP8266 target Wi-Fi requires both the `rt` and `interrupt` features");
 
 pub use embedded_hal as ehal;
 pub use esp8266 as target;
 pub use esp8266_hal_proc_macros::{interrupt, main, ram};
+
+#[cfg(target_arch = "xtensa")]
+mod critical;
 
 #[cfg(feature = "rt")]
 pub use xtensa_lx_rt::{entry, exception};
@@ -32,10 +42,18 @@ pub mod logger;
 #[path = "wifi/core/mod.rs"]
 pub mod wifi_core;
 
-#[cfg(all(feature = "wifi-core", not(feature = "wifi")))]
+#[cfg(all(
+    feature = "wifi-core",
+    any(not(feature = "wifi"), not(target_arch = "xtensa"))
+))]
 pub use wifi_core as wifi;
 
-#[cfg(feature = "wifi")]
+#[cfg(all(
+    feature = "wifi",
+    feature = "rt",
+    feature = "interrupt",
+    target_arch = "xtensa"
+))]
 #[deny(unsafe_op_in_unsafe_fn)]
 pub mod wifi;
 

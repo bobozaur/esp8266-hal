@@ -13,11 +13,12 @@ use esp8266_hal::wifi::{
 use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
-type EspNowResources = WifiResources<8, 4, 2, 2, 2, 0>;
-type EspNowBackend = Esp8266TargetBackend<'static, 8, 4, 2, 2, 2, 0>;
-type EspNowTxSession<'a> = EspNowSession<'a, StaMode, EspNowBackend, 8, 4, 2, 2, 2, 0>;
+type EspNowResources = WifiResources<8, 4, 1, 0, 0>;
+type EspNowBackend = Esp8266TargetBackend<'static, 8, 4, 1, 0, 0>;
+type EspNowTxSession<'a> = EspNowSession<'a, StaMode, EspNowBackend, 8, 4, 1, 0, 0>;
 
 static WIFI_RESOURCES: StaticCell<EspNowResources> = StaticCell::new();
+const ESP_NOW_PMK: [u8; 16] = [0x24; 16];
 
 #[inline(always)]
 fn log_line(message: &[u8]) {
@@ -97,8 +98,7 @@ async fn main(_spawner: Spawner) {
     log_line(b"wifi_esp_now_tx start");
 
     let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let backend = Esp8266TargetBackend::new(resources);
-    let driver = WifiDriver::with_backend(resources, backend)
+    let driver = WifiDriver::new(resources)
         .initialize(InitConfig::new(14, 4, 4).expect("init config"))
         .expect("wifi init");
     log_line(b"wifi init ok");
@@ -139,6 +139,12 @@ async fn main(_spawner: Spawner) {
             Timer::after(Duration::from_secs(60)).await;
         }
     }
+    if encrypted_peer_enabled() && session.set_pmk(&ESP_NOW_PMK).is_err() {
+        log_line(b"esp-now pmk err");
+        loop {
+            Timer::after(Duration::from_secs(60)).await;
+        }
+    }
 
     let configured_peer = option_env!("ESP8266_HAL_ESPNOW_PEER").is_some();
     let peer_addr = match add_configured_peer(&mut session, channel) {
@@ -152,6 +158,7 @@ async fn main(_spawner: Spawner) {
     };
     log_line(b"esp-now peer ok");
 
+    let mut saw_send_success = false;
     for _ in 0..8 {
         if session.send(&peer_addr, b"esp8266-hal-esp-now").is_err() {
             log_line(b"esp-now send err");
@@ -159,36 +166,31 @@ async fn main(_spawner: Spawner) {
                 Timer::after(Duration::from_secs(60)).await;
             }
         }
+        let mut completed = false;
+        for _ in 0..100 {
+            if let Some(status) = session.send_status() {
+                esp8266_hal::logger::write_bytes(b"esp-now send status=");
+                let status_text: &[u8] = match status {
+                    EspNowSendStatus::Success => {
+                        saw_send_success = true;
+                        b"success"
+                    }
+                    EspNowSendStatus::Failed => b"failed",
+                };
+                esp8266_hal::logger::write_bytes(status_text);
+                esp8266_hal::logger::write_newline();
+                completed = true;
+                break;
+            }
+            Timer::after(Duration::from_millis(20)).await;
+        }
+        if !completed {
+            log_line(b"esp-now send status timeout");
+            loop {
+                Timer::after(Duration::from_secs(60)).await;
+            }
+        }
         Timer::after(Duration::from_millis(100)).await;
-    }
-
-    let mut saw_send_callback = false;
-    let mut saw_send_success = false;
-    for _ in 0..100 {
-        while let Some(status) = session.send_status() {
-            esp8266_hal::logger::write_bytes(b"esp-now send status=");
-            let status_text: &[u8] = match status.status() {
-                EspNowSendStatus::Success => {
-                    saw_send_success = true;
-                    b"success"
-                }
-                EspNowSendStatus::Failed => b"failed",
-            };
-            esp8266_hal::logger::write_bytes(status_text);
-            esp8266_hal::logger::write_newline();
-            saw_send_callback = true;
-        }
-        if saw_send_success {
-            break;
-        }
-        Timer::after(Duration::from_millis(20)).await;
-    }
-
-    if !saw_send_callback {
-        log_line(b"esp-now send status timeout");
-        loop {
-            Timer::after(Duration::from_secs(60)).await;
-        }
     }
     if configured_peer {
         if !saw_send_success {

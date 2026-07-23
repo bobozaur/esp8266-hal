@@ -4,9 +4,9 @@
 use panic_halt as _;
 
 use esp8266_hal::wifi::{
-    Channel, ClientConfig, Credential, EnterpriseIdentity, EnterprisePassword, EnterpriseUsername,
-    Esp8266TargetBackend, InitConfig, LinkState, Ssid, WifiDriver, WifiResources,
-    Wpa2EnterpriseClientCertificate, Wpa2EnterpriseCredentials,
+    Channel, ClientConfig, EnterpriseIdentity, EnterprisePassword, EnterpriseUsername, InitConfig,
+    LinkState, Ssid, StationCredential, WifiDriver, WifiResources, Wpa2EnterpriseClientCertificate,
+    Wpa2EnterpriseCredentials,
 };
 use static_cell::StaticCell;
 
@@ -36,7 +36,7 @@ const EAP_EXPECT_FAILURE: bool = match option_env!("ESP8266_HAL_EAP_EXPECT_FAILU
 };
 const EAP_DISABLE_TIME_CHECK: Option<&str> = option_env!("ESP8266_HAL_EAP_DISABLE_TIME_CHECK");
 
-type EapResources = WifiResources<0, 0, 1>;
+type EapResources = WifiResources<0, 0>;
 
 #[cfg(esp8266_hal_eap_ca_cert_pem_nul_file)]
 const EAP_CA_CERT_PEM_NUL: Option<&[u8]> =
@@ -91,16 +91,13 @@ fn main() -> ! {
 
     let resources = RESOURCES.init_with(WifiResources::new);
     log_line(b"wifi eap resources");
-    log_heap(b"wifi eap heap before init");
 
-    let backend = Esp8266TargetBackend::new(resources);
-    let driver = WifiDriver::with_backend(resources, backend);
+    let driver = WifiDriver::new(resources);
     log_line(b"wifi eap before init");
     let init_config = InitConfig::new(14, 4, 4).expect("init config");
     let driver = match driver.initialize(init_config) {
         Ok(driver) => {
             log_line(b"wifi eap initialized");
-            log_heap(b"wifi eap heap after init");
             driver
         }
         Err(error) => {
@@ -137,7 +134,7 @@ fn main() -> ! {
     }
     let mut config = ClientConfig::new(
         Ssid::try_from(EAP_SSID.trim()).expect("eap ssid"),
-        Credential::Wpa2Enterprise(credentials),
+        StationCredential::enterprise(&credentials),
     );
     if let Some(channel) =
         parse_u8_literal(EAP_CHANNEL).and_then(|channel| Channel::try_from(channel).ok())
@@ -169,8 +166,7 @@ fn main() -> ! {
 
     {
         log_line(b"wifi eap connecting");
-        let mut sta = driver.sta().expect("sta");
-        log_eap_workspace(b"wifi eap workspace before connect");
+        let mut sta = driver.sta();
         if let Err(error) = sta.connect() {
             log_driver_error(
                 b"wifi eap connect err",
@@ -184,15 +180,10 @@ fn main() -> ! {
         }
 
         let mut associated = false;
-        for poll in 0..120 {
+        for _ in 0..120 {
             if resources.link_state() == LinkState::Up {
                 associated = true;
                 break;
-            }
-
-            if poll % 10 == 0 {
-                log_eap_workspace(b"wifi eap workspace progress");
-                log_heap(b"wifi eap heap progress");
             }
 
             esp8266_hal::wifi::delay_ticks(100);
@@ -200,7 +191,6 @@ fn main() -> ! {
 
         if !associated {
             let _ = sta.disconnect();
-            log_eap_workspace(b"wifi eap workspace timeout");
             log_driver_error(
                 b"wifi eap connect err",
                 esp8266_hal::wifi::DriverError::Timeout,
@@ -245,67 +235,9 @@ fn log_driver_error(
     }
     esp8266_hal::logger::write_bytes(b" disconnect=");
     esp8266_hal::logger::write_dec_u32(resources.last_disconnect_reason().unwrap_or(0) as u32);
-    let first_failure = esp8266_hal::wifi::first_alloc_failure();
-    let last_failure = esp8266_hal::wifi::last_alloc_failure();
-    if let Some(failure) = first_failure {
-        log_alloc_failure(b" alloc_first", failure);
-    }
-    if let Some(failure) = last_failure {
-        if first_failure != Some(failure) {
-            log_alloc_failure(b" alloc_last", failure);
-        }
-    }
     esp8266_hal::logger::write_newline();
     esp8266_hal::logger::write_bytes(message);
     esp8266_hal::logger::write_newline();
-}
-
-fn log_alloc_failure(prefix: &[u8], failure: esp8266_hal::wifi::AllocFailureDebug) {
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_kind=");
-    esp8266_hal::logger::write_byte(failure.kind);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_size=0x");
-    esp8266_hal::logger::write_hex_u32(failure.requested_bytes as u32);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_free=0x");
-    esp8266_hal::logger::write_hex_u32(failure.free_bytes as u32);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_task=");
-    esp8266_hal::logger::write_byte(failure.task_marker);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_count=");
-    esp8266_hal::logger::write_dec_u32(failure.count);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_eap_active=");
-    esp8266_hal::logger::write_dec_u32(failure.eap_active_count);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_eap_reserved=");
-    esp8266_hal::logger::write_dec_u32(failure.eap_reserved as u32);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_eap_usable=");
-    esp8266_hal::logger::write_dec_u32(failure.eap_usable_bytes as u32);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_eap_in_use=");
-    esp8266_hal::logger::write_dec_u32(failure.eap_in_use as u32);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_eap_avail=");
-    esp8266_hal::logger::write_dec_u32(failure.eap_reserve_available as u32);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_eap_count=");
-    esp8266_hal::logger::write_dec_u32(failure.eap_reserved_count as u32);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_eap_usage=0x");
-    esp8266_hal::logger::write_hex_u32(failure.eap_usage_bits);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_realloc_old=0x");
-    esp8266_hal::logger::write_hex_u32(failure.realloc_old_usable as u32);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_realloc_workspace=0x");
-    esp8266_hal::logger::write_hex_u32(failure.realloc_workspace_usable as u32);
-    esp8266_hal::logger::write_bytes(prefix);
-    esp8266_hal::logger::write_bytes(b"_ctx=0x");
-    esp8266_hal::logger::write_hex_u32(failure.context);
 }
 
 fn log_init_error(message: &[u8], error: esp8266_hal::wifi::InitError) {
@@ -318,35 +250,6 @@ fn log_init_error(message: &[u8], error: esp8266_hal::wifi::InitError) {
     esp8266_hal::logger::write_newline();
 }
 
-fn log_heap(message: &[u8]) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_bytes(b" heap=");
-    esp8266_hal::logger::write_dec_u32(esp8266_hal::wifi::free_heap_bytes());
-    esp8266_hal::logger::write_newline();
-}
-
-fn log_eap_workspace(message: &[u8]) {
-    let debug = esp8266_hal::wifi::eap_rsa_workspace_debug();
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_bytes(b" reserved=");
-    esp8266_hal::logger::write_dec_u32(debug.reserved_now as u32);
-    esp8266_hal::logger::write_bytes(b" active=");
-    esp8266_hal::logger::write_dec_u32(debug.active_count);
-    esp8266_hal::logger::write_bytes(b" attempts=");
-    esp8266_hal::logger::write_dec_u32(debug.reserve_attempts);
-    esp8266_hal::logger::write_bytes(b" made=");
-    esp8266_hal::logger::write_dec_u32(debug.reserved);
-    esp8266_hal::logger::write_bytes(b" used=");
-    esp8266_hal::logger::write_dec_u32(debug.used);
-    esp8266_hal::logger::write_bytes(b" released=");
-    esp8266_hal::logger::write_dec_u32(debug.released);
-    esp8266_hal::logger::write_bytes(b" usable=");
-    esp8266_hal::logger::write_dec_u32(debug.usable_bytes as u32);
-    esp8266_hal::logger::write_bytes(b" in_use=");
-    esp8266_hal::logger::write_dec_u32(debug.in_use as u32);
-    esp8266_hal::logger::write_newline();
-}
-
 fn driver_error_name(error: &esp8266_hal::wifi::DriverError) -> &'static [u8] {
     match error {
         &esp8266_hal::wifi::DriverError::Timeout => b"timeout",
@@ -356,6 +259,7 @@ fn driver_error_name(error: &esp8266_hal::wifi::DriverError) -> &'static [u8] {
         &esp8266_hal::wifi::DriverError::PacketOverflow => b"packet-overflow",
         &esp8266_hal::wifi::DriverError::PeerOverflow => b"peer-overflow",
         &esp8266_hal::wifi::DriverError::PayloadTooLong => b"payload-too-long",
+        &esp8266_hal::wifi::DriverError::InvalidFrameSize => b"invalid-frame-size",
         &esp8266_hal::wifi::DriverError::OutOfMemory => b"out-of-memory",
         &esp8266_hal::wifi::DriverError::NotStarted => b"not-started",
         &esp8266_hal::wifi::DriverError::WouldBlock => b"would-block",

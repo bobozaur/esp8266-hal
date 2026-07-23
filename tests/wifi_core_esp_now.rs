@@ -1,8 +1,12 @@
+#![cfg(feature = "wifi-esp-now")]
+
+use std::{cell::Cell, rc::Rc};
+
 use esp8266_hal::wifi_core::{
-    AccessPointConfig, Channel, ClientConfig, Credential, DriverError, EspNowPeerConfig,
-    EspNowRxFrame, EspNowSendStatus, EspNowTxStatus, InitConfig, MixedConfig, RawMode, Ssid,
-    WifiApBackend, WifiDriver, WifiFeatureBackend, WifiLifecycleBackend, WifiPacketBackend,
-    WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend, ESP_NOW_MAX_PAYLOAD,
+    AccessPointConfig, Channel, ClientConfig, DriverError, EspNowPeerConfig, InitConfig,
+    MixedConfig, RawMode, Ssid, StationCredential, WifiApBackend, WifiDriver, WifiFeatureBackend,
+    WifiLifecycleBackend, WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend,
+    WifiStaBackend, ESP_NOW_MAX_PAYLOAD,
 };
 
 #[derive(Default)]
@@ -13,6 +17,8 @@ struct FakeEspNowBackend {
     peers: heapless::Vec<[u8; 6], 4>,
     modified: heapless::Vec<[u8; 6], 4>,
     sent: heapless::Vec<usize, 4>,
+    enable_error: bool,
+    disable_calls: Rc<Cell<usize>>,
 }
 
 impl WifiRuntimeBackend for FakeEspNowBackend {
@@ -45,9 +51,13 @@ impl WifiLifecycleBackend for FakeEspNowBackend {
 }
 
 impl WifiApBackend for FakeEspNowBackend {
+    fn configure_ap(&mut self, _config: &AccessPointConfig) -> Result<(), DriverError> {
+        Ok(())
+    }
+
     fn configure_mixed(
         &mut self,
-        _client: &ClientConfig,
+        _client: &ClientConfig<'_>,
         _access_point: &AccessPointConfig,
     ) -> Result<(), DriverError> {
         Ok(())
@@ -57,11 +67,17 @@ impl WifiApBackend for FakeEspNowBackend {
 impl WifiFeatureBackend for FakeEspNowBackend {
     fn enable_esp_now(&mut self) -> Result<(), DriverError> {
         self.enabled = true;
-        Ok(())
+        if self.enable_error {
+            Err(DriverError::BackendRejected)
+        } else {
+            Ok(())
+        }
     }
 
     fn disable_esp_now(&mut self) -> Result<(), DriverError> {
+        self.disable_calls.set(self.disable_calls.get() + 1);
         self.disabled = true;
+        self.peers.clear();
         Ok(())
     }
 
@@ -100,7 +116,7 @@ impl WifiScanBackend for FakeEspNowBackend {}
 
 #[test]
 fn esp_now_session_tracks_peers_rx_and_send_lifecycle() {
-    let resources = WifiResources::<8, 4, 2, 2, 2, 0>::new();
+    let resources = WifiResources::<8, 4, 2, 2, 0>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -120,27 +136,12 @@ fn esp_now_session_tracks_peers_rx_and_send_lifecycle() {
         .unwrap());
     assert_eq!(session.peer_count(), 1);
 
-    assert!(session
+    session
         .update_station_peer(EspNowPeerConfig::encrypted(peer_addr, [0x42; 16]).for_station())
-        .unwrap());
+        .unwrap();
     assert_eq!(session.peer_count(), 1);
 
     session.send(&peer_addr, b"hello").unwrap();
-    resources
-        .enqueue_esp_now_rx(EspNowRxFrame::new(peer_addr, b"pong").unwrap())
-        .unwrap();
-    resources
-        .enqueue_esp_now_tx_status(EspNowTxStatus::new(peer_addr, EspNowSendStatus::Success))
-        .unwrap();
-
-    let frame = session.receive().expect("esp-now rx frame");
-    assert_eq!(frame.peer_addr(), &peer_addr);
-    assert_eq!(frame.payload(), b"pong");
-
-    let status = session.send_status().expect("esp-now send status");
-    assert_eq!(status.peer_addr(), &peer_addr);
-    assert_eq!(status.status(), EspNowSendStatus::Success);
-
     assert!(session.remove_peer(&peer_addr).unwrap());
     assert_eq!(session.peer_count(), 0);
     session.stop().unwrap();
@@ -148,13 +149,90 @@ fn esp_now_session_tracks_peers_rx_and_send_lifecycle() {
 }
 
 #[test]
+fn esp_now_transmit_only_needs_no_receive_queue() {
+    let resources = WifiResources::<8, 4, 1, 0>::new();
+    let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
+        .initialize(InitConfig::default())
+        .unwrap()
+        .enable_sta()
+        .unwrap()
+        .start()
+        .unwrap();
+
+    let mut session = driver.esp_now().unwrap();
+    let peer_addr = [1, 2, 3, 4, 5, 6];
+    session.start().unwrap();
+    session
+        .add_station_peer(EspNowPeerConfig::unencrypted(peer_addr).for_station())
+        .unwrap();
+    session.send(&peer_addr, b"tx-only").unwrap();
+}
+
+#[test]
+fn esp_now_receive_only_needs_no_peer_table() {
+    let resources = WifiResources::<8, 4, 0, 1, 0>::new();
+    let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
+        .initialize(InitConfig::default())
+        .unwrap()
+        .enable_sta()
+        .unwrap()
+        .start()
+        .unwrap();
+
+    let mut session = driver.esp_now().unwrap();
+    session.start().unwrap();
+    assert!(session.is_active());
+}
+
+#[test]
+fn esp_now_rejects_zero_peer_and_receive_capacities() {
+    let resources = WifiResources::<8, 4, 0, 0, 0>::new();
+    let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
+        .initialize(InitConfig::default())
+        .unwrap()
+        .enable_sta()
+        .unwrap()
+        .start()
+        .unwrap();
+
+    assert!(matches!(driver.esp_now(), Err(DriverError::PacketOverflow)));
+}
+
+#[test]
+fn failed_esp_now_start_is_cleaned_up_on_drop() {
+    let resources = WifiResources::<8, 4, 1, 0>::new();
+    let disable_calls = Rc::new(Cell::new(0));
+    let backend = FakeEspNowBackend {
+        enable_error: true,
+        disable_calls: disable_calls.clone(),
+        ..FakeEspNowBackend::default()
+    };
+    let mut driver = WifiDriver::with_backend(&resources, backend)
+        .initialize(InitConfig::default())
+        .unwrap()
+        .enable_sta()
+        .unwrap()
+        .start()
+        .unwrap();
+
+    let mut session = driver.esp_now().unwrap();
+    assert_eq!(session.start(), Err(DriverError::BackendRejected));
+    assert!(!session.is_active());
+    drop(session);
+    assert_eq!(disable_calls.get(), 1);
+}
+
+#[test]
 fn esp_now_mixed_mode_accepts_ap_interface_peers() {
-    let resources = WifiResources::<8, 4, 2, 2, 2, 0>::new();
+    let resources = WifiResources::<8, 4, 2, 2, 0>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
         .configure_mixed(MixedConfig::new(
-            ClientConfig::new(Ssid::try_from("upstream").unwrap(), Credential::Open),
+            ClientConfig::new(
+                Ssid::try_from("upstream").unwrap(),
+                StationCredential::open(),
+            ),
             AccessPointConfig::open(
                 Ssid::try_from("core-ap").unwrap(),
                 Channel::try_from(6).unwrap(),
@@ -175,8 +253,32 @@ fn esp_now_mixed_mode_accepts_ap_interface_peers() {
 }
 
 #[test]
+fn esp_now_ap_mode_accepts_ap_interface_peers() {
+    let resources = WifiResources::<8, 4, 2, 2, 0>::new();
+    let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
+        .initialize(InitConfig::default())
+        .unwrap()
+        .configure_ap(AccessPointConfig::open(
+            Ssid::try_from("core-ap").unwrap(),
+            Channel::try_from(6).unwrap(),
+        ))
+        .unwrap()
+        .start()
+        .unwrap();
+
+    let mut session = driver.esp_now().unwrap();
+    let peer_addr = [6, 5, 4, 3, 2, 1];
+    session.start().unwrap();
+
+    assert!(session
+        .add_access_point_peer(EspNowPeerConfig::unencrypted(peer_addr).for_access_point())
+        .unwrap());
+    assert_eq!(session.peer_count(), 1);
+}
+
+#[test]
 fn esp_now_duplicate_peer_add_is_idempotent() {
-    let resources = WifiResources::<8, 4, 2, 2, 2, 0>::new();
+    let resources = WifiResources::<8, 4, 2, 2, 0>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -189,14 +291,37 @@ fn esp_now_duplicate_peer_add_is_idempotent() {
     let peer = EspNowPeerConfig::unencrypted(peer_addr).for_station();
     session.start().unwrap();
 
-    assert_eq!(session.add_station_peer(peer).unwrap(), true);
-    assert_eq!(session.add_station_peer(peer).unwrap(), false);
+    assert!(session.add_station_peer(peer).unwrap());
+    assert!(!session.add_station_peer(peer).unwrap());
     assert_eq!(session.peer_count(), 1);
 }
 
 #[test]
+fn esp_now_restart_drops_stale_peer_state() {
+    let resources = WifiResources::<8, 4, 2, 2, 0>::new();
+    let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
+        .initialize(InitConfig::default())
+        .unwrap()
+        .enable_sta()
+        .unwrap()
+        .start()
+        .unwrap();
+    let mut session = driver.esp_now().unwrap();
+    let peer = EspNowPeerConfig::unencrypted([1, 3, 3, 7, 0, 1]).for_station();
+
+    session.start().unwrap();
+    assert!(session.add_station_peer(peer).unwrap());
+    assert_eq!(session.peer_count(), 1);
+    session.stop().unwrap();
+    assert_eq!(session.peer_count(), 0);
+
+    session.start().unwrap();
+    assert!(session.add_station_peer(peer).unwrap());
+}
+
+#[test]
 fn esp_now_peer_capacity_is_checked_before_backend_mutation() {
-    let resources = WifiResources::<8, 4, 2, 1, 2, 0>::new();
+    let resources = WifiResources::<8, 4, 1, 2, 0>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -207,12 +332,9 @@ fn esp_now_peer_capacity_is_checked_before_backend_mutation() {
     let mut session = driver.esp_now().unwrap();
     session.start().unwrap();
 
-    assert_eq!(
-        session
-            .add_station_peer(EspNowPeerConfig::unencrypted([1, 1, 1, 1, 1, 1]).for_station())
-            .unwrap(),
-        true
-    );
+    assert!(session
+        .add_station_peer(EspNowPeerConfig::unencrypted([1, 1, 1, 1, 1, 1]).for_station())
+        .unwrap());
     assert_eq!(
         session.add_station_peer(EspNowPeerConfig::unencrypted([2; 6]).for_station()),
         Err(DriverError::PeerOverflow)
@@ -222,7 +344,7 @@ fn esp_now_peer_capacity_is_checked_before_backend_mutation() {
 
 #[test]
 fn esp_now_update_requires_known_peer() {
-    let resources = WifiResources::<8, 4, 2, 2, 2, 0>::new();
+    let resources = WifiResources::<8, 4, 2, 2, 0>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -237,12 +359,13 @@ fn esp_now_update_requires_known_peer() {
         session.update_station_peer(EspNowPeerConfig::encrypted([9; 6], [0x55; 16]).for_station()),
         Err(DriverError::BackendRejected)
     );
+    assert_eq!(session.remove_peer(&[9; 6]), Ok(false));
     assert_eq!(session.peer_count(), 0);
 }
 
 #[test]
 fn esp_now_peer_mutation_requires_started_session() {
-    let resources = WifiResources::<8, 4, 2, 2, 2, 0>::new();
+    let resources = WifiResources::<8, 4, 2, 2, 0>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -261,7 +384,7 @@ fn esp_now_peer_mutation_requires_started_session() {
 
 #[test]
 fn esp_now_send_requires_started_and_registered_peer() {
-    let resources = WifiResources::<8, 4, 2, 2, 2, 0>::new();
+    let resources = WifiResources::<8, 4, 2, 2, 0>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -282,18 +405,15 @@ fn esp_now_send_requires_started_and_registered_peer() {
         session.send(&peer_addr, b"unknown"),
         Err(DriverError::BackendRejected)
     );
-    assert_eq!(
-        session
-            .add_station_peer(EspNowPeerConfig::unencrypted(peer_addr).for_station())
-            .unwrap(),
-        true
-    );
+    assert!(session
+        .add_station_peer(EspNowPeerConfig::unencrypted(peer_addr).for_station())
+        .unwrap());
     assert_eq!(session.send(&peer_addr, b"ok"), Ok(()));
 }
 
 #[test]
 fn esp_now_send_rejects_oversized_payload_before_backend_send() {
-    let resources = WifiResources::<8, 4, 2, 2, 2, 0>::new();
+    let resources = WifiResources::<8, 4, 2, 2, 0>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeEspNowBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -314,12 +434,4 @@ fn esp_now_send_rejects_oversized_payload_before_backend_send() {
         session.send(&peer_addr, &payload),
         Err(DriverError::PayloadTooLong)
     );
-}
-
-#[test]
-fn esp_now_rx_frame_accepts_empty_payload() {
-    let frame = EspNowRxFrame::new([7; 6], &[]).unwrap();
-
-    assert_eq!(frame.peer_addr(), &[7; 6]);
-    assert_eq!(frame.payload(), b"");
 }

@@ -82,8 +82,6 @@ extern "C" {
     fn base_gpio_init() -> i32;
     fn esp_mac_init() -> i32;
     fn esp_reset_reason_early() -> u32;
-    #[cfg(feature = "wifi-debug-log")]
-    fn esp_reset_reason() -> u32;
     fn esp_reset_reason_init();
     fn esp_task_wdt_init() -> i32;
     fn esp_pthread_init() -> i32;
@@ -118,7 +116,6 @@ pub unsafe fn hardware_init() {
     unsafe {
         let reset_reason_early = esp_reset_reason_early();
 
-        crate::logger::trace_byte(b'A');
         // ---- C++ constructors (.init_array / .ctors) ----
         let mut func = __init_array_start as *const unsafe extern "C" fn();
         let end = __init_array_end as *const unsafe extern "C" fn();
@@ -128,78 +125,24 @@ pub unsafe fn hardware_init() {
         }
 
         // ---- PHY clock ----
-        crate::logger::trace_byte(b'B');
         esp_phy_init_clk();
 
         // ---- GPIO ----
-        crate::logger::trace_byte(b'C');
         assert!(base_gpio_init() == 0, "base_gpio_init failed");
 
         // ---- MAC address (skip on fast software reboot) ----
-        crate::logger::trace_byte(b'D');
         if reset_reason_early != ESP_RST_FAST_SW {
             assert!(esp_mac_init() == ESP_OK, "esp_mac_init failed");
         }
 
         // ---- Reset reason bookkeeping ----
-        crate::logger::trace_byte(b'E');
         esp_reset_reason_init();
-        crate::wifi_debugln!("rr {} {}", reset_reason_early, esp_reset_reason());
 
         // ---- Task watchdog ----
-        crate::logger::trace_byte(b'F');
         esp_task_wdt_init();
 
         // ---- Pthread support ----
-        crate::logger::trace_byte(b'G');
         assert!(esp_pthread_init() == 0, "esp_pthread_init failed");
-        crate::logger::trace_byte(b'g');
-    }
-}
-
-/// Non-panicking variant of [`hardware_init`] for use from the proc-macro
-/// generated entry point. Logs errors via println instead of asserting.
-///
-/// # Safety
-///
-/// Same requirements as [`hardware_init`].
-pub unsafe fn hardware_init_safe() {
-    unsafe {
-        let reset_reason_early = esp_reset_reason_early();
-
-        crate::wifi_debugln!("hw[1] init_array");
-        let mut func = __init_array_start as *const unsafe extern "C" fn();
-        let end = __init_array_end as *const unsafe extern "C" fn();
-        while func < end {
-            (*func)();
-            func = func.add(1);
-        }
-
-        crate::wifi_debugln!("hw[2] phy_clk");
-        esp_phy_init_clk();
-
-        crate::wifi_debugln!("hw[3] gpio");
-        let _ret = base_gpio_init();
-        crate::wifi_debugln!("hw[3] gpio = {}", _ret);
-
-        crate::wifi_debugln!("hw[4] mac");
-        if reset_reason_early != ESP_RST_FAST_SW {
-            let _ret = esp_mac_init();
-            crate::wifi_debugln!("hw[4] mac = {}", _ret);
-        }
-
-        crate::wifi_debugln!("hw[5] reset_reason");
-        esp_reset_reason_init();
-        crate::wifi_debugln!("rr {} {}", reset_reason_early, esp_reset_reason());
-
-        crate::wifi_debugln!("hw[6] wdt");
-        esp_task_wdt_init();
-
-        crate::wifi_debugln!("hw[7] pthread");
-        let _ret = esp_pthread_init();
-        crate::wifi_debugln!("hw[7] pthread = {}", _ret);
-
-        crate::wifi_debugln!("hw_init: done");
     }
 }
 
@@ -219,9 +162,8 @@ static mut COMPAT_INITIALIZED: bool = false;
 /// WiFi blob tasks created later (via `__wifi_task_create`) will run
 /// preemptively via ISR-driven context switches.
 ///
-/// This is called automatically by [`crate::wifi::controller::WifiController::init`],
-/// but can also be called manually if you need the compat layer before WiFi
-/// initialization.
+/// This is called automatically by the ESP8266 target backend, but can also be
+/// called manually if you need the compat layer before WiFi initialization.
 ///
 /// # Safety
 ///
@@ -325,18 +267,13 @@ pub unsafe fn run_sdk_main_task(entry: unsafe extern "C" fn(*mut c_void)) -> ! {
 #[no_mangle]
 pub unsafe extern "C" fn rust_main_entry() -> ! {
     unsafe {
-        crate::logger::trace_byte(b'R');
-
         // Hardware init (previously done inside a FreeRTOS main task).
-        crate::logger::trace_byte(b'H');
         hardware_init();
-        crate::logger::trace_byte(b'h');
 
         // User entry point — expected to set up embassy executor and never return.
         extern "C" {
             fn main() -> !;
         }
-        crate::logger::trace_byte(b'M');
         main();
     }
 }

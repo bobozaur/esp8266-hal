@@ -49,7 +49,6 @@ fn scenario_registry_includes_required_full_matrix_entries() {
         "promisc_data_companion",
         "promisc_capture",
         "promisc_filters",
-        "promisc_control_filter_api",
         "promisc_control_filters",
     ] {
         assert!(
@@ -183,12 +182,8 @@ fn promiscuous_control_capture_is_implemented() {
 }
 
 #[test]
-fn promiscuous_control_filter_api_is_implemented() {
-    let scenario = scenario_by_name("promisc_control_filter_api").expect("control API scenario");
-
-    assert_eq!(scenario.state, ScenarioState::Implemented);
-    assert_eq!(scenario.example, Some("wifi_promisc"));
-    assert!(matches!(scenario.runtime, RuntimePlan::UartWatch { .. }));
+fn promiscuous_control_filter_api_is_not_a_runtime_scenario() {
+    assert!(scenario_by_name("promisc_control_filter_api").is_none());
 }
 
 #[test]

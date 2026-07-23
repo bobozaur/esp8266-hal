@@ -10,9 +10,5 @@ rustflags = [
   "-C",
   "link-arg=-Tlink.x",
   "-C",
-  "link-arg=-Tesp8266.rom.ld",
-  "-C",
-  "link-arg=-Tesp8266.peripherals.ld",
-  "-C",
   "link-arg=-Wl,--allow-multiple-definition",
 ]

@@ -6,10 +6,7 @@
 
 use core::ffi::c_void;
 use esp8266_wifi_sys as sys;
-use portable_atomic::{AtomicI32, AtomicU32, Ordering};
-
-#[cfg(feature = "wifi-debug-trace")]
-use crate::wifi_core::TxDebugSnapshot;
+use portable_atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -24,34 +21,10 @@ struct TxFallbackBuffer {
     bytes: [u8; TX_FALLBACK_BYTES],
 }
 
-static TX_CALLS: AtomicU32 = AtomicU32::new(0);
-static TX_OK: AtomicU32 = AtomicU32::new(0);
-static TX_WOULD_BLOCK: AtomicU32 = AtomicU32::new(0);
-static TX_NO_MEM: AtomicU32 = AtomicU32::new(0);
-static TX_REJECTED: AtomicU32 = AtomicU32::new(0);
-static TX_LAST_RET: AtomicI32 = AtomicI32::new(0);
-static TX_LAST_LEN: AtomicU32 = AtomicU32::new(0);
-static TX_LAST_ALLOC_SIZE: AtomicU32 = AtomicU32::new(0);
-static TX_LAST_FREE_HEAP: AtomicU32 = AtomicU32::new(0);
 static TX_FALLBACK_IN_USE: AtomicU32 = AtomicU32::new(0);
 static mut TX_FALLBACK_BUF: TxFallbackBuffer = TxFallbackBuffer {
     bytes: [0; TX_FALLBACK_BYTES],
 };
-
-#[cfg(feature = "wifi-debug-trace")]
-pub fn internal_tx_debug_snapshot() -> TxDebugSnapshot {
-    TxDebugSnapshot {
-        calls: TX_CALLS.load(Ordering::Relaxed),
-        ok: TX_OK.load(Ordering::Relaxed),
-        would_block: TX_WOULD_BLOCK.load(Ordering::Relaxed),
-        no_mem: TX_NO_MEM.load(Ordering::Relaxed),
-        rejected: TX_REJECTED.load(Ordering::Relaxed),
-        last_ret: TX_LAST_RET.load(Ordering::Relaxed),
-        last_len: TX_LAST_LEN.load(Ordering::Relaxed),
-        last_alloc_size: TX_LAST_ALLOC_SIZE.load(Ordering::Relaxed),
-        last_free_heap: TX_LAST_FREE_HEAP.load(Ordering::Relaxed),
-    }
-}
 
 /// Default PPT task stack size (from SDK config).
 #[no_mangle]
@@ -161,7 +134,7 @@ pub unsafe extern "C" fn esp_wifi_deinit() -> i32 {
 
 /// Initialize the WiFi subsystem.
 ///
-/// Calls the blob's internal init, configures debug logging, initializes
+/// Calls the blob's internal init, limits blob log output, initializes
 /// the WPA supplicant, and registers default TCPIP event handlers.
 #[no_mangle]
 pub unsafe extern "C" fn esp_wifi_init(config: *const sys::wifi_init_config_t) -> i32 {
@@ -223,27 +196,16 @@ pub unsafe extern "C" fn esp_wifi_try_rate_from_high() -> bool {
 pub unsafe extern "C" fn esp_wifi_internal_tx(wifi_if: u32, buffer: *mut c_void, len: u16) -> i32 {
     unsafe {
         let total = len as usize + EP_OFFSET;
-        TX_CALLS.fetch_add(1, Ordering::Relaxed);
-        TX_LAST_LEN.store(len as u32, Ordering::Relaxed);
-        TX_LAST_ALLOC_SIZE.store(total as u32, Ordering::Relaxed);
-        TX_LAST_FREE_HEAP.store(
-            super::super::compat::memory::esp_get_free_heap_size(),
-            Ordering::Relaxed,
-        );
         let alloc = super::super::compat::memory::malloc(total);
         let mut used_fallback = false;
         let (dram_buf, cb, arg) = if alloc.is_null() {
             if total > TX_FALLBACK_BYTES {
-                TX_NO_MEM.fetch_add(1, Ordering::Relaxed);
-                TX_LAST_RET.store(sys::ESP_ERR_NO_MEM, Ordering::Relaxed);
                 return sys::ESP_ERR_NO_MEM;
             }
             if TX_FALLBACK_IN_USE
                 .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
             {
-                TX_WOULD_BLOCK.fetch_add(1, Ordering::Relaxed);
-                TX_LAST_RET.store(-1, Ordering::Relaxed);
                 return -1;
             }
             used_fallback = true;
@@ -279,19 +241,6 @@ pub unsafe extern "C" fn esp_wifi_internal_tx(wifi_if: u32, buffer: *mut c_void,
                 super::super::compat::memory::free(aio.arg);
             }
         }
-        TX_LAST_RET.store(ret, Ordering::Relaxed);
-        match ret {
-            0 => {
-                TX_OK.fetch_add(1, Ordering::Relaxed);
-            }
-            -1 => {
-                TX_WOULD_BLOCK.fetch_add(1, Ordering::Relaxed);
-            }
-            _ => {
-                TX_REJECTED.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
         ret
     }
 }

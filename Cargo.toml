@@ -4,35 +4,41 @@ resolver = "2"
 
 [package]
 name = "esp8266-hal"
-version = "0.5.1"
+version = "0.6.0"
 authors = ["Jesse Braham <jesse@beta7.io>", "Robin Appelman <robin@icewind.nl>"]
 edition = "2021"
 description = "HAL for ESP8266 microcontrollers"
 repository = "https://github.com/esp-rs/esp8266-hal"
 license = "MIT OR Apache-2.0"
 autoexamples = false
+include = [
+  "/src/**",
+  "/examples/*.rs",
+  "/tests/*.rs",
+  "/ld/**",
+  "/build.rs",
+  "/README.md",
+  "/LICENSE-APACHE",
+  "/LICENSE-MIT",
+]
 
 keywords = ["embedded", "embedded-hal", "esp", "esp8266", "no-std"]
 categories = ["embedded", "hardware-support", "no-std"]
 
 [dependencies]
 embedded-hal = { version = "0.2", features = ["unproven"] }
-esp8266 = { version = "0.7", path = "./esp8266" }
+esp8266 = { version = "0.7", path = "./esp8266", default-features = false, features = ["critical-section"] }
 nb = "1.0"
 paste = { version = "1.0", optional = true }
 void = { version = "1.0", default-features = false }
-xtensa-lx = { version = "0.8", features = ["esp8266"] }
-xtensa-lx-rt = { version = "0.12", features = ["esp8266"], optional = true }
 
-esp8266-hal-proc-macros = { path = "procmacros", version = "=0.1" }
+esp8266-hal-proc-macros = { path = "procmacros", version = "=0.2.0", default-features = false }
 
 # WiFi dependencies (optional, enabled by `wifi` feature)
-esp8266-wifi-sys = { path = "esp8266-wifi-sys", optional = true }
+esp8266-wifi-sys = { version = "=0.1.0", path = "esp8266-wifi-sys", default-features = false, optional = true }
 portable-atomic = { version = "1", default-features = false, optional = true }
 heapless = { version = "0.8", optional = true }
 esp-alloc = { version = "=0.4.0", optional = true }
-bitflags = { version = "2", optional = true }
-log = { version = "0.4", optional = true }
 smoltcp = { version = "0.12", default-features = false, features = [
   "medium-ethernet",
   "proto-ipv4",
@@ -46,10 +52,7 @@ embassy-time = { version = "=0.3.2", default-features = false, features = [
 ], optional = true }
 embassy-time-driver = { version = "=0.1.0", default-features = false, optional = true }
 embassy-time-queue-driver = { version = "=0.1.0", default-features = false, optional = true }
-embassy-sync = { version = "=0.6.2", default-features = false, optional = true }
-critical-section = { version = "1.2", features = [
-  "restore-state-u32",
-], optional = true }
+critical-section = { version = "1.2", features = ["restore-state-u32"] }
 embassy-net-driver-channel = { version = "=0.3.0", optional = true }
 embassy-futures = { version = "=0.1.1", optional = true }
 static_cell = { version = "2", optional = true }
@@ -58,6 +61,8 @@ static_cell = { version = "2", optional = true }
 portable-atomic = { version = "1", default-features = false, features = [
   "unsafe-assume-single-core",
 ], optional = true }
+xtensa-lx = { version = "0.8", features = ["esp8266"] }
+xtensa-lx-rt = { version = "0.12", features = ["esp8266"], optional = true }
 
 [dev-dependencies]
 panic-halt = "1.0"
@@ -94,98 +99,90 @@ name = "uart_interrupt"
 
 [[example]]
 name = "tcp_client"
-required-features = ["wifi-embassy-net", "wifi-sta"]
+required-features = ["wifi-embassy-net"]
 
 [[example]]
 name = "tcp_server"
-required-features = ["wifi-embassy-net", "wifi-sta"]
+required-features = ["wifi-embassy-net"]
 
 [[example]]
 name = "sta_static_ip"
-required-features = ["wifi-embassy-net", "wifi-sta"]
+required-features = ["wifi-embassy-net"]
 
 [[example]]
 name = "wifi_core_connect"
-required-features = ["wifi-core", "wifi", "wifi-sta", "rt", "interrupt"]
+required-features = ["wifi", "rt", "interrupt"]
 
 [[example]]
 name = "wifi_core_dhcp_probe"
-required-features = ["wifi-embassy-net", "wifi-sta"]
+required-features = ["wifi-embassy-net"]
 
 [[example]]
 name = "raw_scan"
-required-features = ["wifi-core", "wifi", "wifi-sta", "rt", "interrupt"]
+required-features = ["wifi", "rt", "interrupt"]
 
 [[example]]
 name = "wifi_ap"
-required-features = ["wifi-ap", "rt", "interrupt"]
+required-features = ["wifi", "rt", "interrupt"]
 
 [[example]]
 name = "wifi_ap_sta"
-required-features = ["wifi-ap", "wifi-sta", "wifi-embassy-net", "rt", "interrupt"]
+required-features = ["wifi-embassy-net", "rt", "interrupt"]
 
 [[example]]
 name = "wifi_promisc"
-required-features = ["wifi-promiscuous", "wifi-sta", "rt", "interrupt"]
+required-features = ["wifi-promiscuous", "rt", "interrupt"]
 
 [[example]]
 name = "wifi_esp_now_tx"
-required-features = ["wifi-esp-now", "wifi-sta", "rt", "interrupt"]
+required-features = ["wifi-esp-now", "rt", "interrupt"]
 
 [[example]]
 name = "wifi_esp_now_rx"
-required-features = ["wifi-esp-now", "wifi-sta", "rt", "interrupt"]
+required-features = ["wifi-esp-now", "rt", "interrupt"]
 
 [[example]]
 name = "wifi_wps"
-required-features = ["wifi-wps", "wifi-sta", "rt", "interrupt"]
+required-features = ["wifi-wps", "rt", "interrupt"]
 
 [[example]]
 name = "wifi_smartconfig"
-required-features = ["wifi-smartconfig", "wifi-sta", "rt", "interrupt"]
+required-features = ["wifi-smartconfig", "rt", "interrupt"]
 
 [[example]]
 name = "wifi_eap"
-required-features = ["wifi-enterprise", "wifi-sta", "rt", "interrupt"]
+required-features = ["wifi-enterprise", "rt", "interrupt"]
 
 [features]
 default = ["interrupt", "rt"]
 interrupt = ["paste"]
-rt = ["xtensa-lx-rt"]
+rt = ["dep:xtensa-lx-rt"]
 wifi-core = [
   "dep:portable-atomic",
   "dep:heapless",
-  "dep:critical-section",
 ]
 wifi = [
   "wifi-core",
   "dep:esp8266-wifi-sys",
   "dep:esp-alloc",
-  "dep:bitflags",
-  "dep:log",
   "dep:smoltcp",
   "dep:embassy-executor",
   "dep:embassy-time",
   "dep:embassy-time-driver",
   "dep:embassy-time-queue-driver",
-  "dep:embassy-sync",
-  "dep:critical-section",
   "dep:static_cell",
+  "esp8266-hal-proc-macros/wifi",
 ]
-wifi-sta = ["wifi"]
-wifi-ap = ["wifi"]
 wifi-embassy-net = [
   "wifi",
   "dep:embassy-net-driver-channel",
   "dep:embassy-futures",
 ]
-wifi-wps = ["wifi"]
 wifi-smartconfig = ["wifi", "esp8266-wifi-sys/smartconfig"]
-wifi-enterprise = ["wifi"]
-wifi-promiscuous = ["wifi"]
 wifi-esp-now = ["wifi", "esp8266-wifi-sys/esp-now"]
-wifi-debug-log = []
-wifi-debug-trace = ["wifi-debug-log"]
+wifi-enterprise = ["wifi"]
+wifi-wps = ["wifi"]
+wifi-promiscuous = ["wifi"]
 
 # Place program completely in RAM (needed when e.g. using only ROM bootloader,
 # or for debugging).
@@ -194,11 +191,6 @@ all_in_ram = []
 [profile.dev]
 lto = true
 opt-level = "s"
-
-# Workaround for linker errors when using lto with the dev profile:
-# https://github.com/rust-lang/compiler-builtins/issues/347
-[profile.dev.package.compiler_builtins]
-overflow-checks = false
 
 [profile.release]
 lto = "thin"

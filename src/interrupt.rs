@@ -1,6 +1,19 @@
 #[cfg(feature = "wifi")]
 use core::arch::asm;
 
+/// Level-one interrupt stack plus the word used to save the interrupted stack
+/// pointer. The handler starts at byte 512, so calls grow down through the
+/// first field while the final word retains the pre-interrupt stack pointer.
+#[cfg(feature = "wifi")]
+#[repr(C, align(16))]
+struct WifiInterruptStack([u8; 516]);
+
+#[cfg(feature = "wifi")]
+#[used]
+#[no_mangle]
+#[link_section = ".bss"]
+static mut _chip_interrupt_stk: WifiInterruptStack = WifiInterruptStack([0; 516]);
+
 use xtensa_lx_rt::exception::Context;
 #[cfg(not(feature = "wifi"))]
 use xtensa_lx_rt::interrupt;
@@ -101,7 +114,7 @@ unsafe extern "C" fn __level_1_interrupt() {
         "movi a4, 0x23",
         "wsr.ps a4",
         "rsync",
-        "movi a4, _chip_interrupt_tmp",
+        "movi a4, _chip_interrupt_stk + 512",
         "s32i a1, a4, 0",
         "mov a1, a4",
         "call0 __level_1_interrupt_body",
@@ -112,7 +125,7 @@ unsafe extern "C" fn __level_1_interrupt() {
         "s32i a6, a4, 0",
         "j 2f",
         "1:",
-        "movi a4, _chip_interrupt_tmp",
+        "movi a4, _chip_interrupt_stk + 512",
         "l32i a5, a4, 0",
         "2:",
         "mov a2, a5",

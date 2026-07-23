@@ -4,15 +4,15 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
 
 use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverState};
-use esp8266_hal::wifi::smoltcp::ApWifiDevice;
+use esp8266_hal::wifi::smoltcp::LinkDevice;
 use esp8266_hal::wifi::{
-    AccessPointConfig, ApClientLimit, BeaconInterval, Channel, ClientConfig, Credential,
+    AccessPointConfig, ApClientLimit, ApCredential, BeaconInterval, Channel, ClientConfig,
     DhcpMessageType, DhcpServer, DhcpServerConfig, DriverError, Esp8266TargetBackend, InitConfig,
-    Ipv4Addr, MixedConfig, MixedMode, Passphrase, Ssid, Started, WifiDriver, WifiResources,
+    Ipv4Addr, MixedApLink, MixedConfig, MixedLink, MixedMode, MixedStaLink, Passphrase, Ssid,
+    Started, StationCredential, WifiDriver, WifiResources,
 };
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{
@@ -25,11 +25,11 @@ use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
 const WIFI_SSID: &str = match option_env!("ESP8266_HAL_WIFI_SSID") {
     Some(ssid) => ssid,
-    None => include_str!("ssid"),
+    None => "esp8266-hal",
 };
 const WIFI_PASS: &str = match option_env!("ESP8266_HAL_WIFI_PASS") {
     Some(pass) => pass,
-    None => include_str!("pass"),
+    None => "esp8266-pass",
 };
 const AP_SSID: &str = "esp8266-hal-apsta";
 const WIFI_CHANNEL: u8 = 6;
@@ -45,30 +45,22 @@ const NET_RX_PACKETS: usize = 1;
 const NET_TX_PACKETS: usize = 1;
 
 type MixedNetState = NetDriverState<NET_RX_PACKETS, NET_TX_PACKETS>;
-type MixedResources = WifiResources<8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type MixedBackend = Esp8266TargetBackend<'static, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type MixedResources = WifiResources<8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type MixedBackend = Esp8266TargetBackend<'static, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
 type MixedDriver =
-    WifiDriver<'static, Started<MixedMode>, MixedBackend, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type WifiNetRunner = wifi_net::Runner<
-    'static,
-    'static,
-    MixedMode,
-    MixedBackend,
-    8,
-    4,
-    2,
-    0,
-    0,
-    0,
-    2,
-    AP_RX_FRAME_BYTES,
->;
+    WifiDriver<'static, Started<MixedMode>, MixedBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type MixedLinkOwner = MixedLink<'static, MixedBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type MixedStaEndpoint =
+    MixedStaLink<'static, 'static, MixedBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type MixedApEndpoint =
+    MixedApLink<'static, 'static, MixedBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type WifiNetRunner = wifi_net::LinkRunner<'static, MixedStaEndpoint>;
 type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDevice<'static>>;
-type ApNetDevice =
-    ApWifiDevice<'static, MixedMode, MixedBackend, 8, 4, 2, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type ApNetDevice = LinkDevice<MixedApEndpoint>;
 
 static NET_STATE: StaticCell<MixedNetState> = StaticCell::new();
 static WIFI_RESOURCES: StaticCell<MixedResources> = StaticCell::new();
+static MIXED_LINK: StaticCell<MixedLinkOwner> = StaticCell::new();
 static STACK_RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
 static WIFI_RUNNER: StaticCell<WifiNetRunner> = StaticCell::new();
 static NET_RUNNER: StaticCell<EmbassyNetRunner> = StaticCell::new();
@@ -98,22 +90,17 @@ fn log_station_count(count: usize) {
     esp8266_hal::logger::write_newline();
 }
 
-fn wait_for_downstream_client_enabled() -> bool {
-    matches!(option_env!("ESP8266_HAL_AP_STA_WAIT_CLIENT"), Some("1"))
-}
-
 fn init_wifi() -> MixedDriver {
     let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let backend = Esp8266TargetBackend::new(resources);
-    let driver = WifiDriver::with_backend(resources, backend)
+    let driver = WifiDriver::new(resources)
         .initialize(InitConfig::new(14, 4, 4).expect("init config"))
         .expect("wifi init");
     log_line(b"wifi init ok");
 
     let sta_credential = if WIFI_PASS.trim().is_empty() {
-        Credential::Open
+        StationCredential::open()
     } else {
-        Credential::Wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("pass"))
+        StationCredential::wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("pass"))
     };
     let wifi_channel = Channel::try_from(WIFI_CHANNEL).expect("wifi channel");
     let sta_config = ClientConfig::new(
@@ -123,7 +110,7 @@ fn init_wifi() -> MixedDriver {
     .with_channel(wifi_channel);
     let ap_config =
         AccessPointConfig::builder(Ssid::try_from(AP_SSID).expect("ap ssid"), wifi_channel)
-            .credential(Credential::Open)
+            .credential(ApCredential::Open)
             .max_clients(ApClientLimit::try_from(4).expect("ap clients"))
             .beacon_interval(BeaconInterval::try_from(100).expect("beacon"))
             .build();
@@ -136,8 +123,8 @@ fn init_wifi() -> MixedDriver {
 }
 
 fn connect_wifi(driver: &mut MixedDriver) -> Result<(), esp8266_hal::wifi::DriverError> {
-    let mut sta = driver.sta().expect("sta");
-    let _session = sta.connect_blocking(60_000)?;
+    let mut sta = driver.sta();
+    sta.connect_blocking(60_000)?;
     log_line(b"wifi connected");
     Ok(())
 }
@@ -152,10 +139,16 @@ async fn net_runner_task(runner: &'static mut EmbassyNetRunner) -> ! {
     runner.run().await
 }
 
-fn start_network(spawner: Spawner, driver: MixedDriver) -> embassy_net::Stack<'static> {
-    let link = driver.sta_link().expect("sta link");
+fn start_network(
+    spawner: Spawner,
+    driver: MixedDriver,
+) -> (embassy_net::Stack<'static>, ApNetDevice) {
+    let mixed = MIXED_LINK.init(driver.mixed_link().expect("mixed link"));
+    let (sta_link, ap_link) = mixed.split();
     let net_state = NET_STATE.init(MixedNetState::new());
-    let (driver_runner, net_device) = wifi_net::new(net_state, link).expect("net driver");
+    let (driver_runner, net_device) =
+        wifi_net::new_link(net_state, sta_link).expect("STA net driver");
+    let ap_device = LinkDevice::new(ap_link).expect("valid AP frame capacity");
 
     let config = embassy_net::Config::dhcpv4(Default::default());
     let resources = STACK_RESOURCES.init(embassy_net::StackResources::<2>::new());
@@ -166,50 +159,10 @@ fn start_network(spawner: Spawner, driver: MixedDriver) -> embassy_net::Stack<'s
     let net_runner = NET_RUNNER.init(net_runner);
     spawner.must_spawn(wifi_driver_task(driver_runner));
     spawner.must_spawn(net_runner_task(net_runner));
-    stack
+    (stack, ap_device)
 }
 
-async fn wait_for_ipv4_config(
-    stack: &embassy_net::Stack<'static>,
-    timeout: Duration,
-) -> Option<embassy_net::StaticConfigV4> {
-    let deadline = Instant::now() + timeout;
-
-    while Instant::now() < deadline {
-        if let Some(config) = stack.config_v4() {
-            return Some(config);
-        }
-
-        match select(
-            stack.wait_config_up(),
-            Timer::after(Duration::from_millis(250)),
-        )
-        .await
-        {
-            Either::First(()) => {
-                if let Some(config) = stack.config_v4() {
-                    return Some(config);
-                }
-                Timer::after(Duration::from_millis(100)).await;
-            }
-            Either::Second(()) => {}
-        }
-    }
-
-    stack.config_v4()
-}
-
-async fn serve_downstream_dhcp(driver: MixedDriver, timeout: Duration) -> (MixedDriver, bool) {
-    let link = match driver.ap_link() {
-        Ok(link) => link,
-        Err(_error) => {
-            log_line(b"ap_sta err ap-link");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-    };
-    let mut device = ApNetDevice::new(link);
+async fn run_networks(stack: embassy_net::Stack<'static>, mut device: ApNetDevice) -> ! {
     let rx_frame = AP_RX_FRAME.init([0; AP_RX_FRAME_BYTES]);
     let reply_frame = DHCP_REPLY_FRAME.init([0; DHCP_REPLY_FRAME_BYTES]);
     let ap_mac = match device.mac_address() {
@@ -227,16 +180,34 @@ async fn serve_downstream_dhcp(driver: MixedDriver, timeout: Duration) -> (Mixed
         .dns_server(AP_IP)
         .lease_seconds(3600);
     let mut server = DhcpServer::<4>::new(config);
-    let deadline = Instant::now() + timeout;
+    let sta_deadline = Instant::now() + Duration::from_secs(15);
+    let mut sta_ready = false;
+    let mut sta_timeout_reported = false;
     let mut last_wait_log = Instant::now();
-    let mut got_ack = false;
+    let mut downstream_ready = false;
 
     log_line(b"ap-sta-dhcp-ready");
-    while Instant::now() < deadline && !got_ack {
+    loop {
         let mut reply = None;
-        while let Some(frame_len) = device.receive_frame(rx_frame) {
+        let mut made_progress = false;
+        loop {
+            let frame_len = match device.receive_frame(rx_frame) {
+                Ok(Some(frame_len)) => {
+                    made_progress = true;
+                    frame_len
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    log_line(b"ap_sta rx drop");
+                    continue;
+                }
+            };
             if let Some(packet) = dhcp_payload(&rx_frame[..frame_len]) {
-                match server.handle(packet, &mut reply_frame[DHCP_REPLY_HEADERS..]) {
+                match server.handle(
+                    Instant::now().as_secs(),
+                    packet,
+                    &mut reply_frame[DHCP_REPLY_HEADERS..],
+                ) {
                     Ok(result) => reply = result,
                     Err(_error) => log_line(b"ap_sta err dhcp-parse"),
                 }
@@ -254,30 +225,39 @@ async fn serve_downstream_dhcp(driver: MixedDriver, timeout: Duration) -> (Mixed
                 DhcpMessageType::Offer => log_line(b"ap-sta-dhcp-offer"),
                 DhcpMessageType::Ack => {
                     log_line(b"ap-sta-dhcp-ack");
-                    got_ack = true;
+                    if !downstream_ready {
+                        log_line(b"ap-sta-downstream-ok");
+                        downstream_ready = true;
+                    }
                 }
                 DhcpMessageType::Nak => log_line(b"ap-sta-dhcp-nak"),
                 _ => {}
             }
-        } else {
+        } else if !downstream_ready {
             if last_wait_log.elapsed() >= Duration::from_secs(2) {
                 log_line(b"ap-sta-dhcp-wait");
                 last_wait_log = Instant::now();
             }
-            Timer::after(Duration::from_millis(10)).await;
         }
-    }
 
-    let driver = match device.into_link().into_driver() {
-        Ok(driver) => driver,
-        Err(_error) => {
-            log_line(b"ap_sta err ap-driver");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
+        if !sta_ready {
+            if let Some(config) = stack.config_v4() {
+                log_dhcp_up(config);
+                log_line(b"ap-sta-ok");
+                sta_ready = true;
+            } else if !sta_timeout_reported && Instant::now() >= sta_deadline {
+                log_line(b"ap_sta err dhcp-timeout");
+                sta_timeout_reported = true;
             }
         }
-    };
-    (driver, got_ack)
+
+        Timer::after(if made_progress {
+            Duration::from_millis(1)
+        } else {
+            Duration::from_millis(10)
+        })
+        .await;
+    }
 }
 
 fn dhcp_payload(frame: &[u8]) -> Option<&[u8]> {
@@ -369,38 +349,14 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    if wait_for_downstream_client_enabled() {
-        let (_driver, downstream_ready) =
-            serve_downstream_dhcp(driver, Duration::from_secs(30)).await;
-        if downstream_ready {
-            log_line(b"ap-sta-downstream-ok");
-        } else {
-            log_line(b"ap_sta err downstream-timeout");
-        }
-        loop {
-            Timer::after(Duration::from_secs(60)).await;
-        }
-    }
-
-    match driver.ap().and_then(|mut ap| ap.connected_stations::<10>()) {
+    match driver.ap().connected_stations::<10>() {
         Ok(stations) => log_station_count(stations.len()),
         Err(_error) => log_line(b"ap_sta err stations"),
     }
 
     log_line(b"network starting");
-    let stack = start_network(spawner, driver);
-    log_line(b"waiting dhcp");
-    match wait_for_ipv4_config(&stack, Duration::from_secs(15)).await {
-        Some(config) => {
-            log_dhcp_up(config);
-            log_line(b"ap-sta-ok");
-        }
-        None => log_line(b"ap_sta err dhcp-timeout"),
-    }
-
-    loop {
-        Timer::after(Duration::from_secs(60)).await;
-    }
+    let (stack, ap_device) = start_network(spawner, driver);
+    run_networks(stack, ap_device).await
 }
 
 #[panic_handler]

@@ -11,19 +11,19 @@ use embedded_io_async::Write as IoWrite;
 
 use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverStateWithMtu};
 use esp8266_hal::wifi::{
-    Channel, ClientConfig, Credential, Esp8266TargetBackend, InitConfig, Ipv4Addr as CoreIpv4Addr,
-    Passphrase, Ssid, StaMode, Started, StaticIpv4Config, WifiDriver, WifiResources,
+    Channel, ClientConfig, Esp8266TargetBackend, InitConfig, Ipv4Addr as CoreIpv4Addr, Passphrase,
+    Ssid, StaMode, Started, StaticIpv4Config, StationCredential, WifiDriver, WifiResources,
 };
 use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
 const WIFI_SSID: &str = match option_env!("ESP8266_HAL_WIFI_SSID") {
     Some(ssid) => ssid,
-    None => include_str!("ssid"),
+    None => "esp8266-hal",
 };
 const WIFI_PASS: &str = match option_env!("ESP8266_HAL_WIFI_PASS") {
     Some(pass) => pass,
-    None => include_str!("pass"),
+    None => "esp8266-pass",
 };
 const DEFAULT_SERVER_HOST: &str = "93.184.216.34";
 const DEFAULT_SERVER_PORT: &str = "80";
@@ -47,7 +47,7 @@ const NET_MTU: usize = 640;
 const TCP_BUF_BYTES: usize = 64;
 
 type TcpClientNetState = NetDriverStateWithMtu<NET_MTU, NET_RX_PACKETS, NET_TX_PACKETS>;
-type WifiDriverResources = WifiResources<8, 4, 2>;
+type WifiDriverResources = WifiResources<8, 4>;
 
 static NET_STATE: StaticCell<TcpClientNetState> = StaticCell::new();
 static WIFI_RESOURCES: StaticCell<WifiDriverResources> = StaticCell::new();
@@ -58,15 +58,14 @@ static TCP_RX_BUF: StaticCell<[u8; TCP_BUF_BYTES]> = StaticCell::new();
 static TCP_TX_BUF: StaticCell<[u8; TCP_BUF_BYTES]> = StaticCell::new();
 
 type WifiStaDriver =
-    WifiDriver<'static, Started<StaMode>, Esp8266TargetBackend<'static, 8, 4, 2>, 8, 4, 2>;
+    WifiDriver<'static, Started<StaMode>, Esp8266TargetBackend<'static, 8, 4>, 8, 4>;
 type WifiNetRunner = wifi_net::RunnerWithMtu<
     'static,
     'static,
     StaMode,
-    Esp8266TargetBackend<'static, 8, 4, 2>,
+    Esp8266TargetBackend<'static, 8, 4>,
     8,
     4,
-    2,
     0,
     0,
     0,
@@ -120,16 +119,15 @@ fn log_recv_count(count: usize) {
 
 fn init_wifi() -> WifiStaDriver {
     let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let backend = Esp8266TargetBackend::new(resources);
-    let driver = WifiDriver::with_backend(resources, backend)
+    let driver = WifiDriver::new(resources)
         .initialize(InitConfig::new(14, 4, 4).expect("init config"))
         .expect("wifi init");
     log_line(b"wifi init ok");
 
     let credential = if WIFI_PASS.trim().is_empty() {
-        Credential::Open
+        StationCredential::open()
     } else {
-        Credential::Wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("pass"))
+        StationCredential::wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("pass"))
     };
 
     let mut config = ClientConfig::new(Ssid::try_from(WIFI_SSID.trim()).expect("ssid"), credential);
@@ -149,8 +147,8 @@ fn init_wifi() -> WifiStaDriver {
 }
 
 fn connect_wifi(driver: &mut WifiStaDriver) -> Result<(), esp8266_hal::wifi::DriverError> {
-    let mut sta = driver.sta().expect("sta");
-    let _session = sta.connect_blocking(60_000)?;
+    let mut sta = driver.sta();
+    sta.connect_blocking(60_000)?;
     log_line(b"wifi connected");
     Ok(())
 }
@@ -442,6 +440,7 @@ fn driver_error_name(error: esp8266_hal::wifi::DriverError) -> &'static str {
         esp8266_hal::wifi::DriverError::PacketOverflow => "packet-overflow",
         esp8266_hal::wifi::DriverError::PeerOverflow => "peer-overflow",
         esp8266_hal::wifi::DriverError::PayloadTooLong => "payload-too-long",
+        esp8266_hal::wifi::DriverError::InvalidFrameSize => "invalid-frame-size",
         esp8266_hal::wifi::DriverError::OutOfMemory => "out-of-memory",
         esp8266_hal::wifi::DriverError::NotStarted => "not-started",
         esp8266_hal::wifi::DriverError::WouldBlock => "would-block",

@@ -5,7 +5,7 @@ use esp8266_hal::{
 
 #[test]
 fn wifi_core_module_is_public() {
-    let _ = core::mem::size_of::<WifiResources<8, 4, 2>>();
+    let _ = core::mem::size_of::<WifiResources<8, 4>>();
     let _ = core::mem::size_of::<Configured<()>>();
     let _ = core::mem::size_of::<Uninitialized>();
 }

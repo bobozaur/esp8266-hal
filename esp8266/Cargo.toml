@@ -21,6 +21,8 @@ include = [
     "src/**",
     "build.rs",
     "device.x",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
 ]
 
 [lib]
@@ -30,9 +32,11 @@ test = false
 [dependencies]
 critical-section = { version = "1.1.1", optional = true }
 vcell = "0.1.3"
-xtensa-lx = "0.8.0"
+
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+xtensa-lx = { version = "0.8.0", features = ["esp8266"] }
 
 [features]
-default = ["xtensa-lx/esp8266"]
+default = []
 rt = []
 impl-register-debug = []

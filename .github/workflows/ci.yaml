@@ -12,60 +12,170 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  test-host-core:
-    name: Host core tests
+  test-host:
+    name: Host tests
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Verify vendored WiFi inputs
+        working-directory: esp8266-wifi-sys/vendor
+        run: sha256sum --check --strict SHA256SUMS
+      - name: Test the feature-independent WiFi core
+        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests
+      - name: Test ESP-NOW in isolation
+        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-esp-now --lib --tests
+      - name: Test SmartConfig in isolation
+        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-smartconfig --lib --tests
+      - name: Test enterprise configuration in isolation
+        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-enterprise --lib --tests
+      - name: Test WPS in isolation
+        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-wps --lib --tests
+      - name: Test promiscuous capture in isolation
+        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-promiscuous --lib --tests
+      - name: Test the vendored ABI crate
+        run: cargo test -p esp8266-wifi-sys --target x86_64-unknown-linux-gnu
+      - name: Verify the vendored ABI package
+        run: cargo package -p esp8266-wifi-sys --target x86_64-unknown-linux-gnu
+      - name: Verify supporting packages
+        run: |
+          cargo package -p esp8266 --target x86_64-unknown-linux-gnu
+          cargo package -p esp8266-hal-proc-macros --target x86_64-unknown-linux-gnu
+          cargo package -p esp8266-hal --list
+      - name: Test the hardware harness
+        run: cargo test -p xtask --target x86_64-unknown-linux-gnu
+      - name: Check proc macros without WiFi
+        run: cargo check -p esp8266-hal-proc-macros --target x86_64-unknown-linux-gnu --no-default-features
+      - name: Check async proc-macro diagnostic without WiFi
+        run: |
+          if cargo check --target x86_64-unknown-linux-gnu --manifest-path tests/fixtures/async-main-no-wifi/Cargo.toml >macro-check.log 2>&1; then
+            cat macro-check.log
+            exit 1
+          fi
+          grep --fixed-strings 'async `#[main]` requires the `wifi` feature' macro-check.log
+      - name: Check proc macros with WiFi
+        run: cargo check -p esp8266-hal-proc-macros --target x86_64-unknown-linux-gnu --no-default-features --features wifi
+      - name: Lint host-testable WiFi code
+        run: cargo clippy --no-deps --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -- -D warnings -A clippy::missing-safety-doc -A clippy::type-complexity -A clippy::legacy-numeric-constants
+      - name: Lint all optional WiFi components together
+        run: cargo clippy --no-deps --target x86_64-unknown-linux-gnu --no-default-features --features wifi-esp-now,wifi-smartconfig,wifi-enterprise,wifi-wps,wifi-promiscuous --lib --tests -- -D warnings -A clippy::missing-safety-doc -A clippy::type-complexity -A clippy::legacy-numeric-constants
+      - name: Lint the hardware harness
+        run: cargo clippy --no-deps -p xtask --target x86_64-unknown-linux-gnu -- -D warnings -A clippy::too-many-arguments
+      - name: Lint the vendored ABI crate
+        run: cargo clippy --no-deps -p esp8266-wifi-sys --target x86_64-unknown-linux-gnu -- -D warnings
 
-  test-xtask:
-    name: xtask tests
+  build-wifi-examples:
+    name: Link WiFi example (${{ matrix.name }})
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p xtask --target x86_64-unknown-linux-gnu
-
-  check-wifi-examples:
-    name: Check WiFi example (${{ matrix.example }})
-    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - example: wifi_core_connect
-            features: interrupt,rt,wifi-core,wifi,wifi-sta
-          - example: raw_scan
-            features: interrupt,rt,wifi-core,wifi,wifi-sta
-          - example: wifi_core_dhcp_probe
-            features: interrupt,rt,wifi-embassy-net,wifi-sta
-          - example: tcp_server
-            features: interrupt,rt,wifi-embassy-net,wifi-sta
-          - example: tcp_client
-            features: interrupt,rt,wifi-embassy-net,wifi-sta
-          - example: sta_static_ip
-            features: interrupt,rt,wifi-embassy-net,wifi-sta
-          - example: wifi_ap
-            features: interrupt,rt,wifi-ap,wifi-embassy-net
-          - example: wifi_ap_sta
-            features: interrupt,rt,wifi-ap,wifi-sta,wifi-embassy-net
-          - example: wifi_wps
-            features: interrupt,rt,wifi-sta,wifi-wps
-          - example: wifi_smartconfig
-            features: interrupt,rt,wifi-sta,wifi-smartconfig
-          - example: wifi_esp_now_tx
-            features: interrupt,rt,wifi-sta,wifi-esp-now
-          - example: wifi_esp_now_rx
-            features: interrupt,rt,wifi-sta,wifi-esp-now
-          - example: wifi_promisc
-            features: interrupt,rt,wifi-sta,wifi-promiscuous
+          - name: core-connect
+            example: wifi_core_connect
+            features: interrupt,rt,wifi
+          - name: scan
+            example: raw_scan
+            features: interrupt,rt,wifi
+          - name: dhcp
+            example: wifi_core_dhcp_probe
+            features: interrupt,rt,wifi-embassy-net
+          - name: tcp-server
+            example: tcp_server
+            features: interrupt,rt,wifi-embassy-net
+          - name: tcp-client
+            example: tcp_client
+            features: interrupt,rt,wifi-embassy-net
+          - name: static-ip
+            example: sta_static_ip
+            features: interrupt,rt,wifi-embassy-net
+          - name: access-point
+            example: wifi_ap
+            features: interrupt,rt,wifi
+          - name: mixed-mode
+            example: wifi_ap_sta
+            features: interrupt,rt,wifi-embassy-net
+          - name: wps
+            example: wifi_wps
+            features: interrupt,rt,wifi-wps
+          - name: smartconfig
+            example: wifi_smartconfig
+            features: interrupt,rt,wifi-smartconfig
+          - name: esp-now-tx
+            example: wifi_esp_now_tx
+            features: interrupt,rt,wifi-esp-now
+          - name: esp-now-rx
+            example: wifi_esp_now_rx
+            features: interrupt,rt,wifi-esp-now
+          - name: promiscuous
+            example: wifi_promisc
+            features: interrupt,rt,wifi-promiscuous
+          - name: enterprise
+            example: wifi_eap
+            features: interrupt,rt,wifi-enterprise
+          - name: all-optional-components
+            example: tcp_server
+            features: interrupt,rt,wifi-embassy-net,wifi-smartconfig,wifi-esp-now,wifi-enterprise,wifi-wps,wifi-promiscuous
+          - name: downstream-consumer
+            kind: downstream
     steps:
       - uses: actions/checkout@v4
-      - uses: esp-rs/xtensa-toolchain@v1.1
+      - name: Install pinned Xtensa Rust toolchain
+        uses: esp-rs/xtensa-toolchain@v1.7.0
         with:
-          default: true
+          buildtargets: esp32
+          default: false
+          export: false
           ldproxy: false
+          name: esp-1.80.0
+          version: 1.80.0.0
+      - name: Install pinned ESP8266 GCC linker
+        env:
+          TOOLCHAIN_SHA256: 0a1804b5e2231c6db8b72af6bc2a0f9a5b6994cfba29956d412651109f13fe7e
+          TOOLCHAIN_URL: https://dl.espressif.com/dl/xtensa-lx106-elf-gcc8_4_0-esp-2020r3-linux-amd64.tar.gz
+        run: |
+          archive="$RUNNER_TEMP/xtensa-lx106-elf.tar.gz"
+          curl --fail --location --retry 3 "$TOOLCHAIN_URL" --output "$archive"
+          echo "$TOOLCHAIN_SHA256  $archive" | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xtensa-lx106-elf/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --example ${{ matrix.example }} --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features ${{ matrix.features }}
+      - name: Link release firmware
+        if: ${{ matrix.name != 'downstream-consumer' }}
+        run: |
+          if [[ "${{ matrix.example }}" == wifi_smartconfig ]]; then
+            export ESP8266_HAL_SMARTCONFIG_STATIC_ACK=1
+          fi
+          cargo build --release --example ${{ matrix.example }} --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features ${{ matrix.features }}
+      - name: Report linked image size
+        if: ${{ matrix.name != 'downstream-consumer' }}
+        run: xtensa-lx106-elf-size target/xtensa-esp8266-none-elf/release/examples/${{ matrix.example }}
+      - name: Link non-WiFi firmware
+        if: ${{ matrix.name == 'downstream-consumer' }}
+        run: |
+          rustup run esp-1.80.0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features
+          rustup run esp-1.80.0 cargo build --release --example blinky --target xtensa-esp8266-none-elf -Zbuild-std=core
+          xtensa-lx106-elf-size target/xtensa-esp8266-none-elf/release/examples/blinky
+      - name: Link from a downstream crate
+        if: ${{ matrix.name == 'downstream-consumer' }}
+        working-directory: tests/fixtures/downstream-wifi-link
+        run: rustup run esp-1.80.0 cargo build --locked --release -Zbuild-std=core
+      - name: Inspect downstream image
+        if: ${{ matrix.name == 'downstream-consumer' }}
+        working-directory: tests/fixtures/downstream-wifi-link
+        run: |
+          firmware=target/xtensa-esp8266-none-elf/release/downstream-wifi-link
+          xtensa-lx106-elf-size "$firmware"
+          xtensa-lx106-elf-nm "$firmware" | grep -E ' (ets_printf|ets_delay_us|ieee80211_deliver_data)$'
+          if xtensa-lx106-elf-nm "$firmware" | grep -E ' (__wrap_|__real_)'; then
+            exit 1
+          fi

@@ -4,12 +4,12 @@
 use panic_halt as _;
 
 use esp8266_hal::wifi::{
-    AccessPointRecord, DriverError, Esp8266TargetBackend, InitConfig, InitError, ScanOptions,
-    ScanTimings, WifiDriver, WifiResources,
+    AccessPointRecord, DriverError, InitConfig, InitError, ScanOptions, ScanTimings, WifiDriver,
+    WifiResources,
 };
 use static_cell::StaticCell;
 
-static RESOURCES: StaticCell<WifiResources<8, 4, 2>> = StaticCell::new();
+static RESOURCES: StaticCell<WifiResources<8, 4>> = StaticCell::new();
 static SCAN_RECORDS: StaticCell<heapless::Vec<AccessPointRecord, 16>> = StaticCell::new();
 
 #[inline(always)]
@@ -23,19 +23,17 @@ fn main() -> ! {
     log_line(b"wifi_core_scan start");
 
     let resources = RESOURCES.init_with(WifiResources::new);
-    let backend = Esp8266TargetBackend::new(resources);
-    let driver =
-        match WifiDriver::with_backend(resources, backend).initialize(InitConfig::default()) {
-            Ok(driver) => driver,
-            Err(error) => {
-                esp8266_hal::logger::write_bytes(b"wifi core scan init error ");
-                esp8266_hal::logger::write_bytes(init_error_name(error).as_bytes());
-                esp8266_hal::logger::write_newline();
-                loop {
-                    esp8266_hal::wifi::delay_ticks(100);
-                }
+    let driver = match WifiDriver::new(resources).initialize(InitConfig::default()) {
+        Ok(driver) => driver,
+        Err(error) => {
+            esp8266_hal::logger::write_bytes(b"wifi core scan init error ");
+            esp8266_hal::logger::write_bytes(init_error_name(error).as_bytes());
+            esp8266_hal::logger::write_newline();
+            loop {
+                esp8266_hal::wifi::delay_ticks(100);
             }
-        };
+        }
+    };
     log_line(b"wifi core scan initialized");
 
     let mut driver = driver
@@ -75,7 +73,7 @@ fn main() -> ! {
                     esp8266_hal::logger::write_dec_u32(record.rssi() as u32);
                 }
                 esp8266_hal::logger::write_bytes(b" auth=");
-                esp8266_hal::logger::write_dec_u32(record.auth_mode() as u32);
+                esp8266_hal::logger::write_dec_u32(record.authentication().as_raw() as u32);
                 esp8266_hal::logger::write_bytes(b" wps=");
                 esp8266_hal::logger::write_dec_u32(record.wps() as u32);
                 esp8266_hal::logger::write_newline();
@@ -110,6 +108,7 @@ fn driver_error_name(error: DriverError) -> &'static str {
         DriverError::PacketOverflow => "packet-overflow",
         DriverError::PeerOverflow => "peer-overflow",
         DriverError::PayloadTooLong => "payload-too-long",
+        DriverError::InvalidFrameSize => "invalid-frame-size",
         DriverError::OutOfMemory => "out-of-memory",
         DriverError::NotStarted => "not-started",
         DriverError::WouldBlock => "would-block",

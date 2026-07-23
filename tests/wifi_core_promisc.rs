@@ -1,8 +1,9 @@
+#![cfg(feature = "wifi-promiscuous")]
+
 use esp8266_hal::wifi_core::{
-    DriverError, InitConfig, PromiscuousControlFilter, PromiscuousFilter, PromiscuousFrameInfo,
-    PromiscuousPacketType, PromiscuousRxFrame, RawMode, WifiApBackend, WifiDriver,
-    WifiFeatureBackend, WifiLifecycleBackend, WifiPacketBackend, WifiResources, WifiRuntimeBackend,
-    WifiScanBackend, WifiStaBackend,
+    DriverError, InitConfig, PromiscuousControlFilter, PromiscuousFilter, RawMode, WifiApBackend,
+    WifiDriver, WifiFeatureBackend, WifiLifecycleBackend, WifiPacketBackend, WifiResources,
+    WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -94,8 +95,8 @@ impl WifiPacketBackend for FakePromiscBackend {}
 impl WifiScanBackend for FakePromiscBackend {}
 
 #[test]
-fn promiscuous_session_enables_dequeues_and_disables() {
-    let resources = WifiResources::<8, 4, 2, 0, 0, 2>::new();
+fn promiscuous_session_enables_and_disables() {
+    let resources = WifiResources::<8, 4, 0, 0, 2>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakePromiscBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -109,24 +110,6 @@ fn promiscuous_session_enables_dequeues_and_disables() {
     assert!(session.is_active());
     assert_eq!(session.filter(), PromiscuousFilter::all());
 
-    resources
-        .enqueue_promiscuous_rx(
-            PromiscuousRxFrame::new(
-                PromiscuousFrameInfo {
-                    rssi: -42,
-                    channel: 6,
-                    packet_type: PromiscuousPacketType::Management,
-                },
-                &[1, 2, 3],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-    let frame = session.receive().expect("promiscuous frame");
-    assert_eq!(frame.info().channel, 6);
-    assert_eq!(frame.payload(), &[1, 2, 3]);
-
     session.stop().unwrap();
     assert!(!session.is_active());
     assert_eq!(session.filter(), PromiscuousFilter::empty());
@@ -134,7 +117,7 @@ fn promiscuous_session_enables_dequeues_and_disables() {
 
 #[test]
 fn promiscuous_session_sets_control_subtype_filter() {
-    let resources = WifiResources::<8, 4, 2, 0, 0, 1>::new();
+    let resources = WifiResources::<8, 4, 0, 0, 1>::new();
     let backend = FakePromiscBackend::default();
     let state = Rc::clone(&backend.state);
     let mut driver = WifiDriver::with_backend(&resources, backend)
@@ -158,7 +141,7 @@ fn promiscuous_session_sets_control_subtype_filter() {
 
 #[test]
 fn inactive_control_filter_applies_after_start() {
-    let resources = WifiResources::<8, 4, 2, 0, 0, 1>::new();
+    let resources = WifiResources::<8, 4, 0, 0, 1>::new();
     let backend = FakePromiscBackend::default();
     let state = Rc::clone(&backend.state);
     let mut driver = WifiDriver::with_backend(&resources, backend)
@@ -188,7 +171,7 @@ fn inactive_control_filter_applies_after_start() {
 
 #[test]
 fn promiscuous_session_tracks_packet_filter_transitions() {
-    let resources = WifiResources::<8, 4, 2, 0, 0, 1>::new();
+    let resources = WifiResources::<8, 4, 0, 0, 1>::new();
     let backend = FakePromiscBackend::default();
     let state = Rc::clone(&backend.state);
     let mut driver = WifiDriver::with_backend(&resources, backend)
@@ -215,7 +198,7 @@ fn promiscuous_session_tracks_packet_filter_transitions() {
 
 #[test]
 fn active_promiscuous_control_filter_change_applies_directly() {
-    let resources = WifiResources::<8, 4, 2, 0, 0, 1>::new();
+    let resources = WifiResources::<8, 4, 0, 0, 1>::new();
     let backend = FakePromiscBackend::default();
     let state = Rc::clone(&backend.state);
     let mut driver = WifiDriver::with_backend(&resources, backend)
@@ -250,7 +233,7 @@ fn active_promiscuous_control_filter_change_applies_directly() {
 
 #[test]
 fn stop_preserves_requested_control_filter_for_restart() {
-    let resources = WifiResources::<8, 4, 2, 0, 0, 1>::new();
+    let resources = WifiResources::<8, 4, 0, 0, 1>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakePromiscBackend::default())
         .initialize(InitConfig::default())
         .unwrap()

@@ -1,14 +1,16 @@
 //! Port layer: ISR dispatch, tick handler, scheduler start, PendSV.
 //!
-//! Replaces `port.c` from the FreeRTOS port. The assembly files
-//! (`xtensa_vectors.S`, `xtensa_context.S`, `os_cpu_a.S`) remain compiled
-//! and call into the symbols exported here.
+//! Replaces the FreeRTOS C port and its legacy Xtensa assembly. Ordinary
+//! scheduler logic stays in Rust; the few architectural save/restore sequences
+//! that cannot be expressed otherwise use local inline assembly.
 //!
 //! ISR-path functions are placed in `.iram1` to avoid flash cache misses
 //! during interrupt handling.
 
 use core::arch::asm;
 use core::ffi::c_void;
+
+use portable_atomic::{AtomicBool, Ordering};
 
 use crate::ram;
 
@@ -19,7 +21,7 @@ use super::task;
 // NMI stack buffer
 // ---------------------------------------------------------------------------
 
-/// NMI stack and save-frame buffer used by `nmi_handler.S`.
+/// NMI stack and save-frame buffer used by [`__naked_nmi_exception`].
 ///
 /// Layout (offsets from base):
 ///   +0x000 .. +0x5FF : base NMI C stack (1536 bytes, grows down)
@@ -38,6 +40,154 @@ struct NmiStack([u8; 0xD80]);
 #[no_mangle]
 #[link_section = ".bss"]
 static mut _chip_nmi_stk: NmiStack = NmiStack([0u8; 0xD80]);
+
+#[no_mangle]
+#[link_section = ".bss"]
+static mut _chip_nmi_cnt: u32 = 0;
+
+/// Redirect the ESP8266 NMI vector to the closed Wi-Fi runtime.
+///
+/// The vector enters without a usable Rust stack, so this leaf must save the
+/// complete interrupted register set before calling `wDev_ProcessFiq`.
+#[naked]
+#[no_mangle]
+#[link_section = ".rwtext"]
+pub unsafe extern "C" fn __naked_nmi_exception() -> ! {
+    unsafe {
+        asm!(
+            "rsr a0, EXCSAVE1",
+            "movi a0, _chip_nmi_cnt",
+            "l32i a0, a0, 0",
+            "bnez a0, 2f",
+            "movi a0, _chip_nmi_stk + 1536",
+            "j 3f",
+            "2:",
+            "movi a0, _chip_nmi_stk + 3328",
+            "3:",
+            "s32i a2, a0, 0x08",
+            "s32i a1, a0, 0x04",
+            "s32i a3, a0, 0x0c",
+            "rsr a2, EXCSAVE1",
+            "s32i a4, a0, 0x10",
+            "s32i a2, a0, 0x00",
+            "rsr a3, EPC1",
+            "rsr a4, EXCCAUSE",
+            "s32i a3, a0, 0x44",
+            "s32i a4, a0, 0x48",
+            "rsr a3, EXCVADDR",
+            "s32i a3, a0, 0x4c",
+            "rsr a4, EXCSAVE1",
+            "s32i a4, a0, 0x50",
+            "rsr a3, EPC3",
+            "s32i a3, a0, 0x54",
+            "rsr a4, EPS3",
+            "s32i a4, a0, 0x58",
+            "s32i a5, a0, 0x14",
+            "s32i a6, a0, 0x18",
+            "s32i a7, a0, 0x1c",
+            "s32i a8, a0, 0x20",
+            "s32i a9, a0, 0x24",
+            "s32i a10, a0, 0x28",
+            "s32i a11, a0, 0x2c",
+            "s32i a12, a0, 0x30",
+            "s32i a13, a0, 0x34",
+            "s32i a14, a0, 0x38",
+            "s32i a15, a0, 0x3c",
+            "mov a1, a0",
+            "movi a0, 0",
+            "movi a2, 0x23",
+            "wsr a2, PS",
+            "rsync",
+            "rsr a14, SAR",
+            "s32i a14, a1, 0x40",
+            "movi a2, _chip_nmi_cnt",
+            "l32i a3, a2, 0",
+            "addi a3, a3, 1",
+            "s32i a3, a2, 0",
+            // `wDev_ProcessFiq` lives in flash, outside the direct CALL0
+            // range from IRAM. This is the explicit long-call sequence.
+            "movi a0, wDev_ProcessFiq",
+            "callx0 a0",
+            "movi a2, _chip_nmi_cnt",
+            "l32i a3, a2, 0",
+            "addi a3, a3, -1",
+            "s32i a3, a2, 0",
+            "beqi a3, 1, 4f",
+            "movi a1, _chip_nmi_stk + 1536",
+            "j 5f",
+            "4:",
+            "movi a1, _chip_nmi_stk + 3328",
+            "5:",
+            "l32i a15, a1, 0x40",
+            "wsr a15, SAR",
+            "movi a2, 0x33",
+            "wsr a2, PS",
+            "rsync",
+            "l32i a2, a1, 0x44",
+            "l32i a3, a1, 0x48",
+            "wsr a2, EPC1",
+            "wsr a3, EXCCAUSE",
+            "l32i a2, a1, 0x4c",
+            "wsr a2, EXCVADDR",
+            "l32i a3, a1, 0x50",
+            "wsr a3, EXCSAVE1",
+            "l32i a2, a1, 0x54",
+            "wsr a2, EPC3",
+            "l32i a3, a1, 0x58",
+            "wsr a3, EPS3",
+            "l32i a0, a1, 0x00",
+            "l32i a4, a1, 0x10",
+            "l32i a5, a1, 0x14",
+            "l32i a6, a1, 0x18",
+            "l32i a7, a1, 0x1c",
+            "l32i a8, a1, 0x20",
+            "l32i a9, a1, 0x24",
+            "l32i a10, a1, 0x28",
+            "l32i a11, a1, 0x2c",
+            "l32i a12, a1, 0x30",
+            "l32i a13, a1, 0x34",
+            "l32i a14, a1, 0x38",
+            "l32i a15, a1, 0x3c",
+            "rsr a3, SAR",
+            "movi a2, 0x3ff00000",
+            "wsr a3, SAR",
+            "rsync",
+            "movi a3, 1",
+            "s32i a3, a2, 0",
+            "l32i a2, a1, 0x08",
+            "l32i a3, a1, 0x0c",
+            "l32i a1, a1, 0x04",
+            "rfi 3",
+            options(noreturn)
+        );
+    }
+}
+
+/// Target ABI helper required by the vendored mbedTLS objects.
+///
+/// Rust's compiler builtins do not export this GCC spelling on Xtensa. Keep
+/// the tiny operation here rather than vendoring an entire libgcc archive.
+#[naked]
+#[no_mangle]
+#[link_section = ".rwtext"]
+unsafe extern "C" fn __bswapsi2(_value: u32) -> u32 {
+    unsafe {
+        asm!(
+            "extui a3, a2, 0, 8",
+            "slli a3, a3, 24",
+            "extui a4, a2, 8, 8",
+            "slli a4, a4, 16",
+            "or a3, a3, a4",
+            "extui a4, a2, 16, 8",
+            "slli a4, a4, 8",
+            "or a3, a3, a4",
+            "extui a4, a2, 24, 8",
+            "or a2, a3, a4",
+            "ret.n",
+            options(noreturn)
+        );
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -60,7 +210,7 @@ const ETS_MAX_INUM: u8 = 6;
 const ETS_INT_MAX: usize = 14;
 
 // ---------------------------------------------------------------------------
-// Globals (accessed from assembly and C code)
+// Globals shared with interrupt entry code and native SDK objects
 // ---------------------------------------------------------------------------
 
 /// Tick divisor: CPU cycles per tick period.
@@ -86,16 +236,9 @@ pub static mut g_esp_os_cpu_clk: u64 = 0;
 /// Context-switch request flag, checked by `_xt_isr_handler` after ISR dispatch.
 static mut S_SWITCH_CTX_FLAG: u32 = 0;
 
-/// Last compat context-switch stage reached inside `apply_pending_context_switch`.
-#[no_mangle]
-pub static mut g_ctx_stage: u32 = 0;
 #[no_mangle]
 pub static mut g_level1_restore_sp: u32 = 0;
-static mut FIRST_TIMER_PENDSV_TRACE_DONE: bool = false;
-static mut FIRST_TIMER_SOFT_ISR_TRACE_DONE: bool = false;
-static mut FIRST_TIMER_CTX_SWITCH_TRACE_DONE: bool = false;
-static mut FIRST_UI_TICK_TRACE_DONE: bool = false;
-static mut POLL_WDEV_ON_TICK: u32 = 0;
+static POLL_WDEV_ON_TICK: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // ISR table
@@ -119,10 +262,6 @@ static mut ISR_TABLE: [IsrEntry; ISR_COUNT] = {
 
 /// Whether we are currently inside an ISR.
 static mut ISR_NESTING: u8 = 0;
-
-/// Per-interrupt call counters for diagnostics.
-#[no_mangle]
-pub static mut g_isr_counts: [u32; ISR_COUNT] = [0; ISR_COUNT];
 
 // ---------------------------------------------------------------------------
 // Inline asm helpers for Xtensa special registers
@@ -167,12 +306,10 @@ unsafe fn set_intset(mask: u32) {
 }
 
 // ---------------------------------------------------------------------------
-// External symbols (from assembly / C code we still compile)
+// External symbols retained in the native SDK runtime
 // ---------------------------------------------------------------------------
 
 extern "C" {
-    fn _xt_tick_timer_init();
-    fn _xt_enter_first_task();
     fn MacIsrSigPostDefHdl() -> i32;
     /// Ticks per microsecond (defined in system_api.c, still compiled).
     static g_esp_ticks_per_us: u32;
@@ -197,12 +334,6 @@ pub unsafe extern "C" fn PendSV(req: i32) {
             critical::vPortEnterCritical();
             S_SWITCH_CTX_FLAG = 1;
             set_intset(1 << ETS_SOFT_INUM);
-            let current = task::debug_current_task_marker();
-            if current == b'M' && !FIRST_TIMER_PENDSV_TRACE_DONE {
-                FIRST_TIMER_PENDSV_TRACE_DONE = true;
-                crate::logger::debug_byte(b'p');
-                crate::logger::debug_byte(current);
-            }
             critical::vPortExitCritical();
         } else if req == 2 {
             set_intset(1 << ETS_SOFT_INUM);
@@ -238,25 +369,69 @@ pub unsafe extern "C" fn _xt_isr_attach(
     }
 }
 
-// `_xt_isr_unmask` and `_xt_isr_mask` are provided by os_cpu_a.S.
-extern "C" {
-    pub fn _xt_isr_unmask(mask: u32);
-    pub fn _xt_isr_mask(mask: u32);
+#[no_mangle]
+#[link_section = ".iram1"]
+pub unsafe extern "C" fn _xt_isr_unmask(mask: u32) -> u32 {
+    let previous: u32;
+    let _updated: u32;
+    let _saved_ps: u32;
+    unsafe {
+        asm!(
+            "rsil {saved_ps}, 3",
+            "rsr {previous}, intenable",
+            "or {updated}, {previous}, {mask}",
+            "wsr {updated}, intenable",
+            "wsr {saved_ps}, ps",
+            "rsync",
+            saved_ps = out(reg) _saved_ps,
+            previous = out(reg) previous,
+            updated = out(reg) _updated,
+            mask = in(reg) mask,
+            options(nostack)
+        );
+    }
+    previous
 }
 
-/// Level-1 interrupt handler called by xtensa-lx-rt's exception vector.
+#[no_mangle]
+#[link_section = ".iram1"]
+pub unsafe extern "C" fn _xt_isr_mask(mask: u32) -> u32 {
+    let previous: u32;
+    let _updated: u32;
+    let _saved_ps: u32;
+    unsafe {
+        asm!(
+            "rsil {saved_ps}, 3",
+            "rsr {previous}, intenable",
+            "or {updated}, {previous}, {mask}",
+            "xor {updated}, {updated}, {mask}",
+            "wsr {updated}, intenable",
+            "wsr {saved_ps}, ps",
+            "rsync",
+            saved_ps = out(reg) _saved_ps,
+            previous = out(reg) previous,
+            updated = out(reg) _updated,
+            mask = in(reg) mask,
+            options(nostack)
+        );
+    }
+    previous
+}
+
+#[no_mangle]
+#[link_section = ".iram1"]
+unsafe extern "C" fn _xt_tick_timer_init() {
+    unsafe {
+        set_ccompare(get_ccount().wrapping_add(_xt_tick_divisor));
+        _xt_isr_unmask(1 << ETS_MAX_INUM);
+    }
+}
+
+/// SDK-compatible ISR dispatch entry.
 ///
-/// xtensa-lx-rt saves/restores all registers around this call. We dispatch
-/// to the ISR table (same mechanism the SDK uses) and handle the tick timer.
-///
-/// NOTE: This does NOT do FreeRTOS-style context switching (no
-/// `_xt_int_enter`/`_xt_int_exit`). Task switching is cooperative only
-/// for now — the blob's internal `vTaskDelay`/`xSemaphoreTake` calls
-/// use `PendSV` which triggers a software interrupt.
-/// `_xt_isr_handler` — main ISR dispatch loop.
-///
-/// Called from `__level_1_interrupt` (defined in C stubs for IRAM
-/// placement) and from the SDK's assembly interrupt dispatch.
+/// Kept as an SDK-compatible dispatch symbol. The HAL's Rust level-one entry
+/// calls [`isr_dispatch`] and [`apply_pending_context_switch`] directly with
+/// its live frame.
 #[no_mangle]
 #[link_section = ".rwtext"]
 pub unsafe extern "C" fn _xt_isr_handler() {
@@ -296,7 +471,6 @@ pub unsafe fn isr_dispatch() {
                 // infinite re-dispatch of unhandled interrupts.
                 clear_interrupt(bit);
 
-                g_isr_counts[i] += 1;
                 if let Some(handler) = ISR_TABLE[i].handler {
                     ISR_NESTING = 1;
                     handler(ISR_TABLE[i].arg);
@@ -313,21 +487,12 @@ pub unsafe extern "C" fn xPortInIsrContext() -> i32 {
     unsafe { ISR_NESTING as i32 }
 }
 
-/// Mark entry/exit from the level-1 interrupt dispatch path.
-pub unsafe fn set_isr_context(active: bool) {
-    unsafe {
-        ISR_NESTING = active as u8;
-    }
-}
-
 /// Enable polling of the WiFi FIQ processor from the tick ISR.
 ///
 /// Hardware validation shows this is required for closed-library paths such as
 /// SmartConfig to drain promiscuous RX traffic at the expected rate.
 pub fn set_wdev_tick_poll_enabled(enabled: bool) {
-    unsafe {
-        POLL_WDEV_ON_TICK = enabled as u32;
-    }
+    POLL_WDEV_ON_TICK.store(enabled, Ordering::Release);
 }
 
 /// Apply a pending task switch using the live xtensa-lx-rt interrupt frame.
@@ -349,25 +514,10 @@ pub unsafe fn apply_pending_context_switch(frame: *mut u8) {
             return;
         }
 
-        g_ctx_stage = b's' as u32;
-        let from_task = task::debug_current_task_marker();
         task::save_current_frame(frame);
-        g_ctx_stage = b'c' as u32;
         task::vTaskSwitchContext();
-        let to_task = task::debug_current_task_marker();
-        if from_task == b'M' && !FIRST_TIMER_CTX_SWITCH_TRACE_DONE {
-            FIRST_TIMER_CTX_SWITCH_TRACE_DONE = true;
-            crate::logger::debug_byte(b'c');
-            crate::logger::debug_byte(from_task);
-            crate::logger::debug_byte(to_task);
-        }
-        g_ctx_stage = b'r' as u32;
         g_level1_restore_sp = task::prepare_current_frame_for_restore() as u32;
-        if from_task == b'M' && to_task == b'U' {
-            crate::logger::debug_byte(b'v');
-        }
         S_SWITCH_CTX_FLAG = 0;
-        g_ctx_stage = b'z' as u32;
     }
 }
 
@@ -383,12 +533,6 @@ pub unsafe fn apply_pending_context_switch(frame: *mut u8) {
 #[link_section = ".iram1"]
 pub unsafe extern "C" fn SoftIsrHdl(_arg: *mut c_void) {
     unsafe {
-        let current = task::debug_current_task_marker();
-        if current == b'M' && !FIRST_TIMER_SOFT_ISR_TRACE_DONE {
-            FIRST_TIMER_SOFT_ISR_TRACE_DONE = true;
-            crate::logger::debug_byte(b's');
-            crate::logger::debug_byte(current);
-        }
         if MacIsrSigPostDefHdl() != 0 {
             portYIELD_FROM_ISR();
         }
@@ -405,27 +549,11 @@ extern "C" {
     fn wDev_ProcessFiq();
 }
 
-/// Tick ISR call counter for diagnostics.
-#[no_mangle]
-pub static mut g_tick_isr_count: u32 = 0;
-
-/// INTENABLE captured from tick ISR for diagnostics.
-#[no_mangle]
-pub static mut g_last_intenable: u32 = 0;
-
 /// `xPortSysTickHandle` — timer interrupt handler (ETS_MAX_INUM / CCOMPARE).
 #[no_mangle]
 #[link_section = ".iram1"]
 pub unsafe extern "C" fn xPortSysTickHandle(_p: *mut c_void) {
     unsafe {
-        g_tick_isr_count += 1;
-        asm!("rsr {0}, intenable", out(reg) g_last_intenable, options(nomem, nostack));
-        let current = task::debug_current_task_marker();
-        if current == b'U' && !FIRST_UI_TICK_TRACE_DONE {
-            FIRST_UI_TICK_TRACE_DONE = true;
-            crate::logger::debug_byte(b't');
-        }
-
         // Match SDK port.c: reset CCOUNT, compute elapsed microseconds,
         // catch up missed ticks via vTaskStepTick.
         let ccount = get_ccount();
@@ -450,7 +578,7 @@ pub unsafe extern "C" fn xPortSysTickHandle(_p: *mut c_void) {
         // interrupt directly. Posting 0x10 every tick floods ppTask and
         // prevents it from processing auth/EAPOL frames promptly.
 
-        if POLL_WDEV_ON_TICK != 0 {
+        if POLL_WDEV_ON_TICK.load(Ordering::Acquire) {
             wDev_ProcessFiq();
         }
 
@@ -633,10 +761,6 @@ pub unsafe extern "C" fn xPortStartScheduler() -> i32 {
         compat_enter_first_task()
     }
 }
-
-/// `vPortEndScheduler` — stub (never called on embedded targets).
-#[no_mangle]
-pub unsafe extern "C" fn vPortEndScheduler() {}
 
 // ---------------------------------------------------------------------------
 // Stack initialisation (single implementation, used by task.rs and C code)

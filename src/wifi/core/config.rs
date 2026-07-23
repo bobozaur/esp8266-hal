@@ -13,8 +13,14 @@ impl Ssid {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
+        if bytes.is_empty() {
+            return Err(ConfigError::SsidEmpty);
+        }
         if bytes.len() > Self::MAX_LEN {
             return Err(ConfigError::SsidTooLong);
+        }
+        if bytes.contains(&0) {
+            return Err(ConfigError::SsidContainsNul);
         }
 
         let mut ssid = Vec::new();
@@ -32,7 +38,7 @@ impl TryFrom<&str> for Ssid {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Passphrase(Vec<u8, 64>);
 
 impl Passphrase {
@@ -50,6 +56,13 @@ impl Passphrase {
         if bytes.len() > Self::WPA2_MAX_LEN {
             return Err(ConfigError::PassphraseTooLong);
         }
+        if bytes.len() == Self::WPA2_MAX_LEN {
+            if !bytes.iter().all(u8::is_ascii_hexdigit) {
+                return Err(ConfigError::PskInvalidHex);
+            }
+        } else if !bytes.iter().all(|byte| matches!(byte, 0x20..=0x7e)) {
+            return Err(ConfigError::PassphraseInvalidCharacter);
+        }
 
         let mut passphrase = Vec::new();
         passphrase
@@ -64,17 +77,19 @@ impl Passphrase {
 }
 
 /// Outer/anonymous identity used by the WPA2 Enterprise supplicant.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EnterpriseIdentity(Vec<u8, 127>);
+#[cfg(feature = "wifi-enterprise")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnterpriseIdentity<'a>(&'a [u8]);
 
-impl EnterpriseIdentity {
+#[cfg(feature = "wifi-enterprise")]
+impl<'a> EnterpriseIdentity<'a> {
     pub const MAX_LEN: usize = 127;
 
-    pub fn new(value: &str) -> Result<Self, ConfigError> {
+    pub fn new(value: &'a str) -> Result<Self, ConfigError> {
         Self::from_bytes(value.as_bytes())
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ConfigError> {
         if bytes.is_empty() {
             return Err(ConfigError::EnterpriseIdentityEmpty);
         }
@@ -82,38 +97,37 @@ impl EnterpriseIdentity {
             return Err(ConfigError::EnterpriseIdentityTooLong);
         }
 
-        let mut identity = Vec::new();
-        identity
-            .extend_from_slice(bytes)
-            .map_err(|_| ConfigError::EnterpriseIdentityTooLong)?;
-        Ok(Self(identity))
+        Ok(Self(bytes))
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+    pub const fn as_bytes(&self) -> &'a [u8] {
+        self.0
     }
 }
 
-impl TryFrom<&str> for EnterpriseIdentity {
+#[cfg(feature = "wifi-enterprise")]
+impl<'a> TryFrom<&'a str> for EnterpriseIdentity<'a> {
     type Error = ConfigError;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
         Self::new(value)
     }
 }
 
 /// Inner username used by password-based WPA2 Enterprise methods.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EnterpriseUsername(Vec<u8, 127>);
+#[cfg(feature = "wifi-enterprise")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnterpriseUsername<'a>(&'a [u8]);
 
-impl EnterpriseUsername {
+#[cfg(feature = "wifi-enterprise")]
+impl<'a> EnterpriseUsername<'a> {
     pub const MAX_LEN: usize = 127;
 
-    pub fn new(value: &str) -> Result<Self, ConfigError> {
+    pub fn new(value: &'a str) -> Result<Self, ConfigError> {
         Self::from_bytes(value.as_bytes())
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ConfigError> {
         if bytes.is_empty() {
             return Err(ConfigError::EnterpriseUsernameEmpty);
         }
@@ -121,38 +135,37 @@ impl EnterpriseUsername {
             return Err(ConfigError::EnterpriseUsernameTooLong);
         }
 
-        let mut username = Vec::new();
-        username
-            .extend_from_slice(bytes)
-            .map_err(|_| ConfigError::EnterpriseUsernameTooLong)?;
-        Ok(Self(username))
+        Ok(Self(bytes))
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+    pub const fn as_bytes(&self) -> &'a [u8] {
+        self.0
     }
 }
 
-impl TryFrom<&str> for EnterpriseUsername {
+#[cfg(feature = "wifi-enterprise")]
+impl<'a> TryFrom<&'a str> for EnterpriseUsername<'a> {
     type Error = ConfigError;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
         Self::new(value)
     }
 }
 
 /// Inner password used by password-based WPA2 Enterprise methods.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EnterprisePassword(Vec<u8, 128>);
+#[cfg(feature = "wifi-enterprise")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct EnterprisePassword<'a>(&'a [u8]);
 
-impl EnterprisePassword {
+#[cfg(feature = "wifi-enterprise")]
+impl<'a> EnterprisePassword<'a> {
     pub const MAX_LEN: usize = 128;
 
-    pub fn new(value: &str) -> Result<Self, ConfigError> {
+    pub fn new(value: &'a str) -> Result<Self, ConfigError> {
         Self::from_bytes(value.as_bytes())
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ConfigError> {
         if bytes.is_empty() {
             return Err(ConfigError::EnterprisePasswordEmpty);
         }
@@ -160,22 +173,19 @@ impl EnterprisePassword {
             return Err(ConfigError::EnterprisePasswordTooLong);
         }
 
-        let mut password = Vec::new();
-        password
-            .extend_from_slice(bytes)
-            .map_err(|_| ConfigError::EnterprisePasswordTooLong)?;
-        Ok(Self(password))
+        Ok(Self(bytes))
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+    pub const fn as_bytes(&self) -> &'a [u8] {
+        self.0
     }
 }
 
-impl TryFrom<&str> for EnterprisePassword {
+#[cfg(feature = "wifi-enterprise")]
+impl<'a> TryFrom<&'a str> for EnterprisePassword<'a> {
     type Error = ConfigError;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
         Self::new(value)
     }
 }
@@ -450,13 +460,60 @@ impl Default for ScanOptions {
     }
 }
 
+/// Authentication advertised by an access point in scan results.
+///
+/// `Unknown` preserves values introduced by a newer SDK instead of silently
+/// classifying them as an open network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthenticationMethod {
+    None,
+    Wep,
+    WpaPersonal,
+    Wpa2Personal,
+    WpaWpa2Personal,
+    Wpa2Enterprise,
+    Wpa3Personal,
+    Wpa2Wpa3Personal,
+    Unknown(u8),
+}
+
+impl AuthenticationMethod {
+    pub const fn from_raw(value: u8) -> Self {
+        match value {
+            0 => Self::None,
+            1 => Self::Wep,
+            2 => Self::WpaPersonal,
+            3 => Self::Wpa2Personal,
+            4 => Self::WpaWpa2Personal,
+            5 => Self::Wpa2Enterprise,
+            6 => Self::Wpa3Personal,
+            7 => Self::Wpa2Wpa3Personal,
+            value => Self::Unknown(value),
+        }
+    }
+
+    pub const fn as_raw(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Wep => 1,
+            Self::WpaPersonal => 2,
+            Self::Wpa2Personal => 3,
+            Self::WpaWpa2Personal => 4,
+            Self::Wpa2Enterprise => 5,
+            Self::Wpa3Personal => 6,
+            Self::Wpa2Wpa3Personal => 7,
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccessPointRecord {
     ssid: Ssid,
     bssid: [u8; 6],
     channel: Channel,
     rssi: i8,
-    auth_mode: u8,
+    authentication: AuthenticationMethod,
     wps: bool,
 }
 
@@ -466,7 +523,7 @@ impl AccessPointRecord {
         bssid: [u8; 6],
         channel: Channel,
         rssi: i8,
-        auth_mode: u8,
+        authentication: AuthenticationMethod,
         wps: bool,
     ) -> Result<Self, ConfigError> {
         if ssid.len() > 32 {
@@ -483,7 +540,7 @@ impl AccessPointRecord {
             bssid,
             channel,
             rssi,
-            auth_mode,
+            authentication,
             wps,
         })
     }
@@ -504,8 +561,8 @@ impl AccessPointRecord {
         self.rssi
     }
 
-    pub const fn auth_mode(&self) -> u8 {
-        self.auth_mode
+    pub const fn authentication(&self) -> AuthenticationMethod {
+        self.authentication
     }
 
     pub const fn wps(&self) -> bool {
@@ -529,7 +586,7 @@ impl TryFrom<u8> for ApClientLimit {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            1..=10 => Ok(Self(value)),
+            1..=4 => Ok(Self(value)),
             other => Err(ConfigError::InvalidApClientLimit(other)),
         }
     }
@@ -557,14 +614,89 @@ impl TryFrom<u16> for BeaconInterval {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Credential {
-    Open,
-    Wpa2(Passphrase),
-    Wpa2Enterprise(Wpa2EnterpriseCredentials),
+/// Station authentication material.
+#[derive(Clone, PartialEq, Eq)]
+pub struct StationCredential<'a> {
+    #[cfg(feature = "wifi-enterprise")]
+    kind: StationCredentialKind<'a>,
+    #[cfg(not(feature = "wifi-enterprise"))]
+    kind: StationCredentialKind,
+    _lifetime: core::marker::PhantomData<&'a ()>,
 }
 
+#[cfg(feature = "wifi-enterprise")]
+#[derive(Clone, PartialEq, Eq)]
+enum StationCredentialKind<'a> {
+    Open,
+    Wpa2(Passphrase),
+    Enterprise(&'a Wpa2EnterpriseCredentials<'a>),
+}
+
+#[cfg(not(feature = "wifi-enterprise"))]
+#[derive(Clone, PartialEq, Eq)]
+enum StationCredentialKind {
+    Open,
+    Wpa2(Passphrase),
+}
+
+impl<'a> StationCredential<'a> {
+    pub const fn open() -> Self {
+        Self {
+            kind: StationCredentialKind::Open,
+            _lifetime: core::marker::PhantomData,
+        }
+    }
+
+    pub const fn wpa2(passphrase: Passphrase) -> Self {
+        Self {
+            kind: StationCredentialKind::Wpa2(passphrase),
+            _lifetime: core::marker::PhantomData,
+        }
+    }
+
+    #[cfg(feature = "wifi-enterprise")]
+    pub const fn enterprise(credentials: &'a Wpa2EnterpriseCredentials<'a>) -> Self {
+        Self {
+            kind: StationCredentialKind::Enterprise(credentials),
+            _lifetime: core::marker::PhantomData,
+        }
+    }
+
+    pub const fn is_open(&self) -> bool {
+        matches!(self.kind, StationCredentialKind::Open)
+    }
+
+    pub const fn passphrase(&self) -> Option<&Passphrase> {
+        match &self.kind {
+            StationCredentialKind::Wpa2(passphrase) => Some(passphrase),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "wifi-enterprise")]
+    pub const fn enterprise_credentials(&self) -> Option<&Wpa2EnterpriseCredentials<'a>> {
+        match self.kind {
+            StationCredentialKind::Enterprise(credentials) => Some(credentials),
+            _ => None,
+        }
+    }
+}
+
+/// Authentication supported by an ESP8266 software access point.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ApCredential {
+    Open,
+    Wpa2(Passphrase),
+}
+
+#[cfg(target_arch = "xtensa")]
+const _: () = assert!(
+    core::mem::size_of::<StationCredential<'static>>() <= 72,
+    "station credentials exceed the ESP8266 stack budget"
+);
+
 /// Encoding used for WPA2 Enterprise certificate or key material.
+#[cfg(feature = "wifi-enterprise")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wpa2EnterpriseMaterialFormat {
     /// PEM text. The target backend requires these slices to include a trailing
@@ -586,7 +718,8 @@ pub enum Wpa2EnterpriseMaterialFormat {
 /// NUL-terminated; DER inputs are length-delimited. The target backend rejects
 /// malformed PEM/DER material rather than forwarding a broken configuration to
 /// the SDK.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "wifi-enterprise")]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Wpa2EnterpriseClientCertificate {
     client_cert: &'static [u8],
     private_key: &'static [u8],
@@ -595,6 +728,7 @@ pub struct Wpa2EnterpriseClientCertificate {
     private_key_format: Wpa2EnterpriseMaterialFormat,
 }
 
+#[cfg(feature = "wifi-enterprise")]
 impl Wpa2EnterpriseClientCertificate {
     /// Create client certificate material from NUL-terminated PEM buffers.
     pub const fn new(client_cert: &'static [u8], private_key: &'static [u8]) -> Self {
@@ -653,22 +787,24 @@ impl Wpa2EnterpriseClientCertificate {
 /// certificate validation or EAP-TLS-style client material. PEM certificate
 /// slices must include a trailing NUL byte for the ESP8266 RTOS SDK; DER slices
 /// should be provided through the DER-specific constructors.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Wpa2EnterpriseCredentials {
-    identity: EnterpriseIdentity,
-    username: EnterpriseUsername,
-    password: EnterprisePassword,
+#[cfg(feature = "wifi-enterprise")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Wpa2EnterpriseCredentials<'a> {
+    identity: EnterpriseIdentity<'a>,
+    username: EnterpriseUsername<'a>,
+    password: EnterprisePassword<'a>,
     ca_cert: Option<&'static [u8]>,
     ca_cert_format: Wpa2EnterpriseMaterialFormat,
     client_certificate: Option<Wpa2EnterpriseClientCertificate>,
     disable_time_check: bool,
 }
 
-impl Wpa2EnterpriseCredentials {
+#[cfg(feature = "wifi-enterprise")]
+impl<'a> Wpa2EnterpriseCredentials<'a> {
     pub const fn new(
-        identity: EnterpriseIdentity,
-        username: EnterpriseUsername,
-        password: EnterprisePassword,
+        identity: EnterpriseIdentity<'a>,
+        username: EnterpriseUsername<'a>,
+        password: EnterprisePassword<'a>,
     ) -> Self {
         Self {
             identity,
@@ -708,16 +844,16 @@ impl Wpa2EnterpriseCredentials {
         self
     }
 
-    pub fn identity(&self) -> &EnterpriseIdentity {
-        &self.identity
+    pub const fn identity(&self) -> EnterpriseIdentity<'a> {
+        self.identity
     }
 
-    pub fn username(&self) -> &EnterpriseUsername {
-        &self.username
+    pub const fn username(&self) -> EnterpriseUsername<'a> {
+        self.username
     }
 
-    pub fn password(&self) -> &EnterprisePassword {
-        &self.password
+    pub const fn password(&self) -> EnterprisePassword<'a> {
+        self.password
     }
 
     pub const fn ca_cert(&self) -> Option<&'static [u8]> {
@@ -747,17 +883,17 @@ pub enum StationPowerSave {
     MaxModem,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClientConfig {
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClientConfig<'a> {
     ssid: Ssid,
-    credential: Credential,
+    credential: StationCredential<'a>,
     bssid: Option<[u8; 6]>,
     channel: Option<Channel>,
     power_save: StationPowerSave,
 }
 
-impl ClientConfig {
-    pub fn new(ssid: Ssid, credential: Credential) -> Self {
+impl<'a> ClientConfig<'a> {
+    pub fn new(ssid: Ssid, credential: StationCredential<'a>) -> Self {
         Self {
             ssid,
             credential,
@@ -786,7 +922,7 @@ impl ClientConfig {
         &self.ssid
     }
 
-    pub fn credential(&self) -> &Credential {
+    pub const fn credential(&self) -> &StationCredential<'a> {
         &self.credential
     }
 
@@ -803,11 +939,11 @@ impl ClientConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AccessPointConfig {
     ssid: Ssid,
     channel: Channel,
-    credential: Credential,
+    credential: ApCredential,
     max_clients: ApClientLimit,
     beacon_interval: BeaconInterval,
 }
@@ -821,7 +957,7 @@ impl AccessPointConfig {
         AccessPointConfigBuilder {
             ssid,
             channel,
-            credential: Credential::Open,
+            credential: ApCredential::Open,
             max_clients: ApClientLimit::DEFAULT,
             beacon_interval: BeaconInterval::DEFAULT,
         }
@@ -835,7 +971,7 @@ impl AccessPointConfig {
         self.channel
     }
 
-    pub fn credential(&self) -> &Credential {
+    pub const fn credential(&self) -> &ApCredential {
         &self.credential
     }
 
@@ -848,17 +984,17 @@ impl AccessPointConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AccessPointConfigBuilder {
     ssid: Ssid,
     channel: Channel,
-    credential: Credential,
+    credential: ApCredential,
     max_clients: ApClientLimit,
     beacon_interval: BeaconInterval,
 }
 
 impl AccessPointConfigBuilder {
-    pub fn credential(mut self, credential: Credential) -> Self {
+    pub fn credential(mut self, credential: ApCredential) -> Self {
         self.credential = credential;
         self
     }
@@ -884,18 +1020,18 @@ impl AccessPointConfigBuilder {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MixedConfig {
-    client: ClientConfig,
+#[derive(Clone, PartialEq, Eq)]
+pub struct MixedConfig<'a> {
+    client: ClientConfig<'a>,
     ap: AccessPointConfig,
 }
 
-impl MixedConfig {
-    pub fn new(client: ClientConfig, ap: AccessPointConfig) -> Self {
+impl<'a> MixedConfig<'a> {
+    pub fn new(client: ClientConfig<'a>, ap: AccessPointConfig) -> Self {
         Self { client, ap }
     }
 
-    pub fn client(&self) -> &ClientConfig {
+    pub const fn client(&self) -> &ClientConfig<'a> {
         &self.client
     }
 
@@ -950,15 +1086,18 @@ impl InitConfig {
     }
 }
 
+#[cfg(feature = "wifi-smartconfig")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SmartConfigTimeout(u8);
 
+#[cfg(feature = "wifi-smartconfig")]
 impl SmartConfigTimeout {
     pub const fn seconds(self) -> u8 {
         self.0
     }
 }
 
+#[cfg(feature = "wifi-smartconfig")]
 impl TryFrom<u8> for SmartConfigTimeout {
     type Error = ConfigError;
 
@@ -970,9 +1109,18 @@ impl TryFrom<u8> for SmartConfigTimeout {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "wifi-wps")]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct WpsPin([u8; 8]);
 
+#[cfg(feature = "wifi-wps")]
+impl core::fmt::Debug for WpsPin {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("WpsPin(<redacted>)")
+    }
+}
+
+#[cfg(feature = "wifi-wps")]
 impl WpsPin {
     pub const fn as_bytes(&self) -> &[u8; 8] {
         &self.0
@@ -987,6 +1135,7 @@ impl WpsPin {
     }
 }
 
+#[cfg(feature = "wifi-wps")]
 impl TryFrom<&str> for WpsPin {
     type Error = ConfigError;
 
@@ -1002,6 +1151,7 @@ impl TryFrom<&str> for WpsPin {
     }
 }
 
+#[cfg(feature = "wifi-wps")]
 fn wps_pin_checksum_valid(pin: &[u8; 8]) -> bool {
     if pin == b"00000000" {
         return false;

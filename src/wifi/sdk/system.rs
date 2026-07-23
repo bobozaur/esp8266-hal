@@ -31,27 +31,6 @@ const CONFIG_FREERTOS_HZ: u32 = 100;
 // ---------------------------------------------------------------------------
 
 static mut BASE_MAC_ADDR: [u8; 6] = [0; 6];
-static mut READ_MAC_TRACE_COUNT: u8 = 0;
-
-#[inline(always)]
-fn hex_nibble(value: u8) -> u8 {
-    match value & 0x0f {
-        0..=9 => b'0' + (value & 0x0f),
-        nibble => b'a' + (nibble - 10),
-    }
-}
-
-#[inline(always)]
-fn trace_mac_bytes(call_idx: u8, mac_type: u32, mac: &[u8; 6]) {
-    crate::logger::debug_byte(b'~');
-    crate::logger::debug_byte(hex_nibble(call_idx));
-    crate::logger::debug_byte(hex_nibble(mac_type as u8));
-    for &byte in mac {
-        crate::logger::debug_byte(hex_nibble(byte >> 4));
-        crate::logger::debug_byte(hex_nibble(byte));
-    }
-    crate::logger::debug_byte(b'~');
-}
 
 /// CPU clock ticks per microsecond. Used by `esp_timer_get_time` and
 /// `ets_delay_us` (ROM functions). Updated by `os_update_cpu_frequency`.
@@ -223,12 +202,6 @@ pub unsafe extern "C" fn esp_read_mac(mac: *mut u8, mac_type: u32) -> i32 {
                 esp_derive_mac(mac, efuse_mac.as_ptr());
             }
             _ => {}
-        }
-
-        if READ_MAC_TRACE_COUNT < 3 {
-            let trace_idx = READ_MAC_TRACE_COUNT;
-            READ_MAC_TRACE_COUNT += 1;
-            trace_mac_bytes(trace_idx, mac_type, &efuse_mac);
         }
 
         sys::ESP_OK

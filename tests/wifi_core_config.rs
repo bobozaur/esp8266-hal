@@ -1,10 +1,16 @@
+#[cfg(feature = "wifi-smartconfig")]
+use esp8266_hal::wifi_core::SmartConfigTimeout;
 use esp8266_hal::wifi_core::{
     AccessPointConfig, ApClientLimit, BeaconInterval, Channel, ClientConfig, ConfigError,
-    Credential, EnterpriseIdentity, EnterprisePassword, EnterpriseUsername, InitConfig, Passphrase,
-    SmartConfigTimeout, Ssid, StationPowerSave, Wpa2EnterpriseClientCertificate,
-    Wpa2EnterpriseCredentials, Wpa2EnterpriseMaterialFormat, WpsConfig, WpsFactoryInfo, WpsMode,
-    WpsPin,
+    InitConfig, Passphrase, Ssid, StationCredential, StationPowerSave,
 };
+#[cfg(feature = "wifi-enterprise")]
+use esp8266_hal::wifi_core::{
+    EnterpriseIdentity, EnterprisePassword, EnterpriseUsername, Wpa2EnterpriseClientCertificate,
+    Wpa2EnterpriseCredentials, Wpa2EnterpriseMaterialFormat,
+};
+#[cfg(feature = "wifi-wps")]
+use esp8266_hal::wifi_core::{WpsConfig, WpsFactoryInfo, WpsMode, WpsPin};
 
 #[test]
 fn ssid_rejects_more_than_32_bytes() {
@@ -15,12 +21,13 @@ fn ssid_rejects_more_than_32_bytes() {
 }
 
 #[test]
-fn ssid_accepts_exactly_32_bytes_and_binary_values() {
+fn ssid_accepts_exactly_32_bytes_and_rejects_unrepresentable_values() {
     let bytes = b"12345678901234567890123456789012";
     assert_eq!(Ssid::from_bytes(bytes).unwrap().as_bytes(), bytes);
+    assert_eq!(Ssid::from_bytes(&[]), Err(ConfigError::SsidEmpty));
     assert_eq!(
-        Ssid::from_bytes(&[0xff, 0x00, b'a']).unwrap().as_bytes(),
-        &[0xff, 0x00, b'a']
+        Ssid::from_bytes(&[0xff, 0x00, b'a']),
+        Err(ConfigError::SsidContainsNul)
     );
 }
 
@@ -33,18 +40,21 @@ fn wpa2_passphrase_rejects_short_values() {
 }
 
 #[test]
-fn wpa2_passphrase_accepts_exactly_64_bytes_and_binary_values() {
-    let bytes = b"1234567890123456789012345678901212345678901234567890123456789012";
+fn wpa2_passphrase_accepts_text_or_hex_psk_and_rejects_invalid_bytes() {
+    let bytes = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     assert_eq!(Passphrase::wpa2_bytes(bytes).unwrap().as_bytes(), bytes);
-    assert_eq!(
-        Passphrase::wpa2_bytes(&[0xff, b'1', b'2', b'3', b'4', b'5', b'6', b'7'])
-            .unwrap()
-            .as_bytes(),
-        &[0xff, b'1', b'2', b'3', b'4', b'5', b'6', b'7']
-    );
+    assert!(matches!(
+        Passphrase::wpa2_bytes(&[0xff, b'1', b'2', b'3', b'4', b'5', b'6', b'7']),
+        Err(ConfigError::PassphraseInvalidCharacter)
+    ));
+    assert!(matches!(
+        Passphrase::wpa2_bytes(&[b'z'; 64]),
+        Err(ConfigError::PskInvalidHex)
+    ));
 }
 
 #[test]
+#[cfg(feature = "wifi-enterprise")]
 fn enterprise_credentials_validate_documented_identity_limits() {
     assert_eq!(
         EnterpriseIdentity::new(""),
@@ -64,6 +74,7 @@ fn enterprise_credentials_validate_documented_identity_limits() {
 }
 
 #[test]
+#[cfg(feature = "wifi-enterprise")]
 fn enterprise_credentials_validate_username_and_password_limits() {
     assert_eq!(
         EnterpriseUsername::new(""),
@@ -81,14 +92,14 @@ fn enterprise_credentials_validate_username_and_password_limits() {
         EnterpriseUsername::MAX_LEN
     );
 
-    assert_eq!(
+    assert!(matches!(
         EnterprisePassword::new(""),
         Err(ConfigError::EnterprisePasswordEmpty)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         EnterprisePassword::from_bytes(&[b'p'; EnterprisePassword::MAX_LEN + 1]),
         Err(ConfigError::EnterprisePasswordTooLong)
-    );
+    ));
     assert_eq!(
         EnterprisePassword::from_bytes(&[b'p'; EnterprisePassword::MAX_LEN])
             .unwrap()
@@ -99,6 +110,7 @@ fn enterprise_credentials_validate_username_and_password_limits() {
 }
 
 #[test]
+#[cfg(feature = "wifi-enterprise")]
 fn enterprise_credentials_preserve_username_password_and_defaults() {
     let credentials = Wpa2EnterpriseCredentials::new(
         EnterpriseIdentity::new("anonymous").unwrap(),
@@ -114,16 +126,21 @@ fn enterprise_credentials_preserve_username_password_and_defaults() {
 
     let config = ClientConfig::new(
         Ssid::try_from("enterprise-net").unwrap(),
-        Credential::Wpa2Enterprise(credentials),
+        StationCredential::enterprise(&credentials),
     );
-    assert!(matches!(
-        config.credential(),
-        Credential::Wpa2Enterprise(credentials)
-            if credentials.username().as_bytes() == b"esp8266-user"
-    ));
+    assert_eq!(
+        config
+            .credential()
+            .enterprise_credentials()
+            .unwrap()
+            .username()
+            .as_bytes(),
+        b"esp8266-user"
+    );
 }
 
 #[test]
+#[cfg(feature = "wifi-enterprise")]
 fn enterprise_credentials_preserve_optional_certificate_material() {
     let certificate = Wpa2EnterpriseClientCertificate::new(b"client-cert\0", b"client-key\0")
         .with_private_key_password(b"key-pass\0");
@@ -155,6 +172,7 @@ fn enterprise_credentials_preserve_optional_certificate_material() {
 }
 
 #[test]
+#[cfg(feature = "wifi-enterprise")]
 fn enterprise_credentials_preserve_der_certificate_material() {
     let certificate =
         Wpa2EnterpriseClientCertificate::new_der(b"\x30\x03client-cert", b"\x30\x03client-key");
@@ -195,15 +213,18 @@ fn channel_rejects_zero() {
 #[test]
 fn open_client_config_preserves_ssid() {
     let ssid = Ssid::try_from("core-net").unwrap();
-    let client = ClientConfig::new(ssid.clone(), Credential::Open);
+    let client = ClientConfig::new(ssid.clone(), StationCredential::open());
     assert_eq!(client.ssid(), &ssid);
     assert_eq!(client.power_save(), StationPowerSave::None);
 }
 
 #[test]
 fn client_config_preserves_station_power_save() {
-    let client = ClientConfig::new(Ssid::try_from("core-net").unwrap(), Credential::Open)
-        .with_power_save(StationPowerSave::MinModem);
+    let client = ClientConfig::new(
+        Ssid::try_from("core-net").unwrap(),
+        StationCredential::open(),
+    )
+    .with_power_save(StationPowerSave::MinModem);
     assert_eq!(client.power_save(), StationPowerSave::MinModem);
 }
 
@@ -222,11 +243,11 @@ fn ap_config_builder_preserves_validated_limits() {
         Ssid::try_from("core-ap").unwrap(),
         Channel::try_from(11u8).unwrap(),
     )
-    .max_clients(ApClientLimit::try_from(7u8).unwrap())
+    .max_clients(ApClientLimit::try_from(3u8).unwrap())
     .beacon_interval(BeaconInterval::try_from(250u16).unwrap())
     .build();
 
-    assert_eq!(ap.max_clients().get(), 7);
+    assert_eq!(ap.max_clients().get(), 3);
     assert_eq!(ap.beacon_interval().millis(), 250);
 }
 
@@ -237,9 +258,10 @@ fn ap_client_limit_rejects_values_outside_sdk_range() {
         Err(ConfigError::InvalidApClientLimit(0))
     );
     assert_eq!(
-        ApClientLimit::try_from(11u8),
-        Err(ConfigError::InvalidApClientLimit(11))
+        ApClientLimit::try_from(5u8),
+        Err(ConfigError::InvalidApClientLimit(5))
     );
+    assert_eq!(ApClientLimit::try_from(4u8).unwrap().get(), 4);
 }
 
 #[test]
@@ -255,6 +277,7 @@ fn beacon_interval_rejects_values_outside_sdk_range() {
 }
 
 #[test]
+#[cfg(feature = "wifi-smartconfig")]
 fn smartconfig_timeout_rejects_values_below_sdk_range() {
     assert_eq!(
         SmartConfigTimeout::try_from(14u8),
@@ -264,6 +287,7 @@ fn smartconfig_timeout_rejects_values_below_sdk_range() {
 }
 
 #[test]
+#[cfg(feature = "wifi-wps")]
 fn wps_pin_requires_exactly_eight_ascii_digits_with_valid_checksum() {
     assert_eq!(WpsPin::try_from("1234567"), Err(ConfigError::InvalidWpsPin));
     assert_eq!(
@@ -285,27 +309,38 @@ fn wps_pin_requires_exactly_eight_ascii_digits_with_valid_checksum() {
 }
 
 #[test]
-fn wps_config_preserves_pin_target_ssid_and_truncates_factory_info() {
+#[cfg(feature = "wifi-wps")]
+fn wps_config_borrows_validated_factory_info() {
     let pin = WpsPin::try_from("12345670").unwrap();
     let target = Ssid::try_from("esp8266-hal-wps").unwrap();
-    let factory = WpsFactoryInfo::empty()
-        .manufacturer(&[b'm'; 65])
-        .model_number(&[b'n'; 33])
-        .model_name(&[b'o'; 33])
-        .device_name(&[b'd'; 33]);
+    let manufacturer = [b'm'; 64];
+    let model_number = [b'n'; 32];
+    let model_name = [b'o'; 32];
+    let device_name = [b'd'; 32];
+    let factory =
+        WpsFactoryInfo::new(&manufacturer, &model_number, &model_name, &device_name).unwrap();
+
+    assert_eq!(
+        WpsFactoryInfo::new(&[b'm'; 65], b"model", b"name", b"device"),
+        Err(ConfigError::WpsManufacturerTooLong)
+    );
+    assert_eq!(
+        WpsFactoryInfo::new(b"maker\0suffix", b"model", b"name", b"device"),
+        Err(ConfigError::WpsFactoryInfoContainsNul)
+    );
 
     let config = WpsConfig::pbc()
         .with_fixed_pin(pin)
-        .with_target_ssid(target.clone())
+        .with_target_ssid(&target)
         .with_factory_info(factory);
 
     assert_eq!(config.mode(), WpsMode::Pin);
     assert_eq!(config.pin_override(), Some(pin));
     assert_eq!(config.target_ssid().unwrap().as_bytes(), target.as_bytes());
-    assert_eq!(config.factory_info().manufacturer_bytes().len(), 64);
-    assert_eq!(config.factory_info().model_number_bytes().len(), 32);
-    assert_eq!(config.factory_info().model_name_bytes().len(), 32);
-    assert_eq!(config.factory_info().device_name_bytes().len(), 32);
+    assert_eq!(config.factory_info().manufacturer_bytes(), &manufacturer);
+    assert_eq!(config.factory_info().model_number_bytes(), &model_number);
+    assert_eq!(config.factory_info().model_name_bytes(), &model_name);
+    assert_eq!(config.factory_info().device_name_bytes(), &device_name);
 }
 
 #[test]

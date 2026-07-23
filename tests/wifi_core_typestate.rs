@@ -13,8 +13,7 @@ fn mode_capabilities_are_encoded_in_traits() {
 
 #[test]
 fn resources_report_declared_capacities() {
-    let resources = WifiResources::<8, 4, 2>::new();
+    let resources = WifiResources::<8, 4>::new();
     assert_eq!(resources.event_capacity(), 8);
     assert_eq!(resources.rx_capacity(), 4);
-    assert_eq!(resources.subscriber_capacity(), 2);
 }

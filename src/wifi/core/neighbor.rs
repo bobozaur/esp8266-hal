@@ -7,7 +7,7 @@
 //! after the triggering frame, so smoltcp may spend one poll resolving the
 //! neighbor before it receives the synthetic ARP reply.
 
-#[cfg(feature = "wifi")]
+#[cfg(feature = "wifi-embassy-net")]
 use super::WifiDataLink;
 
 pub(crate) const ETHERNET_ARP_IPV4_FRAME_LEN: usize = 42;
@@ -42,10 +42,12 @@ impl EthernetNeighborHints {
         }
     }
 
+    #[cfg(any(feature = "wifi-embassy-net", test))]
     pub(crate) fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
 
+    #[cfg(any(all(feature = "wifi", target_arch = "xtensa"), test))]
     pub(crate) fn take_pending(&mut self) -> Option<EthernetNeighborHint> {
         self.pending.take()
     }
@@ -60,21 +62,25 @@ impl EthernetNeighborHints {
         }
     }
 
-    #[cfg(feature = "wifi")]
+    #[cfg(feature = "wifi-embassy-net")]
+    #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
     pub(crate) fn receive_into<L: WifiDataLink>(
         &mut self,
         link: &mut L,
         buf: &mut [u8],
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>, super::DriverError> {
         if let Some(hint) = self.pending.take() {
             if let Some(len) = hint.emit_arp_reply(buf) {
-                return Some(len);
+                return Ok(Some(len));
             }
+            return Err(super::DriverError::PacketOverflow);
         }
 
-        let len = link.receive(buf)?;
+        let Some(len) = link.receive(buf)? else {
+            return Ok(None);
+        };
         self.observe(&buf[..len]);
-        Some(len)
+        Ok(Some(len))
     }
 }
 

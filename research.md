@@ -21,7 +21,9 @@
 - App capture baud: `115200`
 - SDK tree used for source-of-truth diffs: `/tmp/ESP8266_RTOS_SDK`
 - SDK commit in use: `da7ce37be424d71874241ca9f17cf8da0e3cdb70`
-- Tooling note: run `source .envrc` before `cargo`, `xtensa-lx106-elf-*`, or SDK-linked tooling.
+- Tooling note: let `direnv` load `.envrc` or put `xtensa-lx106-elf-gcc` on
+  `PATH` explicitly. Normal builds no longer need an SDK checkout, `IDF_PATH`,
+  `LIBCLANG_PATH`, or bindgen.
 
 ## Build And Capture Rules
 
@@ -700,7 +702,7 @@
 - Added a typed AP handle in `wifi_core`:
   - `WifiDriver<Started<ApMode>>::ap()` and `WifiDriver<Started<MixedMode>>::ap()` are available only for AP-capable modes.
   - `ApHandle::connected_stations()` returns bounded caller-owned `heapless::Vec<ApStationInfo, N>`.
-  - `ApHandle::deauth_station(aid)` and `ApHandle::deauth_all()` route deauth through the backend rather than legacy global free functions.
+  - `ApHandle::deauth_all()` routes deauthentication through the backend rather than a legacy global free function. There is no targeted station method because the SDK station-list record does not expose the association ID required by `esp_wifi_deauth_sta(...)`.
 - Added target backend support for AP station management:
   - `esp_wifi_ap_get_sta_list(...)` is converted into `ApStationInfo` in safe Rust-owned records.
   - `esp_wifi_deauth_sta(...)` is exposed through the typed AP handle.
@@ -723,14 +725,14 @@
     - UART includes `ap started`, `wifi connected`, `ap stations:0`, DHCP address `192.168.0.116/24`, and `ap-sta-ok`.
 - Remaining AP validation gap:
   - no automated downstream client joined the ESP8266 soft-AP in this pass;
-  - station enumeration and deauth are typed and callable, but non-zero station-list and targeted deauth still need a companion client-device scenario.
+  - station enumeration and all-station deauthentication are typed and callable, but a non-zero station list still needs a companion client-device scenario.
 
 ## 2026-04-23 Full Functionality Pass: Promiscuous Capture Session
 
 - Added a typed promiscuous capture surface in `wifi_core`:
   - `PromiscuousFilter` is a Rust-owned packet-type filter newtype with `MANAGEMENT`, `CONTROL`, `DATA`, `MISC`, and `all()` constructors.
   - `WifiDriver<Started<_>>::promiscuous()` borrows the running driver and returns an owned `PromiscuousSession`.
-  - `PromiscuousSession::start(filter)`, `set_channel(channel)`, `receive()`, `queued()`, `drops()`, and `stop()` expose the capture lifecycle without global user callbacks.
+  - `PromiscuousSession::start(filter)`, `set_channel(channel)`, `receive()`, and `stop()` expose the capture lifecycle without global user callbacks or diagnostic counters.
   - `Drop` disables promiscuous mode if the caller does not stop explicitly.
 - Widened `WifiDriver`, `StaHandle`, `ApHandle`, `StaLink`, `WifiDevice`, `WifiStack`, `wifi::embassy_net::Runner`, and `Esp8266TargetBackend` so caller-owned feature queues (`ESP_NOW_*`, `PROMISCUOUS_RX`) remain part of the type instead of being erased by STA/network adapters.
 - Target backend changes:
@@ -5220,3 +5222,83 @@
   - post-matrix router verification showed `ssid=esp8266-router-eap`, `encryption=wpa2`, channel `11`, `key_mgmt=WPA-EAP`, `wps_state=disabled`, and no `/tmp/esp8266-hal-wireless-wps-*` or `/tmp/esp8266-hal-wireless-smartconfig-*` backups.
   - final static validation after the matrix passed: `cargo fmt --all -- --check`, `git diff --check`, `CARGO_INCREMENTAL=0 cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-core --lib --tests -q`, `cargo test -p xtask --target x86_64-unknown-linux-gnu -q`, and `source .envrc && CARGO_INCREMENTAL=0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core --no-default-features --features interrupt,rt,wifi,wifi-sta,wifi-ap,wifi-embassy-net,wifi-wps,wifi-smartconfig,wifi-promiscuous,wifi-esp-now,wifi-enterprise -q` with the existing warning set;
   - scenario registry check after the final matrix showed no `manual`, `rig-blocked`, or `pending` Wi-Fi hardware scenarios in the filtered output; `eap_client_cert` is `implemented` but remains opt-in for default matrix runs because it requires the EAP-TLS fixture.
+
+### 2026-07-22 Full Rust Wi-Fi Refactor Hardware Checkpoint
+
+- Live fixture:
+  - `/dev/ttyUSB0` was ESP8266EX MAC `f4:cf:a2:d9:ad:6b`;
+  - `/dev/ttyUSB1` was ESP8266EX MAC `48:3f:da:68:e3:04`;
+  - both FTDI adapters reported the same cloned serial ID, so the stable `/dev/serial/by-id` link was not unique;
+  - the prior ESP32 companion was not attached and the OpenWrt fixture was unreachable with `enp3s0` down, so this checkpoint does not claim fresh SmartConfig, WPS, or WPA2 Enterprise evidence.
+- Harness correction discovered by the first live run:
+  - target builds no longer source `.envrc` as ordinary Bash, where direnv-only helpers failed;
+  - the child target build removes an inherited `RUSTUP_TOOLCHAIN` override and uses a non-login shell, preserving the explicit linker `PATH` while selecting the repository-pinned `esp-1.80.0` toolchain;
+  - focused `ap_start` runs passed on both boards at `target/wifi-hw-artifacts-20260722-refactor/ap_start-1784738759` and `ap_start-1784738912` with `wifi init ok`, `ap started`, and `ap-start-ok`.
+- Two-ESP8266 AP/station and Rust DHCP evidence:
+  - `target/wifi-hw-artifacts-20260722-refactor/two-esp8266-ap-sta` used the `48:3f:...` board as the channel-6 open AP and the `f4:cf:...` board as the station; station UART reached `wifi core associated` and `wifi core connected`;
+  - `target/wifi-hw-artifacts-20260722-refactor/two-esp8266-ap-dhcp` exercised the Rust-owned AP RX/netif/DHCP service; AP UART recorded `ap-dhcp-offer`, `ap-dhcp-ack`, and `ap-dhcp-ok`, while the station obtained `192.168.4.2/24`.
+- ESP-NOW evidence and correction:
+  - unencrypted two-board unicast at `target/wifi-hw-artifacts-20260722-refactor/two-esp8266-esp-now-unicast` reached both `esp-now send-status-ok`/`esp-now-tx-ok` and receiver-side `esp-now-rx-ok` for the expected `f4:cf:...` source and 19-byte payload;
+  - the first encrypted run produced TX success callbacks but no receiver delivery because the examples configured matching LMKs without establishing a shared PMK;
+  - both encrypted examples now set the same explicit PMK before adding encrypted peers;
+  - the corrected run at `target/wifi-hw-artifacts-20260722-refactor/two-esp8266-esp-now-encrypted-pmk` reached TX success and independent RX delivery with the expected source and payload length.
+- Remaining focused radio/data-path evidence:
+  - active scan at `target/wifi-hw-artifacts-20260722-refactor/scan` found two nearby APs and reached `scan-ok`;
+  - `target/wifi-hw-artifacts-20260722-refactor/tcp-server-home-ap` associated, obtained `192.168.0.116/24`, listened on TCP 1234, echoed `ping` exactly, and logged `client connected`/`client closed`;
+  - structured promiscuous API run `promisc_control_filter_api-1784740496` applied and cleared the control-subtype filter, disabled promiscuous mode cleanly, and reached `promisc-control-api-ok`.
+
+### 2026-07-22 Rust Interrupt/NMI And Final Validation Checkpoint
+
+- The legacy `nmi_handler.S`, SDK Xtensa vector archive, and vendored `libgcc.a`
+  are absent. Rust now provides the NMI entry, interrupt-mask/tick helpers, and
+  the only missing compiler ABI helper (`__bswapsi2`) with local Xtensa inline
+  assembly.
+- Fresh hardware validation after that final interrupt/NMI replacement passed:
+  - `target/wifi-hw-artifacts-20260722-runtime-final/ap_start-1784744437`
+    on `/dev/ttyUSB0` and `ap_start-1784744488` on `/dev/ttyUSB1` both reached
+    `wifi init ok`, `ap started`, and `ap-start-ok`;
+  - `target/wifi-hw-artifacts-20260722-runtime-final/two-esp8266-ap-dhcp`
+    exercised actual AP/STA traffic and the Rust DHCP server: the AP recorded
+    offers plus `ap-dhcp-ack`/`ap-dhcp-ok`, and the station obtained
+    `192.168.4.2/24`.
+- At this intermediate checkpoint, host validation passed 117 HAL tests with all optional Wi-Fi features,
+  2 ABI-layout tests, and 75 hardware-harness tests. Strict Clippy lanes passed
+  for the HAL, sys crate, proc macros, and harness.
+- All 15 release-link CI configurations passed on Xtensa, including every
+  focused feature and an all-optional build. GNU `size` reported:
+  - lean `tcp_server`: `text=396742 data=37457 bss=18336 dec=452535`;
+  - all optional features: `text=532122 data=53317 bss=19596 dec=605035`.
+- The lean ELF contains Rust-defined `__naked_nmi_exception` and `__bswapsi2`
+  plus the correctly sized interrupt/NMI stacks. Optional subsystem entry
+  points observed in the all-optional ELF are absent from the lean ELF.
+- `esp8266-wifi-sys` packages and verifies independently with 51 files;
+  its tarball includes the vendored archives, linker scripts, patched-source
+  provenance, complete license notices, checked-in bindings, and checksums.
+
+### 2026-07-23 Post-Review Final Validation
+
+- The Rust and adversarial-review passes converged with no remaining material findings. The final public surface has no debug feature, diagnostic counter API, mutation hook, or compatibility shim.
+- The final review corrections include:
+  - AP deauthentication exposes only the operation the SDK data can identify correctly: `deauth_all()`;
+  - ESP-NOW transmit completion stores only the typed send status, rejects overlapping sends, and waits for both callbacks to unregister before deinitializing;
+  - promiscuous control frames use the SDK PHY length, miscellaneous frames remain metadata-only, and captured frames report original length and truncation explicitly;
+  - target critical sections restore the processor status with `rsync`, while the PAC retains its safe single-owner `Peripherals::take()` behavior in non-Wi-Fi builds;
+  - the unused persistent NMI diagnostic counter and the promiscuous example's hidden API-only validation image were removed; control-filter state transitions remain covered by host tests;
+  - vendored SDK reproduction is fail-closed and clears legacy instrumentation environment variables before rebuilding the three native archives.
+- Final static validation passed:
+  - 126 host HAL tests with every optional Wi-Fi subsystem enabled, 2 sys ABI-layout tests, and 75 `xtask` tests;
+  - the CI Clippy lanes for the HAL core/maximal feature sets, sys crate, and hardware harness, with only the three explicitly scoped legacy non-Wi-Fi HAL allowances, plus warning-free rustdoc and isolated feature lanes;
+  - all 15 Xtensa release-link configurations, a no-RT target library check, the non-Wi-Fi `blinky` link, and a locked downstream-crate fixture that links without repository-local linker flags;
+  - vendored checksums, archive provenance checks, package allowlists, and independent packaging of the HAL, sys crate, PAC, and proc-macro crate.
+- Representative final image sizes are:
+  - core connect: `text=330486 data=23785 bss=14736 dec=369007`;
+  - Embassy TCP server: `text=401062 data=37017 bss=18504 dec=456583`;
+  - every optional Wi-Fi subsystem: `text=536706 data=52409 bss=19772 dec=608887`;
+  - downstream fixture: `text=302846 data=24021 bss=14640 dec=341507`;
+  - non-Wi-Fi `blinky`: `text=9611 data=0 bss=12 dec=9623`.
+- Fresh final hardware evidence is under `target/wifi-hw-artifacts-20260723-post-review`:
+  - active scan on `/dev/ttyUSB0` found three access points and reached `scan-ok`;
+  - the two-board AP/DHCP run exercised the Rust AP network path, recorded DHCP offers and an acknowledgement, and assigned the station `192.168.4.2/24`;
+  - both unencrypted and encrypted unicast ESP-NOW runs produced successful TX callbacks and delivered the expected 19-byte payload on the peer;
+  - the exact post-cleanup image at `two-esp8266-promisc-management-final` captured a 112-byte management frame on channel 6 from the second ESP8266 AP and reached `promisc-management-ok`.
+- The OpenWrt/RADIUS/phone fixtures were unavailable for this final rewrite, so this checkpoint does not claim fresh WPS, WPA2-Enterprise, SmartConfig, or deterministic control-frame injection. Their final APIs and state machines are covered by host tests and successful Xtensa links; the older hardware evidence above predates this refactor and is not treated as a substitute for a fresh run.

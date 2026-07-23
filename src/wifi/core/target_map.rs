@@ -1,105 +1,183 @@
 #[cfg(feature = "wifi-smartconfig")]
 use super::SmartConfigType;
+#[cfg(feature = "wifi-esp-now")]
+use super::{feature::EspNowInterface, EspNowPeerConfig};
 use super::{
-    AccessPointConfig, Channel, ClientConfig, Credential, EspNowInterface, EspNowPeerConfig,
-    InitConfig, PromiscuousControlFilter, PromiscuousFilter, PromiscuousPacketType, RawMode,
-    ScanOptions, ScanType, StationPowerSave, WpsConfig, WpsMode,
+    AccessPointConfig, ApCredential, Channel, ClientConfig, InitConfig, RawMode, ScanOptions,
+    ScanType, StationPowerSave,
 };
+#[cfg(feature = "wifi-promiscuous")]
+use super::{PromiscuousControlFilter, PromiscuousFilter, PromiscuousPacketType};
+#[cfg(feature = "wifi-wps")]
+use super::{WpsConfig, WpsMode};
 
-#[inline(always)]
-pub(super) fn map_init_config(config: &InitConfig) -> crate::wifi::controller::WifiInitConfig {
-    let mut init = crate::wifi::controller::WifiInitConfig::default();
-    init.rx_buf_num = config.rx_buf_num();
-    init.rx_pkt_num = config.rx_pkt_num();
-    init.tx_buf_num = config.tx_buf_num();
-    init.left_continuous_rx_buf_num = config.rx_buf_num().min(init.left_continuous_rx_buf_num);
-    init
+extern "C" {
+    fn esp_event_send(event: *mut esp8266_wifi_sys::system_event_t) -> esp8266_wifi_sys::esp_err_t;
 }
 
 #[inline(always)]
-pub(super) fn map_client_config(config: &ClientConfig) -> crate::wifi::StaConfig {
-    let (password, auth_threshold) = match config.credential() {
-        Credential::Open => (&[][..], crate::wifi::AuthMode::Open),
-        Credential::Wpa2(passphrase) => (passphrase.as_bytes(), crate::wifi::AuthMode::Wpa2Psk),
-        Credential::Wpa2Enterprise(_) => (&[][..], crate::wifi::AuthMode::Open),
+pub(super) fn raw_init_config(config: &InitConfig) -> esp8266_wifi_sys::wifi_init_config_t {
+    // These values are the pinned SDK defaults. Only the three buffer counts
+    // are intentionally exposed: the remaining switches are coupled to the
+    // prebuilt Wi-Fi blobs and are not useful application-level knobs.
+    esp8266_wifi_sys::wifi_init_config_t {
+        event_handler: Some(esp_event_send),
+        osi_funcs: core::ptr::null_mut(),
+        qos_enable: 0,
+        ampdu_rx_enable: 0,
+        rx_ba_win: 0,
+        rx_ampdu_buf_num: 5,
+        rx_ampdu_buf_len: 256,
+        rx_max_single_pkt_len: 1_076,
+        rx_buf_len: 524,
+        amsdu_rx_enable: 0,
+        rx_buf_num: config.rx_buf_num(),
+        rx_pkt_num: config.rx_pkt_num(),
+        left_continuous_rx_buf_num: config.rx_buf_num().min(16),
+        tx_buf_num: config.tx_buf_num(),
+        // The Rust NVS shim supports PHY/MAC startup, but not the complete
+        // `nvs.net80211` persistence model expected by the blob.
+        nvs_enable: 0,
+        nano_enable: 0,
+        wpa3_sae_enable: 1,
+        magic: esp8266_wifi_sys::WIFI_INIT_CONFIG_MAGIC,
+    }
+}
+
+#[inline(always)]
+pub(super) fn raw_client_config(config: &ClientConfig<'_>) -> esp8266_wifi_sys::wifi_sta_config_t {
+    let (password, auth_threshold) = if let Some(passphrase) = config.credential().passphrase() {
+        (passphrase.as_bytes(), esp8266_wifi_sys::WIFI_AUTH_WPA2_PSK)
+    } else {
+        (&[][..], esp8266_wifi_sys::WIFI_AUTH_OPEN)
     };
 
-    let mut raw = crate::wifi::StaConfig::from_validated_bytes(
-        config.ssid().as_bytes(),
-        password,
-        auth_threshold,
-    );
-    raw.bssid = config.bssid();
-    raw.channel = config.channel().map_or(0, Channel::get);
+    let mut raw: esp8266_wifi_sys::wifi_sta_config_t = unsafe { core::mem::zeroed() };
+    raw.ssid[..config.ssid().as_bytes().len()].copy_from_slice(config.ssid().as_bytes());
+    raw.password[..password.len()].copy_from_slice(password);
     raw.scan_method = if config.channel().is_some() {
-        crate::wifi::config::ScanMethod::Fast
+        esp8266_wifi_sys::WIFI_FAST_SCAN
     } else {
-        crate::wifi::config::ScanMethod::AllChannel
+        esp8266_wifi_sys::WIFI_ALL_CHANNEL_SCAN
     };
+    raw.channel = config.channel().map_or(0, Channel::get);
+    raw.sort_method = esp8266_wifi_sys::WIFI_CONNECT_AP_BY_SIGNAL;
+    raw.threshold = esp8266_wifi_sys::wifi_fast_scan_threshold_t {
+        rssi: -127,
+        authmode: auth_threshold,
+    };
+    raw.pmf_cfg = esp8266_wifi_sys::wifi_pmf_config_t {
+        capable: false,
+        required: false,
+    };
+    if let Some(bssid) = config.bssid() {
+        raw.bssid_set = true;
+        raw.bssid = bssid;
+    }
     raw
 }
 
 #[inline(always)]
-pub(super) const fn map_station_power_save(power_save: StationPowerSave) -> crate::wifi::PowerSave {
+pub(super) const fn raw_station_power_save(
+    power_save: StationPowerSave,
+) -> esp8266_wifi_sys::wifi_ps_type_t {
     match power_save {
-        StationPowerSave::None => crate::wifi::PowerSave::None,
-        StationPowerSave::MinModem => crate::wifi::PowerSave::MinModem,
-        StationPowerSave::MaxModem => crate::wifi::PowerSave::MaxModem,
+        StationPowerSave::None => esp8266_wifi_sys::WIFI_PS_NONE,
+        StationPowerSave::MinModem => esp8266_wifi_sys::WIFI_PS_MIN_MODEM,
+        StationPowerSave::MaxModem => esp8266_wifi_sys::WIFI_PS_MAX_MODEM,
     }
 }
 
 #[inline(always)]
-pub(super) fn map_ap_config(config: &AccessPointConfig) -> crate::wifi::ApConfig {
+pub(super) fn raw_ap_config(config: &AccessPointConfig) -> esp8266_wifi_sys::wifi_ap_config_t {
     let (password, auth_mode) = match config.credential() {
-        Credential::Open => (&[][..], crate::wifi::AuthMode::Open),
-        Credential::Wpa2(passphrase) => (passphrase.as_bytes(), crate::wifi::AuthMode::Wpa2Psk),
-        Credential::Wpa2Enterprise(_) => (&[][..], crate::wifi::AuthMode::Open),
+        ApCredential::Open => (&[][..], esp8266_wifi_sys::WIFI_AUTH_OPEN),
+        ApCredential::Wpa2(passphrase) => {
+            (passphrase.as_bytes(), esp8266_wifi_sys::WIFI_AUTH_WPA2_PSK)
+        }
     };
 
-    crate::wifi::ApConfig::from_validated_bytes(
-        config.ssid().as_bytes(),
-        password,
-        config.channel().get(),
-        config.max_clients().get(),
-        config.beacon_interval().millis(),
-        auth_mode,
-    )
+    let mut raw: esp8266_wifi_sys::wifi_ap_config_t = unsafe { core::mem::zeroed() };
+    raw.ssid[..config.ssid().as_bytes().len()].copy_from_slice(config.ssid().as_bytes());
+    raw.ssid_len = config.ssid().as_bytes().len() as u8;
+    raw.password[..password.len()].copy_from_slice(password);
+    raw.channel = config.channel().get();
+    raw.authmode = auth_mode;
+    raw.max_connection = config.max_clients().get();
+    raw.beacon_interval = config.beacon_interval().millis();
+    raw
 }
 
 #[inline(always)]
-pub(super) fn map_mode(mode: RawMode) -> crate::wifi::WifiMode {
+pub(super) const fn raw_mode(mode: RawMode) -> esp8266_wifi_sys::wifi_mode_t {
     match mode {
-        RawMode::Sta => crate::wifi::WifiMode::Sta,
-        RawMode::Ap => crate::wifi::WifiMode::Ap,
-        RawMode::ApSta => crate::wifi::WifiMode::ApSta,
+        RawMode::Sta => esp8266_wifi_sys::WIFI_MODE_STA,
+        RawMode::Ap => esp8266_wifi_sys::WIFI_MODE_AP,
+        RawMode::ApSta => esp8266_wifi_sys::WIFI_MODE_APSTA,
     }
 }
 
-#[inline(always)]
-pub(super) fn map_scan_options(options: &ScanOptions) -> crate::wifi::scan::ScanConfig {
-    let mut ssid = None;
-    if let Some(target) = options.target_ssid() {
-        let mut bytes = heapless::Vec::new();
-        let _ = bytes.extend_from_slice(target.as_bytes());
-        ssid = Some(bytes);
+pub(super) struct RawScanConfigBuffers {
+    ssid: [u8; 33],
+    bssid: [u8; 6],
+    has_ssid: bool,
+    has_bssid: bool,
+}
+
+impl RawScanConfigBuffers {
+    pub(super) fn from_options(options: &ScanOptions) -> Self {
+        let mut buffers = Self {
+            ssid: [0; 33],
+            bssid: [0; 6],
+            has_ssid: false,
+            has_bssid: false,
+        };
+        if let Some(ssid) = options.target_ssid() {
+            buffers.ssid[..ssid.as_bytes().len()].copy_from_slice(ssid.as_bytes());
+            buffers.has_ssid = true;
+        }
+        if let Some(bssid) = options.target_bssid() {
+            buffers.bssid = bssid;
+            buffers.has_bssid = true;
+        }
+        buffers
     }
 
-    let timings = options.scan_timings();
-    crate::wifi::scan::ScanConfig {
-        ssid,
-        bssid: options.target_bssid(),
-        channel: options.target_channel().map_or(0, Channel::get),
-        show_hidden: options.shows_hidden(),
-        scan_type: match options.scan_kind() {
-            ScanType::Active => crate::wifi::scan::ScanType::Active,
-            ScanType::Passive => crate::wifi::scan::ScanType::Passive,
-        },
-        active_scan_min_ms: timings.active_min_ms(),
-        active_scan_max_ms: timings.active_max_ms(),
-        passive_scan_ms: timings.passive_ms(),
+    pub(super) fn as_raw(&mut self, options: &ScanOptions) -> esp8266_wifi_sys::wifi_scan_config_t {
+        let timings = options.scan_timings();
+        esp8266_wifi_sys::wifi_scan_config_t {
+            ssid: if self.has_ssid {
+                self.ssid.as_mut_ptr()
+            } else {
+                core::ptr::null_mut()
+            },
+            bssid: if self.has_bssid {
+                self.bssid.as_mut_ptr()
+            } else {
+                core::ptr::null_mut()
+            },
+            channel: options.target_channel().map_or(0, Channel::get),
+            show_hidden: options.shows_hidden(),
+            scan_type: match options.scan_kind() {
+                ScanType::Active => esp8266_wifi_sys::WIFI_SCAN_TYPE_ACTIVE,
+                ScanType::Passive => esp8266_wifi_sys::WIFI_SCAN_TYPE_PASSIVE,
+            },
+            scan_time: match options.scan_kind() {
+                ScanType::Active => esp8266_wifi_sys::wifi_scan_time_t {
+                    active: esp8266_wifi_sys::wifi_active_scan_time_t {
+                        min: timings.active_min_ms(),
+                        max: timings.active_max_ms(),
+                    },
+                },
+                ScanType::Passive => esp8266_wifi_sys::wifi_scan_time_t {
+                    passive: timings.passive_ms(),
+                },
+            },
+        }
     }
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 pub(super) fn map_promiscuous_filter(filter: PromiscuousFilter) -> u32 {
     if filter.is_empty() {
         return 0;
@@ -117,6 +195,7 @@ pub(super) fn map_promiscuous_filter(filter: PromiscuousFilter) -> u32 {
         | esp8266_wifi_sys::WIFI_PROMIS_FILTER_MASK_MISC
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 pub(super) fn map_promiscuous_control_filter(filter: PromiscuousControlFilter) -> u32 {
     if filter.contains_all(PromiscuousControlFilter::all()) {
         return esp8266_wifi_sys::WIFI_PROMIS_CTRL_FILTER_MASK_ALL;
@@ -153,6 +232,7 @@ pub(super) fn map_promiscuous_control_filter(filter: PromiscuousControlFilter) -
     mask
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 pub(super) fn map_promiscuous_packet_type(
     packet_type: esp8266_wifi_sys::wifi_promiscuous_pkt_type_t,
 ) -> PromiscuousPacketType {
@@ -164,6 +244,7 @@ pub(super) fn map_promiscuous_packet_type(
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 fn map_esp_now_interface(interface: EspNowInterface) -> esp8266_wifi_sys::wifi_interface_t {
     match interface {
         EspNowInterface::Station => esp8266_wifi_sys::WIFI_IF_STA,
@@ -171,6 +252,7 @@ fn map_esp_now_interface(interface: EspNowInterface) -> esp8266_wifi_sys::wifi_i
     }
 }
 
+#[cfg(feature = "wifi-wps")]
 fn map_wps_mode(mode: WpsMode) -> esp8266_wifi_sys::wps_type_t {
     match mode {
         WpsMode::Pbc => esp8266_wifi_sys::WPS_TYPE_PBC,
@@ -178,7 +260,8 @@ fn map_wps_mode(mode: WpsMode) -> esp8266_wifi_sys::wps_type_t {
     }
 }
 
-pub(super) fn raw_wps_config(config: &WpsConfig) -> esp8266_wifi_sys::esp_wps_config_t {
+#[cfg(feature = "wifi-wps")]
+pub(super) fn raw_wps_config(config: &WpsConfig<'_>) -> esp8266_wifi_sys::esp_wps_config_t {
     let mut raw: esp8266_wifi_sys::esp_wps_config_t = unsafe { core::mem::zeroed() };
     raw.wps_type = map_wps_mode(config.mode());
     copy_wps_field(
@@ -200,9 +283,9 @@ pub(super) fn raw_wps_config(config: &WpsConfig) -> esp8266_wifi_sys::esp_wps_co
     raw
 }
 
+#[cfg(feature = "wifi-wps")]
 fn copy_wps_field(destination: &mut [core::ffi::c_char], source: &[u8]) {
-    let len = source.len().min(destination.len().saturating_sub(1));
-    for (dst, src) in destination.iter_mut().zip(&source[..len]) {
+    for (dst, src) in destination.iter_mut().zip(source) {
         *dst = *src as core::ffi::c_char;
     }
 }
@@ -237,6 +320,7 @@ pub(super) fn nul_terminated_len(bytes: &[u8]) -> usize {
         .unwrap_or(bytes.len())
 }
 
+#[cfg(feature = "wifi-esp-now")]
 pub(super) fn raw_esp_now_peer(peer: &EspNowPeerConfig) -> esp8266_wifi_sys::esp_now_peer_info_t {
     let mut raw: esp8266_wifi_sys::esp_now_peer_info_t = unsafe { core::mem::zeroed() };
     raw.peer_addr = *peer.peer_addr();
@@ -253,6 +337,7 @@ pub(super) fn raw_esp_now_peer(peer: &EspNowPeerConfig) -> esp8266_wifi_sys::esp
 mod tests {
     use super::*;
 
+    #[cfg(feature = "wifi-promiscuous")]
     #[test]
     fn promiscuous_all_uses_only_documented_packet_bits() {
         assert_eq!(
@@ -264,6 +349,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "wifi-promiscuous")]
     #[test]
     fn promiscuous_control_requests_use_sdk_safe_broad_mask() {
         assert_eq!(
@@ -272,6 +358,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "wifi-promiscuous")]
     #[test]
     fn promiscuous_narrow_filters_use_rust_side_filtering() {
         let broad = map_promiscuous_filter(PromiscuousFilter::all());
@@ -281,6 +368,7 @@ mod tests {
         assert_eq!(map_promiscuous_filter(PromiscuousFilter::empty()), 0);
     }
 
+    #[cfg(feature = "wifi-promiscuous")]
     #[test]
     fn promiscuous_data_only_uses_stable_sdk_data_mask() {
         assert_eq!(
@@ -293,32 +381,42 @@ mod tests {
     fn station_channel_hint_uses_fast_scan() {
         let config = ClientConfig::new(
             super::super::Ssid::try_from("esp8266-hal-sta").expect("ssid"),
-            Credential::Open,
+            StationCredential::open(),
         )
         .with_channel(Channel::try_from(6).expect("channel"));
 
-        let raw = map_client_config(&config);
+        let raw = raw_client_config(&config);
 
         assert_eq!(raw.channel, 6);
-        assert_eq!(
-            raw.scan_method,
-            crate::wifi::config::ScanMethod::Fast.to_raw()
-        );
+        assert_eq!(raw.scan_method, esp8266_wifi_sys::WIFI_FAST_SCAN);
     }
 
     #[test]
     fn station_power_save_maps_to_sdk_mode() {
         assert_eq!(
-            map_station_power_save(StationPowerSave::None),
-            crate::wifi::PowerSave::None
+            raw_station_power_save(StationPowerSave::None),
+            esp8266_wifi_sys::WIFI_PS_NONE
         );
         assert_eq!(
-            map_station_power_save(StationPowerSave::MinModem),
-            crate::wifi::PowerSave::MinModem
+            raw_station_power_save(StationPowerSave::MinModem),
+            esp8266_wifi_sys::WIFI_PS_MIN_MODEM
         );
         assert_eq!(
-            map_station_power_save(StationPowerSave::MaxModem),
-            crate::wifi::PowerSave::MaxModem
+            raw_station_power_save(StationPowerSave::MaxModem),
+            esp8266_wifi_sys::WIFI_PS_MAX_MODEM
         );
+    }
+
+    #[test]
+    fn init_config_keeps_blob_coupled_defaults_private() {
+        let config = InitConfig::new(20, 9, 8).unwrap();
+        let raw = raw_init_config(&config);
+
+        assert_eq!(raw.rx_buf_num, 20);
+        assert_eq!(raw.rx_pkt_num, 9);
+        assert_eq!(raw.tx_buf_num, 8);
+        assert_eq!(raw.left_continuous_rx_buf_num, 16);
+        assert_eq!(raw.rx_max_single_pkt_len, 1_076);
+        assert_eq!(raw.magic, esp8266_wifi_sys::WIFI_INIT_CONFIG_MAGIC);
     }
 }

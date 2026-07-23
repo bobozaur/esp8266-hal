@@ -1,7 +1,7 @@
 use super::DriverError;
 use core::ffi::c_void;
 
-pub type ReleaseFn = unsafe fn(*mut c_void, *mut c_void);
+pub(crate) type ReleaseFn = unsafe fn(*mut c_void, *mut c_void);
 
 #[derive(Clone, Copy)]
 pub(crate) struct OwnedRxLease {
@@ -35,38 +35,34 @@ impl<const SLOTS: usize, const BYTES: usize> OwnedRxPool<SLOTS, BYTES> {
         }
     }
 
-    pub fn try_acquire_copy(
-        &mut self,
-        src: *const u8,
-        len: u16,
-    ) -> Result<OwnedRxLease, DriverError> {
+    pub fn try_acquire_copy(&mut self, src: &[u8]) -> Result<OwnedRxLease, DriverError> {
         if SLOTS == 0 {
             return Err(DriverError::PacketOverflow);
         }
-        if len as usize > BYTES {
+        if src.len() > BYTES || src.len() > u16::MAX as usize {
             return Err(DriverError::PayloadTooLong);
-        }
-        if len != 0 && src.is_null() {
-            return Err(DriverError::BackendRejected);
         }
 
         let Some(slot) = self.slots.iter_mut().find(|slot| !slot.occupied) else {
             return Err(DriverError::PacketOverflow);
         };
 
-        if len != 0 {
-            unsafe { core::ptr::copy_nonoverlapping(src, slot.data.as_mut_ptr(), len as usize) };
-        }
+        slot.data[..src.len()].copy_from_slice(src);
 
         slot.occupied = true;
         Ok(OwnedRxLease {
             buffer: slot.data.as_mut_ptr() as *mut c_void,
-            len,
+            len: src.len() as u16,
             slot: slot as *mut OwnedRxSlot<BYTES> as *mut c_void,
         })
     }
 }
 
+/// # Safety
+///
+/// `slot` must be either null or a live pointer returned by
+/// [`OwnedRxPool::try_acquire_copy`] for the same `BYTES` value. The lease must
+/// not already have been released.
 pub(crate) unsafe fn release_owned_rx_slot<const BYTES: usize>(
     _buffer: *mut c_void,
     slot: *mut c_void,
@@ -80,18 +76,14 @@ pub(crate) unsafe fn release_owned_rx_slot<const BYTES: usize>(
     });
 }
 
-pub struct ReleaseToken {
+struct ReleaseToken {
     buffer: *mut c_void,
     eb: *mut c_void,
     release_fn: Option<ReleaseFn>,
 }
 
 impl ReleaseToken {
-    pub const unsafe fn from_raw(
-        buffer: *mut c_void,
-        eb: *mut c_void,
-        release_fn: Option<ReleaseFn>,
-    ) -> Self {
+    const fn new(buffer: *mut c_void, eb: *mut c_void, release_fn: Option<ReleaseFn>) -> Self {
         Self {
             buffer,
             eb,
@@ -99,19 +91,7 @@ impl ReleaseToken {
         }
     }
 
-    pub unsafe fn fake() -> Self {
-        Self::from_raw(core::ptr::null_mut(), core::ptr::null_mut(), None)
-    }
-
-    pub fn buffer(&self) -> *mut c_void {
-        self.buffer
-    }
-
-    pub fn eb(&self) -> *mut c_void {
-        self.eb
-    }
-
-    pub fn release(self) {
+    fn release(self) {
         let mut token = self;
         token.release_once();
     }
@@ -129,14 +109,23 @@ impl Drop for ReleaseToken {
     }
 }
 
-pub struct RawRxRecord {
-    pub buffer: *mut c_void,
-    pub len: u16,
-    pub release: ReleaseToken,
+pub(crate) struct RawRxRecord {
+    buffer: *mut c_void,
+    len: u16,
+    release: ReleaseToken,
 }
 
 impl RawRxRecord {
-    pub const unsafe fn from_raw(
+    /// Takes ownership of an SDK receive buffer and its optional release hook.
+    ///
+    /// # Safety
+    ///
+    /// For a nonzero `len`, `buffer` must be non-null, properly aligned, and
+    /// point to `len` initialized bytes that remain valid and are not mutated
+    /// until this record is released. When `release_fn` is present, calling it
+    /// exactly once with `buffer` and `eb` must be valid and the caller must
+    /// transfer the sole release responsibility to this record.
+    pub(crate) const unsafe fn from_raw(
         buffer: *mut c_void,
         len: u16,
         eb: *mut c_void,
@@ -145,42 +134,45 @@ impl RawRxRecord {
         Self {
             buffer,
             len,
-            release: ReleaseToken::from_raw(buffer, eb, release_fn),
+            release: ReleaseToken::new(buffer, eb, release_fn),
         }
     }
 
-    pub unsafe fn fake(len: u16) -> Self {
-        Self {
-            buffer: core::ptr::null_mut(),
-            len,
-            release: ReleaseToken::fake(),
+    pub(crate) const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        if self.len == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(self.buffer.cast(), self.len as usize) }
         }
     }
 
-    pub fn copy_into(self, dst: &mut [u8]) -> usize {
-        let len = self.len as usize;
-        let copy_len = len.min(dst.len());
-        if copy_len > 0 && !self.buffer.is_null() {
-            unsafe {
-                core::ptr::copy_nonoverlapping(self.buffer as *const u8, dst.as_mut_ptr(), copy_len)
-            };
+    pub(crate) fn copy_into(self, dst: &mut [u8]) -> Result<usize, DriverError> {
+        let len = self.len();
+        if dst.len() < len {
+            self.release.release();
+            return Err(DriverError::PacketOverflow);
         }
+        dst[..len].copy_from_slice(self.as_slice());
         self.release.release();
-        copy_len
+        Ok(len)
     }
 }
 
-pub struct RxPushError {
+pub(crate) struct RxPushError {
     error: DriverError,
     record: RawRxRecord,
 }
 
 impl RxPushError {
-    pub fn error(&self) -> DriverError {
+    pub(crate) fn error(&self) -> DriverError {
         self.error.clone()
     }
 
-    pub fn release(self) {
+    pub(crate) fn release(self) {
         self.record.release.release();
     }
 }
@@ -194,12 +186,11 @@ impl core::fmt::Debug for RxPushError {
     }
 }
 
-pub struct RxRing<const N: usize> {
+pub(crate) struct RxRing<const N: usize> {
     entries: [Option<RawRxRecord>; N],
     head: usize,
     tail: usize,
     len: usize,
-    drops: u32,
 }
 
 impl<const N: usize> RxRing<N> {
@@ -209,7 +200,6 @@ impl<const N: usize> RxRing<N> {
             head: 0,
             tail: 0,
             len: 0,
-            drops: 0,
         }
     }
 
@@ -217,21 +207,8 @@ impl<const N: usize> RxRing<N> {
         self.len
     }
 
-    pub const fn capacity(&self) -> usize {
-        N
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn drops(&self) -> u32 {
-        self.drops
-    }
-
     pub fn try_push(&mut self, record: RawRxRecord) -> Result<(), RxPushError> {
         if N == 0 || self.len == N {
-            self.drops = self.drops.wrapping_add(1);
             return Err(RxPushError {
                 error: DriverError::PacketOverflow,
                 record,
@@ -256,6 +233,12 @@ impl<const N: usize> RxRing<N> {
     }
 }
 
+impl<const N: usize> Default for RxRing<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -264,24 +247,35 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn fake_record(len: u16) -> RawRxRecord {
+        static BYTES: [u8; 64] = [0; 64];
+        assert!(len as usize <= BYTES.len());
+        unsafe {
+            RawRxRecord::from_raw(
+                BYTES.as_ptr().cast_mut().cast(),
+                len,
+                core::ptr::null_mut(),
+                None,
+            )
+        }
+    }
+
     #[test]
-    fn ring_counts_drops_when_full() {
+    fn ring_rejects_when_full() {
         let mut ring = RxRing::<1>::new();
-        assert!(ring.try_push(unsafe { RawRxRecord::fake(32) }).is_ok());
-        assert!(ring.try_push(unsafe { RawRxRecord::fake(64) }).is_err());
-        assert_eq!(ring.drops(), 1);
+        assert!(ring.try_push(fake_record(32)).is_ok());
+        assert!(ring.try_push(fake_record(64)).is_err());
     }
 
     #[test]
     fn zero_capacity_ring_rejects_without_storing() {
         let mut ring = RxRing::<0>::new();
         let rejected = ring
-            .try_push(unsafe { RawRxRecord::fake(32) })
+            .try_push(fake_record(32))
             .expect_err("zero-capacity ring must reject");
 
         assert_eq!(rejected.error(), DriverError::PacketOverflow);
         assert_eq!(ring.len(), 0);
-        assert_eq!(ring.drops(), 1);
         assert!(ring.pop().is_none());
     }
 
@@ -290,18 +284,12 @@ mod tests {
         let mut pool = OwnedRxPool::<1, 8>::new();
         let bytes = [1_u8, 2, 3, 4];
 
-        let first = pool
-            .try_acquire_copy(bytes.as_ptr(), bytes.len() as u16)
-            .expect("first slot");
-        assert!(pool
-            .try_acquire_copy(bytes.as_ptr(), bytes.len() as u16)
-            .is_err());
+        let first = pool.try_acquire_copy(&bytes).expect("first slot");
+        assert!(pool.try_acquire_copy(&bytes).is_err());
 
         unsafe { release_owned_rx_slot::<8>(first.buffer, first.slot) };
 
-        let second = pool
-            .try_acquire_copy(bytes.as_ptr(), bytes.len() as u16)
-            .expect("reused slot");
+        let second = pool.try_acquire_copy(&bytes).expect("reused slot");
         assert!(!second.buffer.is_null());
     }
 
@@ -315,9 +303,10 @@ mod tests {
 
         RELEASES.store(0, core::sync::atomic::Ordering::SeqCst);
         let mut ring = RxRing::<1>::new();
+        let bytes = [0_u8; 8];
         ring.try_push(unsafe {
             RawRxRecord::from_raw(
-                core::ptr::null_mut(),
+                bytes.as_ptr().cast_mut().cast(),
                 8,
                 core::ptr::null_mut(),
                 Some(count_release),
@@ -325,8 +314,33 @@ mod tests {
         })
         .unwrap();
 
+        let mut dst = [0; 8];
+        assert_eq!(ring.pop().unwrap().copy_into(&mut dst), Ok(8));
+        assert_eq!(RELEASES.load(core::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn undersized_copy_drops_whole_record_and_releases_ownership() {
+        static RELEASES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+        unsafe fn count_release(_: *mut core::ffi::c_void, _: *mut core::ffi::c_void) {
+            RELEASES.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+
+        RELEASES.store(0, core::sync::atomic::Ordering::SeqCst);
+        let bytes = [0xa5_u8; 8];
+        let record = unsafe {
+            RawRxRecord::from_raw(
+                bytes.as_ptr().cast_mut().cast(),
+                bytes.len() as u16,
+                core::ptr::null_mut(),
+                Some(count_release),
+            )
+        };
         let mut dst = [0; 4];
-        assert_eq!(ring.pop().unwrap().copy_into(&mut dst), 4);
+
+        assert_eq!(record.copy_into(&mut dst), Err(DriverError::PacketOverflow));
+        assert_eq!(dst, [0; 4]);
         assert_eq!(RELEASES.load(core::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -340,9 +354,10 @@ mod tests {
 
         RELEASES.store(0, core::sync::atomic::Ordering::SeqCst);
         {
+            let bytes = [0_u8; 8];
             let _record = unsafe {
                 RawRxRecord::from_raw(
-                    core::ptr::null_mut(),
+                    bytes.as_ptr().cast_mut().cast(),
                     8,
                     core::ptr::null_mut(),
                     Some(count_release),
@@ -364,9 +379,10 @@ mod tests {
         RELEASES.store(0, core::sync::atomic::Ordering::SeqCst);
         {
             let mut ring = RxRing::<2>::new();
+            let bytes = [0_u8; 8];
             ring.try_push(unsafe {
                 RawRxRecord::from_raw(
-                    core::ptr::null_mut(),
+                    bytes.as_ptr().cast_mut().cast(),
                     8,
                     core::ptr::null_mut(),
                     Some(count_release),
@@ -384,7 +400,7 @@ mod tests {
         let bytes = [0_u8; 8];
 
         assert!(matches!(
-            pool.try_acquire_copy(bytes.as_ptr(), bytes.len() as u16),
+            pool.try_acquire_copy(&bytes),
             Err(DriverError::PayloadTooLong)
         ));
     }
@@ -395,7 +411,7 @@ mod tests {
             let mut ring = RxRing::<4>::new();
             for op in ops {
                 match op {
-                    0 => { let _ = ring.try_push(unsafe { RawRxRecord::fake(64) }); }
+                    0 => { let _ = ring.try_push(fake_record(64)); }
                     _ => { let _ = ring.pop(); }
                 }
                 prop_assert!(ring.len() <= 4);

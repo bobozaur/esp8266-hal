@@ -103,61 +103,6 @@ pub fn write_ipv4_octets(octets: [u8; 4]) {
     write_dec_u32(octets[3] as u32);
 }
 
-/// Internal probe byte write.
-///
-/// In normal builds this compiles away entirely so compat/SDK tracing does not
-/// consume UART bandwidth or code size. Enable the `wifi-debug-trace` feature
-/// to keep the historical low-level probe stream.
-#[inline(always)]
-pub fn debug_byte(b: u8) {
-    #[cfg(feature = "wifi-debug-trace")]
-    {
-        write_byte(b);
-    }
-
-    #[cfg(not(feature = "wifi-debug-trace"))]
-    {
-        let _ = b;
-    }
-}
-
-/// Internal best-effort debug string write.
-#[inline(always)]
-pub fn debug_str(s: &str) {
-    #[cfg(feature = "wifi-debug-log")]
-    {
-        write_str(s);
-    }
-
-    #[cfg(not(feature = "wifi-debug-log"))]
-    {
-        let _ = s;
-    }
-}
-
-/// Best-effort single-byte trace write — tries briefly, then drops.
-///
-/// Reduced spin count (was 16384) to avoid stalling the tick ISR when the
-/// UART FIFO fills up from trace output.
-#[inline(always)]
-pub fn trace_byte(b: u8) {
-    #[cfg(feature = "wifi-debug-trace")]
-    unsafe {
-        for _ in 0..8 {
-            if (UART0_STATUS.read_volatile() >> 16) & 0xFF < 128 {
-                UART0_FIFO.write_volatile(b as u32);
-                return;
-            }
-            core::hint::spin_loop();
-        }
-    }
-
-    #[cfg(not(feature = "wifi-debug-trace"))]
-    {
-        let _ = b;
-    }
-}
-
 /// Adapter for `core::fmt::Write` so `write!()` / `writeln!()` work.
 pub struct UartWriter;
 
@@ -185,22 +130,5 @@ macro_rules! println {
         use core::fmt::Write;
         let _ = write!($crate::logger::UartWriter, $($arg)*);
         $crate::logger::write_bytes(b"\r\n");
-    }};
-}
-
-/// Internal text logging that compiles away unless `wifi-debug-log` is enabled.
-#[macro_export]
-macro_rules! wifi_debugln {
-    () => {{
-        #[cfg(feature = "wifi-debug-log")]
-        {
-            $crate::logger::write_newline();
-        }
-    }};
-    ($($arg:tt)*) => {{
-        #[cfg(feature = "wifi-debug-log")]
-        {
-            $crate::println!($($arg)*);
-        }
     }};
 }

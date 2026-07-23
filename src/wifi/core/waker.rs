@@ -28,10 +28,17 @@ impl CallbackWaker {
         });
     }
 
+    #[cfg(any(target_arch = "xtensa", test))]
     pub fn wake(&self) {
-        let waker = critical_section::with(|_| unsafe { (*self.slot.get()).clone() });
+        let waker = critical_section::with(|_| unsafe { (*self.slot.get()).take() });
         if let Some(waker) = waker {
             waker.wake();
         }
+    }
+
+    #[cfg(all(feature = "wifi", target_arch = "xtensa"))]
+    pub fn clear(&self) {
+        let waker = critical_section::with(|_| unsafe { (*self.slot.get()).take() });
+        drop(waker);
     }
 }

@@ -1,49 +1,65 @@
-use super::config::{Channel, ClientConfig, Credential, Ipv4Addr, Passphrase, Ssid, WpsPin};
+#[cfg(feature = "wifi-esp-now")]
+use super::config::Channel;
+#[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+use super::config::Ssid;
+#[cfg(feature = "wifi-wps")]
+use super::config::WpsPin;
+#[cfg(feature = "wifi-smartconfig")]
+use super::config::{ClientConfig, Ipv4Addr, Passphrase, StationCredential};
+#[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
 use super::ConfigError;
+#[cfg(any(
+    feature = "wifi-esp-now",
+    all(feature = "wifi-promiscuous", any(target_arch = "xtensa", test))
+))]
 use super::DriverError;
 
+#[cfg(feature = "wifi-esp-now")]
 pub const ESP_NOW_MAX_PAYLOAD: usize = 250;
-pub const PROMISCUOUS_MAX_PAYLOAD_PREFIX: usize = 256;
+#[cfg(feature = "wifi-promiscuous")]
+pub(crate) const PROMISCUOUS_MAX_PAYLOAD_PREFIX: usize = 112;
+#[cfg(feature = "wifi-esp-now")]
 pub const ESP_NOW_KEY_LEN: usize = 16;
+#[cfg(feature = "wifi-smartconfig")]
 pub const SMARTCONFIG_KEY_LEN: usize = 16;
 
+#[cfg(feature = "wifi-esp-now")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EspNowPeer {
+pub(crate) struct EspNowPeer {
     peer_addr: [u8; 6],
     encrypted: bool,
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl EspNowPeer {
-    pub const fn unencrypted(peer_addr: [u8; 6]) -> Self {
+    pub(crate) const fn unencrypted(peer_addr: [u8; 6]) -> Self {
         Self {
             peer_addr,
             encrypted: false,
         }
     }
 
-    pub const fn encrypted(peer_addr: [u8; 6]) -> Self {
+    pub(crate) const fn encrypted(peer_addr: [u8; 6]) -> Self {
         Self {
             peer_addr,
             encrypted: true,
         }
     }
 
-    pub const fn peer_addr(&self) -> &[u8; 6] {
+    pub(crate) const fn peer_addr(&self) -> &[u8; 6] {
         &self.peer_addr
-    }
-
-    pub const fn is_encrypted(&self) -> bool {
-        self.encrypted
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EspNowInterface {
+pub(crate) enum EspNowInterface {
     Station,
     AccessPoint,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "wifi-esp-now")]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct EspNowPeerConfig {
     peer_addr: [u8; 6],
     lmk: Option<[u8; ESP_NOW_KEY_LEN]>,
@@ -51,16 +67,19 @@ pub struct EspNowPeerConfig {
     interface: EspNowInterface,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "wifi-esp-now")]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct EspNowStationPeerConfig {
     inner: EspNowPeerConfig,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "wifi-esp-now")]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct EspNowAccessPointPeerConfig {
     inner: EspNowPeerConfig,
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl EspNowPeerConfig {
     pub const BROADCAST_ADDR: [u8; 6] = [0xff; 6];
 
@@ -105,26 +124,29 @@ impl EspNowPeerConfig {
         &self.peer_addr
     }
 
-    pub const fn lmk(&self) -> Option<&[u8; ESP_NOW_KEY_LEN]> {
+    #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+    pub(crate) const fn lmk(&self) -> Option<&[u8; ESP_NOW_KEY_LEN]> {
         self.lmk.as_ref()
     }
 
-    pub const fn channel_value(&self) -> u8 {
+    #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+    pub(crate) const fn channel_value(&self) -> u8 {
         match self.channel {
             Some(channel) => channel.get(),
             None => 0,
         }
     }
 
-    pub const fn interface_value(&self) -> EspNowInterface {
+    #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+    pub(crate) const fn interface_value(&self) -> EspNowInterface {
         self.interface
     }
 
-    pub const fn is_encrypted(&self) -> bool {
+    pub(crate) const fn is_encrypted(&self) -> bool {
         self.lmk.is_some()
     }
 
-    pub const fn peer_record(&self) -> EspNowPeer {
+    pub(crate) const fn peer_record(&self) -> EspNowPeer {
         if self.is_encrypted() {
             EspNowPeer::encrypted(self.peer_addr)
         } else {
@@ -133,18 +155,21 @@ impl EspNowPeerConfig {
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl EspNowStationPeerConfig {
-    pub const fn inner(&self) -> &EspNowPeerConfig {
+    pub(crate) const fn inner(&self) -> &EspNowPeerConfig {
         &self.inner
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl EspNowAccessPointPeerConfig {
-    pub const fn inner(&self) -> &EspNowPeerConfig {
+    pub(crate) const fn inner(&self) -> &EspNowPeerConfig {
         &self.inner
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EspNowRxFrame {
     peer_addr: [u8; 6],
@@ -152,8 +177,10 @@ pub struct EspNowRxFrame {
     len: u8,
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl EspNowRxFrame {
-    pub fn new(peer_addr: [u8; 6], payload: &[u8]) -> Result<Self, DriverError> {
+    #[cfg(any(target_arch = "xtensa", test))]
+    pub(crate) fn new(peer_addr: [u8; 6], payload: &[u8]) -> Result<Self, DriverError> {
         if payload.len() > ESP_NOW_MAX_PAYLOAD {
             return Err(DriverError::PayloadTooLong);
         }
@@ -176,159 +203,151 @@ impl EspNowRxFrame {
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EspNowSendStatus {
     Success,
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EspNowTxStatus {
-    peer_addr: [u8; 6],
-    status: EspNowSendStatus,
-}
-
-impl EspNowTxStatus {
-    pub const fn new(peer_addr: [u8; 6], status: EspNowSendStatus) -> Self {
-        Self { peer_addr, status }
-    }
-
-    pub const fn peer_addr(&self) -> &[u8; 6] {
-        &self.peer_addr
-    }
-
-    pub const fn status(&self) -> EspNowSendStatus {
-        self.status
-    }
-}
-
+#[cfg(feature = "wifi-wps")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WpsMode {
     Pbc,
     Pin,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WpsFactoryInfo {
-    manufacturer: heapless::Vec<u8, 64>,
-    model_number: heapless::Vec<u8, 32>,
-    model_name: heapless::Vec<u8, 32>,
-    device_name: heapless::Vec<u8, 32>,
+#[cfg(feature = "wifi-wps")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WpsFactoryInfo<'a> {
+    manufacturer: &'a [u8],
+    model_number: &'a [u8],
+    model_name: &'a [u8],
+    device_name: &'a [u8],
 }
 
-impl WpsFactoryInfo {
+#[cfg(feature = "wifi-wps")]
+impl<'a> WpsFactoryInfo<'a> {
+    pub const MANUFACTURER_MAX_LEN: usize = 64;
+    pub const MODEL_NUMBER_MAX_LEN: usize = 32;
+    pub const MODEL_NAME_MAX_LEN: usize = 32;
+    pub const DEVICE_NAME_MAX_LEN: usize = 32;
+
     pub const fn empty() -> Self {
         Self {
-            manufacturer: heapless::Vec::new(),
-            model_number: heapless::Vec::new(),
-            model_name: heapless::Vec::new(),
-            device_name: heapless::Vec::new(),
+            manufacturer: &[],
+            model_number: &[],
+            model_name: &[],
+            device_name: &[],
         }
     }
 
-    pub fn manufacturer(mut self, value: &[u8]) -> Self {
-        self.manufacturer.clear();
-        let _ = self
-            .manufacturer
-            .extend_from_slice(&value[..value.len().min(64)]);
-        self
+    pub fn new(
+        manufacturer: &'a [u8],
+        model_number: &'a [u8],
+        model_name: &'a [u8],
+        device_name: &'a [u8],
+    ) -> Result<Self, ConfigError> {
+        if manufacturer.len() > Self::MANUFACTURER_MAX_LEN {
+            return Err(ConfigError::WpsManufacturerTooLong);
+        }
+        if model_number.len() > Self::MODEL_NUMBER_MAX_LEN {
+            return Err(ConfigError::WpsModelNumberTooLong);
+        }
+        if model_name.len() > Self::MODEL_NAME_MAX_LEN {
+            return Err(ConfigError::WpsModelNameTooLong);
+        }
+        if device_name.len() > Self::DEVICE_NAME_MAX_LEN {
+            return Err(ConfigError::WpsDeviceNameTooLong);
+        }
+        if [manufacturer, model_number, model_name, device_name]
+            .iter()
+            .any(|field| field.contains(&0))
+        {
+            return Err(ConfigError::WpsFactoryInfoContainsNul);
+        }
+        Ok(Self {
+            manufacturer,
+            model_number,
+            model_name,
+            device_name,
+        })
     }
 
-    pub fn model_number(mut self, value: &[u8]) -> Self {
-        self.model_number.clear();
-        let _ = self
-            .model_number
-            .extend_from_slice(&value[..value.len().min(32)]);
-        self
+    pub const fn manufacturer_bytes(&self) -> &'a [u8] {
+        self.manufacturer
     }
 
-    pub fn model_name(mut self, value: &[u8]) -> Self {
-        self.model_name.clear();
-        let _ = self
-            .model_name
-            .extend_from_slice(&value[..value.len().min(32)]);
-        self
+    pub const fn model_number_bytes(&self) -> &'a [u8] {
+        self.model_number
     }
 
-    pub fn device_name(mut self, value: &[u8]) -> Self {
-        self.device_name.clear();
-        let _ = self
-            .device_name
-            .extend_from_slice(&value[..value.len().min(32)]);
-        self
+    pub const fn model_name_bytes(&self) -> &'a [u8] {
+        self.model_name
     }
 
-    pub fn manufacturer_bytes(&self) -> &[u8] {
-        &self.manufacturer
-    }
-
-    pub fn model_number_bytes(&self) -> &[u8] {
-        &self.model_number
-    }
-
-    pub fn model_name_bytes(&self) -> &[u8] {
-        &self.model_name
-    }
-
-    pub fn device_name_bytes(&self) -> &[u8] {
-        &self.device_name
+    pub const fn device_name_bytes(&self) -> &'a [u8] {
+        self.device_name
     }
 }
 
-impl Default for WpsFactoryInfo {
+#[cfg(feature = "wifi-wps")]
+impl Default for WpsFactoryInfo<'_> {
     fn default() -> Self {
         Self::empty()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WpsConfig {
+#[cfg(feature = "wifi-wps")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct WpsConfig<'a> {
     mode: WpsMode,
-    factory_info: WpsFactoryInfo,
+    factory_info: WpsFactoryInfo<'a>,
     pin: Option<WpsPin>,
-    target_ssid: Option<Ssid>,
+    target_ssid: Option<&'a Ssid>,
 }
 
-impl WpsConfig {
-    pub fn pbc() -> Self {
+#[cfg(feature = "wifi-wps")]
+impl<'a> WpsConfig<'a> {
+    pub const fn pbc() -> Self {
         Self {
             mode: WpsMode::Pbc,
-            factory_info: WpsFactoryInfo::default(),
+            factory_info: WpsFactoryInfo::empty(),
             pin: None,
             target_ssid: None,
         }
     }
 
-    pub fn pin() -> Self {
+    pub const fn pin() -> Self {
         Self {
             mode: WpsMode::Pin,
-            factory_info: WpsFactoryInfo::default(),
+            factory_info: WpsFactoryInfo::empty(),
             pin: None,
             target_ssid: None,
         }
     }
 
-    pub fn fixed_pin(pin: WpsPin) -> Self {
+    pub const fn fixed_pin(pin: WpsPin) -> Self {
         Self {
             mode: WpsMode::Pin,
-            factory_info: WpsFactoryInfo::default(),
+            factory_info: WpsFactoryInfo::empty(),
             pin: Some(pin),
             target_ssid: None,
         }
     }
 
-    pub fn with_factory_info(mut self, factory_info: WpsFactoryInfo) -> Self {
+    pub const fn with_factory_info(mut self, factory_info: WpsFactoryInfo<'a>) -> Self {
         self.factory_info = factory_info;
         self
     }
 
-    pub fn with_fixed_pin(mut self, pin: WpsPin) -> Self {
+    pub const fn with_fixed_pin(mut self, pin: WpsPin) -> Self {
         self.mode = WpsMode::Pin;
         self.pin = Some(pin);
         self
     }
 
-    pub fn with_target_ssid(mut self, ssid: Ssid) -> Self {
+    pub const fn with_target_ssid(mut self, ssid: &'a Ssid) -> Self {
         self.target_ssid = Some(ssid);
         self
     }
@@ -337,7 +356,7 @@ impl WpsConfig {
         self.mode
     }
 
-    pub const fn factory_info(&self) -> &WpsFactoryInfo {
+    pub const fn factory_info(&self) -> &WpsFactoryInfo<'a> {
         &self.factory_info
     }
 
@@ -345,11 +364,12 @@ impl WpsConfig {
         self.pin
     }
 
-    pub const fn target_ssid(&self) -> Option<&Ssid> {
-        self.target_ssid.as_ref()
+    pub const fn target_ssid(&self) -> Option<&'a Ssid> {
+        self.target_ssid
     }
 }
 
+#[cfg(feature = "wifi-smartconfig")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmartConfigType {
     EspTouch,
@@ -358,23 +378,18 @@ pub enum SmartConfigType {
     EspTouchV2,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "wifi-smartconfig")]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SmartConfigStartConfig {
-    enable_log: bool,
     esp_touch_v2_key: Option<[u8; SMARTCONFIG_KEY_LEN]>,
 }
 
+#[cfg(feature = "wifi-smartconfig")]
 impl SmartConfigStartConfig {
     pub const fn new() -> Self {
         Self {
-            enable_log: false,
             esp_touch_v2_key: None,
         }
-    }
-
-    pub const fn enable_log(mut self, enable: bool) -> Self {
-        self.enable_log = enable;
-        self
     }
 
     pub const fn esp_touch_v2_key(mut self, key: [u8; SMARTCONFIG_KEY_LEN]) -> Self {
@@ -382,22 +397,20 @@ impl SmartConfigStartConfig {
         self
     }
 
-    pub const fn log_enabled(self) -> bool {
-        self.enable_log
-    }
-
     pub const fn esp_touch_v2_key_value(self) -> Option<[u8; SMARTCONFIG_KEY_LEN]> {
         self.esp_touch_v2_key
     }
 }
 
+#[cfg(feature = "wifi-smartconfig")]
 impl Default for SmartConfigStartConfig {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "wifi-smartconfig")]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SmartConfigCredentials {
     ssid: [u8; 32],
     ssid_len: u8,
@@ -409,6 +422,7 @@ pub struct SmartConfigCredentials {
     cellphone_ip: Ipv4Addr,
 }
 
+#[cfg(feature = "wifi-smartconfig")]
 impl SmartConfigCredentials {
     pub fn new(
         ssid: &[u8],
@@ -418,11 +432,9 @@ impl SmartConfigCredentials {
         token: u8,
         cellphone_ip: Ipv4Addr,
     ) -> Result<Self, ConfigError> {
-        if ssid.len() > 32 {
-            return Err(ConfigError::SsidTooLong);
-        }
-        if password.len() > 64 {
-            return Err(ConfigError::PassphraseTooLong);
+        Ssid::from_bytes(ssid)?;
+        if !password.is_empty() {
+            Passphrase::wpa2_bytes(password)?;
         }
 
         let mut credentials = Self {
@@ -464,17 +476,37 @@ impl SmartConfigCredentials {
         self.cellphone_ip
     }
 
-    pub fn client_config(&self) -> Result<ClientConfig, ConfigError> {
+    pub fn client_config(&self) -> Result<ClientConfig<'static>, ConfigError> {
         let ssid = Ssid::from_bytes(self.ssid())?;
         let credential = if self.password().is_empty() {
-            Credential::Open
+            StationCredential::open()
         } else {
-            Credential::Wpa2(Passphrase::wpa2_bytes(self.password())?)
+            StationCredential::wpa2(Passphrase::wpa2_bytes(self.password())?)
         };
         Ok(ClientConfig::new(ssid, credential))
     }
 }
 
+#[cfg(feature = "wifi-smartconfig")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SmartConfigEvent {
+    ScanDone,
+    FoundChannel,
+    GotCredentials(SmartConfigCredentials),
+    SendAckDone,
+}
+
+#[cfg(feature = "wifi-wps")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WpsEvent {
+    Succeeded,
+    Failed { reason: Option<u32> },
+    TimedOut,
+    Pin { pin: WpsPin },
+    Disconnected { reason: Option<u8> },
+}
+
+#[cfg(feature = "wifi-promiscuous")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromiscuousPacketType {
     Management,
@@ -483,6 +515,7 @@ pub enum PromiscuousPacketType {
     Misc,
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromiscuousControlSubtype {
     Wrapper,
@@ -496,12 +529,14 @@ pub enum PromiscuousControlSubtype {
     CfEndAck,
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct PromiscuousControlFilter {
     bits: u16,
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 impl PromiscuousControlFilter {
     pub const WRAPPER: Self = Self { bits: 1 << 0 };
     pub const BLOCK_ACK_REQUEST: Self = Self { bits: 1 << 1 };
@@ -560,18 +595,21 @@ impl PromiscuousControlFilter {
     }
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 impl Default for PromiscuousControlFilter {
     fn default() -> Self {
         Self::empty()
     }
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct PromiscuousFilter {
     bits: u8,
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 impl PromiscuousFilter {
     pub const MANAGEMENT: Self = Self { bits: 1 << 0 };
     pub const CONTROL: Self = Self { bits: 1 << 1 };
@@ -617,12 +655,14 @@ impl PromiscuousFilter {
     }
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 impl Default for PromiscuousFilter {
     fn default() -> Self {
         Self::all()
     }
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 const fn packet_type_bit(packet_type: PromiscuousPacketType) -> u8 {
     match packet_type {
         PromiscuousPacketType::Management => PromiscuousFilter::MANAGEMENT.bits,
@@ -632,6 +672,7 @@ const fn packet_type_bit(packet_type: PromiscuousPacketType) -> u8 {
     }
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 const fn control_subtype_bit(subtype: PromiscuousControlSubtype) -> u16 {
     match subtype {
         PromiscuousControlSubtype::Wrapper => PromiscuousControlFilter::WRAPPER.bits,
@@ -648,13 +689,16 @@ const fn control_subtype_bit(subtype: PromiscuousControlSubtype) -> u16 {
     }
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PromiscuousFrameInfo {
     pub rssi: i8,
     pub channel: u8,
     pub packet_type: PromiscuousPacketType,
+    pub original_len: u16,
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PromiscuousRxFrame {
     info: PromiscuousFrameInfo,
@@ -662,9 +706,13 @@ pub struct PromiscuousRxFrame {
     len: u16,
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 impl PromiscuousRxFrame {
-    pub fn new(info: PromiscuousFrameInfo, payload: &[u8]) -> Result<Self, DriverError> {
-        if payload.len() > PROMISCUOUS_MAX_PAYLOAD_PREFIX {
+    #[cfg(any(target_arch = "xtensa", test))]
+    pub(crate) fn new(info: PromiscuousFrameInfo, payload: &[u8]) -> Result<Self, DriverError> {
+        if payload.len() > PROMISCUOUS_MAX_PAYLOAD_PREFIX
+            || payload.len() > usize::from(info.original_len)
+        {
             return Err(DriverError::PayloadTooLong);
         }
 
@@ -684,13 +732,23 @@ impl PromiscuousRxFrame {
     pub fn payload(&self) -> &[u8] {
         &self.payload[..self.len as usize]
     }
+
+    pub const fn original_len(&self) -> usize {
+        self.info.original_len as usize
+    }
+
+    pub const fn is_truncated(&self) -> bool {
+        self.len < self.info.original_len
+    }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 pub(crate) struct EspNowPeerTable<const N: usize> {
     peers: [Option<EspNowPeer>; N],
     len: usize,
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl<const N: usize> EspNowPeerTable<N> {
     pub const fn new() -> Self {
         Self {
@@ -711,13 +769,11 @@ impl<const N: usize> EspNowPeerTable<N> {
     }
 
     pub fn insert(&mut self, peer: EspNowPeer) -> Result<bool, DriverError> {
-        for slot in &mut self.peers {
-            if let Some(existing) = slot {
-                if existing.peer_addr() == peer.peer_addr() {
-                    let changed = *existing != peer;
-                    *existing = peer;
-                    return Ok(changed);
-                }
+        for existing in self.peers.iter_mut().flatten() {
+            if existing.peer_addr() == peer.peer_addr() {
+                let changed = *existing != peer;
+                *existing = peer;
+                return Ok(changed);
             }
         }
 
@@ -748,14 +804,16 @@ impl<const N: usize> EspNowPeerTable<N> {
     }
 }
 
+#[cfg(any(feature = "wifi-esp-now", feature = "wifi-promiscuous"))]
 pub(crate) struct BoundedQueue<T: Copy, const N: usize> {
     entries: [Option<T>; N],
+    #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
     head: usize,
     tail: usize,
     len: usize,
-    drops: u32,
 }
 
+#[cfg(any(feature = "wifi-esp-now", feature = "wifi-promiscuous"))]
 impl<T: Copy, const N: usize> BoundedQueue<T, N> {
     pub const fn new() -> Self {
         Self {
@@ -763,21 +821,12 @@ impl<T: Copy, const N: usize> BoundedQueue<T, N> {
             head: 0,
             tail: 0,
             len: 0,
-            drops: 0,
         }
     }
 
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
-    pub const fn drops(&self) -> u32 {
-        self.drops
-    }
-
+    #[cfg(any(target_arch = "xtensa", test))]
     pub fn try_push(&mut self, record: T) -> Result<(), DriverError> {
         if N == 0 || self.len == N {
-            self.drops = self.drops.wrapping_add(1);
             return Err(DriverError::PacketOverflow);
         }
 

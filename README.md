@@ -1,73 +1,106 @@
 # esp8266-hal
 
-> ⚠️ **NOTE** this HAL is deprecated, no further development is planned.
+A `no_std` hardware abstraction layer and Wi-Fi driver for the ESP8266.
 
-An experimental hardware abstraction layer for the [ESP8266](https://en.wikipedia.org/wiki/ESP8266) written in Rust.
+The Wi-Fi implementation uses a typed, caller-owned Rust API inspired by the
+current esp-rs drivers. It supports station, access-point, mixed AP+STA,
+Embassy networking, scanning, promiscuous capture, ESP-NOW, WPS, SmartConfig,
+and WPA2-Enterprise operation.
 
-Join in on the discussion: https://matrix.to/#/#esp-rs:matrix.org!
+## Wi-Fi architecture
 
-An example project using the crate can be found [here](https://github.com/icewind1991/xtensa-rust-quickstart/tree/esp8266).
+- `WifiDriver` uses typestates to make initialization, configuration, start,
+  and stop transitions explicit.
+- `WifiResources` owns event, packet, and optional feature storage. Packet and
+  event hot paths do not allocate.
+- The ESP8266 target backend maps the Rust configuration directly to the
+  checked-in SDK ABI. There is no second controller or event model underneath.
+- The FreeRTOS-compatible scheduler, queues, timers, allocator, NVS shim, AP
+  netif bridge, RX bridge, and SDK runtime adapters are implemented in Rust.
+- `embassy-net` and `smoltcp` adapters consume the same owned station/AP links.
 
-## Setting up the compiler
+Espressif did not publish the ESP8266 Wi-Fi and PHY implementation as source.
+Those closed archives remain native, along with the SDK/WPA/mbedTLS objects
+they require. The scheduler, interrupt dispatch, context switching, and NMI
+handler are Rust; only the architectural instructions themselves use local
+inline assembly. Exact native versions, sources, licenses, and hashes are
+recorded in [`esp8266-wifi-sys/vendor`](esp8266-wifi-sys/vendor/README.md).
 
-In order to build Rust for the Xtensa architecture, you must use the [esp-rs/rust](https://github.com/esp-rs/rust) compiler fork.
+Normal builds do not need an ESP8266 RTOS SDK checkout, bindgen, or libclang,
+and compile no C sources. `esp8266-wifi-sys` links checked-in bindings and
+archives and exports its vendored ROM scripts to the HAL for the final firmware
+link, which still uses the Xtensa GCC driver. ESP-NOW and SmartConfig archives
+are linked only when their Cargo features are enabled.
 
-This can be installed via the installation scripts and pre-built artifacts found in the [esp-rs/rust-build](https://github.com/esp-rs/rust-build) repository. Alternatively, you can build and install the compiler from source.
+## Toolchain
 
-For more information relating to the Rust compiler fork please refer to the [Installing Rust](https://esp-rs.github.io/book/getting-started/installing-rust.html) section of [The Rust on ESP Book](https://esp-rs.github.io/book/).
+The repository pins the `esp-1.80.0` Rust toolchain in
+[`rust-toolchain.toml`](rust-toolchain.toml). Building for the ESP8266 also
+requires `xtensa-lx106-elf-gcc` on `PATH`; `.cargo/config.toml` selects the
+`xtensa-esp8266-none-elf` target and linker scripts.
 
-### Using the Installation Scripts
+Build a station-mode Embassy example with:
 
-#### Linux/macOS
-
-```shell
-$ curl -LO https://raw.githubusercontent.com/esp-rs/rust-build/main/install-rust-toolchain.sh
-$ chmod +x install-rust-toolchain.sh
-$ ./install-rust-toolchain.sh
+```sh
+CARGO_INCREMENTAL=0 cargo build --release --example tcp_server \
+  -Zbuild-std=core \
+  --no-default-features \
+  --features interrupt,rt,wifi-embassy-net
 ```
 
-#### Windows
+The examples accept credentials through compile-time environment variables:
 
-```powershell
-PS> Invoke-WebRequest https://raw.githubusercontent.com/esp-rs/rust-build/main/Install-RustToolchain.ps1 -OutFile Install-RustToolchain.ps1
-PS> .\Install-RustToolchain.ps1
+```sh
+ESP8266_HAL_WIFI_SSID=my-network \
+ESP8266_HAL_WIFI_PASS=my-password \
+CARGO_INCREMENTAL=0 cargo build --release --example tcp_server \
+  -Zbuild-std=core \
+  --no-default-features \
+  --features interrupt,rt,wifi-embassy-net
 ```
 
-### Rust with Podman
+## Wi-Fi features
 
-Alternatively you might build the project in the container where image already contains pre-installed Rust and ESP-IDF.
+| Feature | Purpose |
+| --- | --- |
+| `wifi` | Wi-Fi core, station/AP, and scanning |
+| `wifi-embassy-net` | Embassy network-driver adapter |
+| `wifi-esp-now` | ESP-NOW peers, RX, and TX status |
+| `wifi-smartconfig` | ESP-Touch/AirKiss provisioning |
+| `wifi-enterprise` | WPA2-Enterprise EAP/TLS credentials and supplicant path |
+| `wifi-wps` | WPS PBC/PIN provisioning |
+| `wifi-promiscuous` | Promiscuous capture and packet filters |
 
+On the ESP8266 target, every `wifi` configuration also requires the `rt` and
+`interrupt` features; invalid combinations fail with a direct compile error.
+
+Feature-specific storage is explicit in the trailing `WifiResources` const
+generics and defaults to zero. For example, ordinary station firmware can use
+`WifiResources::<8, 4>`, while the ESP-NOW examples additionally provide peer
+and packet capacities. Copied AP receive storage uses the final slot-count and
+frame-byte capacities.
+
+## Examples and hardware tests
+
+Maintained examples live in [`examples`](examples). The hardware harness can
+discover the attached fixture, flash firmware, coordinate network peers, and
+retain UART/host evidence:
+
+```sh
+cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list
+cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw doctor
+cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw run sta_connect
 ```
-$ podman run --device /dev/ttyUSB0 -it docker.io/espressif/idf-rust
-```
 
-This container is lacking the utilities for the ESP8266, but you can install them using these instructions inside the container:
-
-```
-$ apt update && apt install gcc-xtensa-lx106 binutils-xtensa-lx106
-```
-
-## Flashing the examples
-
-Once you have the Rust compiler fork installed you can flash the examples using [cargo-espflash](https://github.com/esp-rs/espflash/tree/master/cargo-espflash):
-
-```shell
-$ cargo install cargo-espflash
-$ cargo espflash --release --example blinky /dev/ttyUSB0
-```
+Use `wifi-hw matrix` for the automated suite. Scenarios requiring a WPS button,
+phone provisioning, enterprise fixture, or companion radio describe their
+prerequisites in `wifi-hw list`.
 
 ## License
 
-Licensed under either of
+The Rust crates are licensed under either Apache-2.0 or MIT at your option. The
+vendored wireless runtime retains its upstream licenses; see the vendoring
+manifest for details.
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
-
-### Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
+Contributions are dual-licensed under the same terms unless explicitly stated
+otherwise.

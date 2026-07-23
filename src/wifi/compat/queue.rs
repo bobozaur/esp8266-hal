@@ -42,34 +42,6 @@ const QUEUE_TYPE_RECURSIVE_MUTEX: u8 = 4;
 const QUEUE_UNLOCKED: i8 = -1;
 const QUEUE_LOCKED_UNMODIFIED: i8 = 0;
 
-#[no_mangle]
-pub static mut g_queue_block_stage: u32 = 0;
-#[no_mangle]
-pub static mut g_queue_unlock_stage: u32 = 0;
-#[no_mangle]
-pub static mut g_queue_wait_stage: u32 = 0;
-
-#[inline(always)]
-unsafe fn set_queue_block_stage(marker: u8) {
-    unsafe {
-        g_queue_block_stage = marker as u32;
-    }
-}
-
-#[inline(always)]
-unsafe fn set_queue_unlock_stage(marker: u8) {
-    unsafe {
-        g_queue_unlock_stage = marker as u32;
-    }
-}
-
-#[inline(always)]
-unsafe fn set_queue_wait_stage(marker: u8) {
-    unsafe {
-        g_queue_wait_stage = marker as u32;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Queue data structure
 // ---------------------------------------------------------------------------
@@ -558,25 +530,13 @@ pub unsafe extern "C" fn xQueueReceive(
     buffer: *mut c_void,
     timeout: u32,
 ) -> i32 {
-    unsafe {
-        set_queue_block_stage(b'W');
-        set_queue_block_stage(b'X');
-        let ret = queue_receive_impl(queue, buffer, timeout, false);
-        set_queue_block_stage(if ret == PD_PASS { b'Y' } else { b'y' });
-        ret
-    }
+    unsafe { queue_receive_impl(queue, buffer, timeout, false) }
 }
 
 /// `xQueuePeek` — inspect the next item without consuming it.
 #[no_mangle]
 pub unsafe extern "C" fn xQueuePeek(queue: *mut c_void, buffer: *mut c_void, timeout: u32) -> i32 {
-    unsafe {
-        set_queue_block_stage(b'P');
-        set_queue_block_stage(b'Q');
-        let ret = queue_receive_impl(queue, buffer, timeout, true);
-        set_queue_block_stage(if ret == PD_PASS { b'R' } else { b'r' });
-        ret
-    }
+    unsafe { queue_receive_impl(queue, buffer, timeout, true) }
 }
 
 /// `xQueueGenericReceive` — ESP8266 port wrapper.
@@ -604,7 +564,6 @@ unsafe fn queue_receive_impl(
     just_peeking: bool,
 ) -> i32 {
     unsafe {
-        set_queue_block_stage(b'A');
         if queue.is_null() {
             return PD_FALSE;
         }
@@ -615,34 +574,28 @@ unsafe fn queue_receive_impl(
         let mut timeout_state = task::new_timeout_state();
 
         loop {
-            set_queue_block_stage(b'a');
             critical::vPortEnterCritical();
-            set_queue_block_stage(b'b');
             let ok = if just_peeking {
                 (*q).peek(buffer as *mut u8)
             } else {
                 (*q).receive(buffer as *mut u8)
             };
-            set_queue_block_stage(b'c');
             if ok {
                 (*q).rx_waiters.remove(task_idx);
                 if !just_peeking {
                     let need_switch = notify_queue_received(q);
                     critical::vPortExitCritical();
-                    set_queue_block_stage(b'd');
                     if need_switch {
                         super::port::PendSV(1);
                     }
                 } else {
                     critical::vPortExitCritical();
-                    set_queue_block_stage(b'd');
                 }
                 return PD_PASS;
             }
 
             if ticks_to_wait == 0 {
                 critical::vPortExitCritical();
-                set_queue_block_stage(b'e');
                 return PD_FALSE;
             }
 
@@ -651,47 +604,26 @@ unsafe fn queue_receive_impl(
                 entry_time_set = true;
             }
             critical::vPortExitCritical();
-            set_queue_block_stage(b'f');
 
             task::vTaskSuspendAll();
-            set_queue_block_stage(b'l');
             lock_queue(q);
-            set_queue_block_stage(b'm');
             let timed_out = task::check_for_timeout(&mut timeout_state, &mut ticks_to_wait);
-            set_queue_block_stage(b'o');
             if !timed_out {
                 critical::vPortEnterCritical();
-                set_queue_block_stage(b'p');
                 let queue_empty = (*q).count == 0;
-                set_queue_block_stage(b'q');
                 critical::vPortExitCritical();
 
                 if queue_empty {
-                    set_queue_block_stage(b'r');
-                    set_queue_wait_stage(b'a');
-                    task::record_wait_stage(b'q', task_idx);
-                    set_queue_wait_stage(b'b');
-                    set_queue_wait_stage(b'c');
                     (*q).rx_waiters.add(task_idx);
-                    set_queue_wait_stage(b'd');
-                    set_queue_block_stage(b's');
-                    set_queue_wait_stage(b'e');
                     task::block_current_task_on_queue_rx(queue, deadline_from_ticks(ticks_to_wait));
-                    set_queue_wait_stage(b'f');
-                    set_queue_block_stage(b'u');
                     unlock_queue(q);
-                    set_queue_block_stage(b'y');
                     resume_all_and_maybe_yield();
-                    set_queue_block_stage(b'Y');
-                    task::record_wait_stage(b'Q', task_idx);
                 } else {
-                    set_queue_block_stage(b'n');
                     unlock_queue(q);
                     let _ = task::xTaskResumeAll();
                 }
             } else {
                 (*q).rx_waiters.remove(task_idx);
-                set_queue_block_stage(b't');
                 unlock_queue(q);
                 let _ = task::xTaskResumeAll();
                 critical::vPortEnterCritical();
@@ -966,22 +898,6 @@ pub unsafe extern "C" fn uxQueueSpacesAvailable(queue: *const c_void) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Queue sets (minimal stubs — not commonly used by WiFi code)
-// ---------------------------------------------------------------------------
-
-/// `xQueueAddToSet` — stub (returns success but does nothing).
-#[no_mangle]
-pub unsafe extern "C" fn xQueueAddToSet(_queue: *mut c_void, _queue_set: *mut c_void) -> i32 {
-    PD_PASS
-}
-
-/// `xQueueRemoveFromSet` — stub.
-#[no_mangle]
-pub unsafe extern "C" fn xQueueRemoveFromSet(_queue: *mut c_void, _queue_set: *mut c_void) -> i32 {
-    PD_PASS
-}
-
-// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -1013,13 +929,9 @@ unsafe fn deadline_from_ticks(ticks_to_wait: u32) -> u64 {
 #[inline(never)]
 pub(crate) unsafe fn resume_all_and_maybe_yield() {
     unsafe {
-        g_queue_block_stage = b'r' as u32;
         let already_yielded = task::xTaskResumeAll() != 0;
-        g_queue_block_stage = b's' as u32;
         if !already_yielded {
-            g_queue_block_stage = b'p' as u32;
             super::port::PendSV(1);
-            g_queue_block_stage = b'P' as u32;
         }
     }
 }
@@ -1040,49 +952,34 @@ unsafe fn lock_queue(q: *mut RawQueue) {
 
 unsafe fn unlock_queue(q: *mut RawQueue) {
     unsafe {
-        set_queue_unlock_stage(b'a');
         critical::vPortEnterCritical();
-        set_queue_unlock_stage(b'b');
         let q = &mut *q;
         let mut tx_lock = q.tx_lock;
-        set_queue_unlock_stage(b'c');
         while tx_lock > QUEUE_LOCKED_UNMODIFIED {
-            set_queue_unlock_stage(b'd');
             if q.rx_waiters.wake_highest_priority() {
-                set_queue_unlock_stage(b'e');
                 task::missed_yield();
             }
             tx_lock -= 1;
-            set_queue_unlock_stage(b'f');
             if !has_active_waiter(&q.rx_waiters) {
                 break;
             }
         }
         q.tx_lock = QUEUE_UNLOCKED;
-        set_queue_unlock_stage(b'g');
         critical::vPortExitCritical();
 
-        set_queue_unlock_stage(b'h');
         critical::vPortEnterCritical();
-        set_queue_unlock_stage(b'i');
         let mut rx_lock = q.rx_lock;
-        set_queue_unlock_stage(b'j');
         while rx_lock > QUEUE_LOCKED_UNMODIFIED {
-            set_queue_unlock_stage(b'k');
             if q.tx_waiters.wake_highest_priority() {
-                set_queue_unlock_stage(b'l');
                 task::missed_yield();
             }
             rx_lock -= 1;
-            set_queue_unlock_stage(b'm');
             if !has_active_waiter(&q.tx_waiters) {
                 break;
             }
         }
         q.rx_lock = QUEUE_UNLOCKED;
-        set_queue_unlock_stage(b'n');
         critical::vPortExitCritical();
-        set_queue_unlock_stage(b'o');
     }
 }
 

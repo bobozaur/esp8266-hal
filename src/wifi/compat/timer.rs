@@ -6,7 +6,6 @@
 //! the timer daemon task and can safely call blocking APIs.
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicU8, Ordering};
 
 use super::critical;
 use super::queue;
@@ -28,8 +27,10 @@ const TIMER_DAEMON_STACK_BYTES: u16 = 768;
 // `CONFIG_ESP_TIMER_TASK_STACK_SIZE = 2048`.
 // `components/esp_common/include/esp_task.h` defines
 // `ESP_TASK_TIMER_STACK = CONFIG_ESP_TIMER_TASK_STACK_SIZE + TASK_EXTRA_STACK_SIZE`.
+#[cfg(feature = "wifi-smartconfig")]
 const ETS_TIMER_TASK_STACK_BYTES: u16 = 2048;
 // Match SDK `ESP_TASK_TIMER_PRIO = ESP_TASK_PRIO_MAX - 3`.
+#[cfg(feature = "wifi-smartconfig")]
 const ETS_TIMER_TASK_PRIORITY: u32 = task::MAX_PRIORITIES - 3;
 // Match SDK `configTIMER_TASK_PRIORITY = tskIDLE_PRIORITY + 2`.
 const TIMER_DAEMON_PRIORITY: u32 = 2;
@@ -92,8 +93,8 @@ static mut TIMERS: [SoftwareTimer; MAX_TIMERS] = {
 /// Handle for the timer daemon task (NULL if not started).
 static mut TIMER_DAEMON_HANDLE: *mut c_void = core::ptr::null_mut();
 static mut TIMER_QUEUE_HANDLE: *mut c_void = core::ptr::null_mut();
+#[cfg(feature = "wifi-smartconfig")]
 static mut ETS_TIMER_TASK_HANDLE: *mut c_void = core::ptr::null_mut();
-static ETS_TIMER_CONNECT_TRACE: AtomicU8 = AtomicU8::new(0);
 
 unsafe extern "C" fn empty_callback(_: *mut c_void) {}
 
@@ -101,6 +102,7 @@ unsafe extern "C" fn empty_callback(_: *mut c_void) {}
 // Timer daemon task
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "wifi-smartconfig")]
 extern "C" {
     /// ROM-based ETS timer processing.
     fn ets_timer_proc();
@@ -109,28 +111,15 @@ extern "C" {
 /// Dedicated task for processing ROM ETS timers.
 /// Runs at priority 2 (above idle, below ppTask at 13) so timer callbacks
 /// can properly interact with higher-priority blob tasks via yielding.
-/// Diagnostic counter for ets_timer_task iterations.
-#[no_mangle]
-pub static mut g_ets_timer_task_count: u32 = 0;
-
+#[cfg(feature = "wifi-smartconfig")]
 unsafe extern "C" fn ets_timer_task(_param: *mut c_void) {
     loop {
         unsafe {
-            g_ets_timer_task_count += 1;
-            let trace_armed = ETS_TIMER_CONNECT_TRACE.load(Ordering::Acquire) == 1;
-            if trace_armed {
-                ETS_TIMER_CONNECT_TRACE.store(2, Ordering::Release);
-                crate::logger::debug_byte(b'u');
-            }
             // SDK ets_sys.h documents os_timer callbacks with scheduling
             // disabled. Mirror that around the task-dispatched timer pass.
             task::vTaskSuspendAll();
             ets_timer_proc();
             task::xTaskResumeAll();
-            if trace_armed {
-                crate::logger::debug_byte(b'U');
-                ETS_TIMER_CONNECT_TRACE.store(3, Ordering::Release);
-            }
             task::vTaskDelay(1); // 1 tick = 10ms at 100Hz
         }
     }
@@ -141,18 +130,13 @@ unsafe extern "C" fn ets_timer_task(_param: *mut c_void) {
 /// Runs in task context like SDK `prvTimerTask(...)`, so timer callbacks can
 /// safely call blocking APIs.
 unsafe extern "C" fn timer_daemon_task(_param: *mut c_void) {
-    crate::wifi_debugln!("Tmr entry");
     loop {
         unsafe {
-            crate::wifi_debugln!("Tmr 0");
             let now = task::get_tick_count();
-            crate::wifi_debugln!("Tmr 1");
             if process_expired_timers(now) {
-                crate::wifi_debugln!("Tmr exp");
                 continue;
             }
 
-            crate::wifi_debugln!("Tmr 2");
             let wait_ticks = next_timer_wait(now);
             let mut message = DaemonTaskMessage {
                 command_id: 0,
@@ -160,14 +144,11 @@ unsafe extern "C" fn timer_daemon_task(_param: *mut c_void) {
                 timer: core::ptr::null_mut(),
             };
 
-            crate::wifi_debugln!("Tmr wait");
             let recv = queue::xQueueReceive(
                 TIMER_QUEUE_HANDLE,
                 &mut message as *mut DaemonTaskMessage as *mut c_void,
                 wait_ticks,
             );
-            crate::wifi_debugln!("Tmr recv {}", recv);
-
             if recv == PD_PASS {
                 process_timer_command(message);
                 drain_timer_commands();
@@ -185,6 +166,7 @@ pub(crate) unsafe fn create_timer_daemon() {
 
 /// Create the ETS timer processing task. Must be called AFTER esp_wifi_init
 /// (which runs ets_timer_init to set up the ROM timer list).
+#[cfg(feature = "wifi-smartconfig")]
 pub(crate) unsafe fn start_ets_timer_task() -> i32 {
     unsafe {
         if !ETS_TIMER_TASK_HANDLE.is_null() {
@@ -200,11 +182,6 @@ pub(crate) unsafe fn start_ets_timer_task() -> i32 {
             &raw mut ETS_TIMER_TASK_HANDLE,
         )
     }
-}
-
-/// Emit one-shot `u/U` markers around the next ETS timer processing pass.
-pub fn arm_ets_timer_trace_once() {
-    ETS_TIMER_CONNECT_TRACE.store(1, Ordering::Release);
 }
 
 // ---------------------------------------------------------------------------

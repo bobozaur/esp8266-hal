@@ -2,9 +2,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use esp8266_hal::wifi_core::{
-    AccessPointRecord, Channel, DriverError, InitConfig, RawMode, ScanOptions, ScanTimings,
-    WifiApBackend, WifiDriver, WifiFeatureBackend, WifiLifecycleBackend, WifiPacketBackend,
-    WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
+    AccessPointRecord, AuthenticationMethod, Channel, DriverError, InitConfig, RawMode,
+    ScanOptions, ScanTimings, WifiApBackend, WifiDriver, WifiFeatureBackend, WifiLifecycleBackend,
+    WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
 };
 
 #[derive(Clone, Default)]
@@ -64,7 +64,7 @@ impl WifiScanBackend for ScanBackend {
                     [1, 2, 3, 4, 5, 6],
                     Channel::try_from(6u8).unwrap(),
                     -42,
-                    3,
+                    AuthenticationMethod::Wpa2Personal,
                     true,
                 )
                 .unwrap(),
@@ -81,7 +81,7 @@ impl WifiFeatureBackend for ScanBackend {}
 
 #[test]
 fn sta_started_driver_scans_through_typed_backend() {
-    let resources = WifiResources::<4, 1, 1>::new();
+    let resources = WifiResources::<4, 1>::new();
     let requested = Rc::new(RefCell::new(None));
     let backend = ScanBackend {
         requested: requested.clone(),
@@ -101,12 +101,16 @@ fn sta_started_driver_scans_through_typed_backend() {
 
     assert_eq!(records[0].ssid(), b"core-net");
     assert_eq!(records[0].channel().get(), 6);
+    assert_eq!(
+        records[0].authentication(),
+        AuthenticationMethod::Wpa2Personal
+    );
     assert_eq!(requested.borrow().as_ref(), Some(&options));
 }
 
 #[test]
 fn sta_started_driver_scans_into_caller_storage() {
-    let resources = WifiResources::<4, 1, 1>::new();
+    let resources = WifiResources::<4, 1>::new();
     let requested = Rc::new(RefCell::new(None));
     let backend = ScanBackend {
         requested: requested.clone(),

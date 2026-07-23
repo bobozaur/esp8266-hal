@@ -4,12 +4,10 @@
 
 #![deny(warnings)]
 #![allow(unused_braces)]
-#![feature(proc_macro_diagnostic)]
 
 extern crate proc_macro;
 
 use darling::FromMeta;
-use proc_macro::Span;
 use proc_macro::TokenStream;
 use quote::quote;
 use std::collections::HashSet;
@@ -64,9 +62,12 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     if uninitialized && zeroed {
-        Span::call_site()
-            .error("Only one of uninitialized and zeroed")
-            .emit();
+        return parse::Error::new(
+            proc_macro2::Span::call_site(),
+            "only one of `uninitialized` and `zeroed` may be specified",
+        )
+        .to_compile_error()
+        .into();
     }
 
     let section_name_data = if rtc {
@@ -85,37 +86,45 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let section_name_text = if rtc { ".rtc.text" } else { ".rwtext" };
 
-    let item: syn::Item = syn::parse(input).expect("failed to parse input");
+    let item: syn::Item = match syn::parse(input) {
+        Ok(item) => item,
+        Err(error) => return error.to_compile_error().into(),
+    };
 
-    let section: proc_macro2::TokenStream;
-    match item {
-        Item::Static(ref _struct_item) => section = quote! {#[link_section=#section_name_data]},
-        Item::Const(ref _struct_item) => section = quote! {#[link_section=#section_name_data]},
+    let section = match &item {
+        Item::Static(_) | Item::Const(_) => quote! {#[link_section=#section_name_data]},
         Item::Fn(ref function_item) => {
             if zeroed {
-                Span::call_site()
-                    .error("Zeroed is not applicable to functions")
-                    .emit();
+                return parse::Error::new(
+                    function_item.span(),
+                    "`zeroed` is not applicable to functions",
+                )
+                .to_compile_error()
+                .into();
             }
             if uninitialized {
-                Span::call_site()
-                    .error("Uninitialized is not applicable to functions")
-                    .emit();
+                return parse::Error::new(
+                    function_item.span(),
+                    "`uninitialized` is not applicable to functions",
+                )
+                .to_compile_error()
+                .into();
             }
             check_ram_function(function_item);
-            section = quote! {
+            quote! {
                 #[link_section=#section_name_text]
                 #[inline(never)] // make certain function is not inlined
-            };
+            }
         }
         _ => {
-            section = quote! {};
-            item.span()
-                .unstable()
-                .error("#[ram] attribute can only be applied to functions and statics")
-                .emit();
+            return parse::Error::new(
+                item.span(),
+                "#[ram] can only be applied to functions, statics, and constants",
+            )
+            .to_compile_error()
+            .into();
         }
-    }
+    };
 
     let output = quote! {
         #section
@@ -148,9 +157,12 @@ pub fn interrupt(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     if attr_args.len() > 1 {
-        Span::call_site()
-            .error("This attribute accepts zero or 1 arguments")
-            .emit();
+        return parse::Error::new(
+            proc_macro2::Span::call_site(),
+            "this attribute accepts at most one argument",
+        )
+        .to_compile_error()
+        .into();
     }
 
     let ident = f.sig.ident.clone();
@@ -159,15 +171,20 @@ pub fn interrupt(args: TokenStream, input: TokenStream) -> TokenStream {
     if attr_args.len() == 1 {
         match &attr_args[0] {
             Meta::Path(x) => {
-                ident_s = x.get_ident().unwrap();
+                let Some(interrupt) = x.get_ident() else {
+                    return parse::Error::new(x.span(), "interrupt name must be one identifier")
+                        .to_compile_error()
+                        .into();
+                };
+                ident_s = interrupt;
             }
             _ => {
-                Span::call_site()
-                    .error(format!(
-                        "This attribute accepts a string attribute {:?}",
-                        attr_args[0]
-                    ))
-                    .emit();
+                return parse::Error::new(
+                    attr_args[0].span(),
+                    "interrupt name must be one identifier",
+                )
+                .to_compile_error()
+                .into();
             }
         }
     }
@@ -377,7 +394,7 @@ fn eq(attr: &Attribute, name: &str) -> bool {
 ///
 /// Replaces `#[entry]` from `xtensa-lx-rt`. The function must return `-> !`:
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// #[esp8266_hal::main]
 /// fn main() -> ! {
 ///     loop { /* ... */ }
@@ -389,7 +406,7 @@ fn eq(attr: &Attribute, name: &str) -> bool {
 /// Creates an embassy executor and spawns the user's async function as a task.
 /// The optional `Spawner` parameter lets you spawn additional tasks:
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// #[esp8266_hal::main]
 /// async fn main(spawner: embassy_executor::Spawner) {
 ///     // your async application code
@@ -461,6 +478,7 @@ fn main_sync(f: ItemFn) -> TokenStream {
         quote! { __esp8266_hal_user_main() }
     };
 
+    #[cfg(feature = "wifi")]
     let output = quote! {
         #(#attrs)*
         #unsafety fn __esp8266_hal_user_main() -> ! {
@@ -469,30 +487,34 @@ fn main_sync(f: ItemFn) -> TokenStream {
 
         #[export_name = "main"]
         pub extern "C" fn __esp8266_hal_main() -> ! {
-            #[cfg(feature = "wifi")]
-            {
-                // Keep sync WiFi examples runtime-neutral, but still enter
-                // through the SDK-style task/bootstrap context required by
-                // the WiFi blob and compat scheduler.
-                ::esp8266_hal::wifi::compat::memory::init();
-                ::esp8266_hal::wifi::compat::entry::init_newlib_reent();
+            // Keep sync WiFi examples runtime-neutral, but still enter
+            // through the SDK-style task/bootstrap context required by
+            // the WiFi blob and compat scheduler.
+            ::esp8266_hal::wifi::__init_runtime_heap();
+            ::esp8266_hal::wifi::__init_newlib_reent();
 
-                unsafe {
-                    ::esp8266_hal::wifi::compat::entry::run_sdk_main_task(
-                        __esp8266_hal_sync_main_task,
-                    )
-                }
-            }
-
-            #[cfg(not(feature = "wifi"))]
-            {
-                #user_main_call
+            unsafe {
+                ::esp8266_hal::wifi::__run_sdk_main_task(
+                    __esp8266_hal_sync_main_task,
+                )
             }
         }
 
-        #[cfg(feature = "wifi")]
         unsafe extern "C" fn __esp8266_hal_sync_main_task(_param: *mut ::core::ffi::c_void) {
-            ::esp8266_hal::wifi::compat::memory::reclaim_boot_stack_reservation();
+            ::esp8266_hal::wifi::__reclaim_boot_stack_reservation();
+            #user_main_call
+        }
+    };
+
+    #[cfg(not(feature = "wifi"))]
+    let output = quote! {
+        #(#attrs)*
+        #unsafety fn __esp8266_hal_user_main() -> ! {
+            #body
+        }
+
+        #[export_name = "main"]
+        pub extern "C" fn __esp8266_hal_main() -> ! {
             #user_main_call
         }
     };
@@ -502,6 +524,26 @@ fn main_sync(f: ItemFn) -> TokenStream {
 
 /// Async entry point — embassy executor + task setup.
 fn main_async(f: ItemFn) -> TokenStream {
+    #[cfg(not(feature = "wifi"))]
+    {
+        parse::Error::new(
+            f.sig.asyncness
+                .expect("main_async is only called for async functions")
+                .span(),
+            "async `#[main]` requires the `wifi` feature; enable an esp8266-hal Wi-Fi feature or use a synchronous `#[main]`",
+        )
+        .to_compile_error()
+        .into()
+    }
+
+    #[cfg(feature = "wifi")]
+    {
+        main_async_wifi(f)
+    }
+}
+
+#[cfg(feature = "wifi")]
+fn main_async_wifi(f: ItemFn) -> TokenStream {
     // Validate return type: must be () or -> !
     match &f.sig.output {
         ReturnType::Default => {} // () — fine
@@ -552,19 +594,20 @@ fn main_async(f: ItemFn) -> TokenStream {
         #[no_mangle]
         pub extern "C" fn main() -> ! {
             // Initialize the Rust heap (backed by esp-alloc).
-            ::esp8266_hal::wifi::compat::memory::init();
+            ::esp8266_hal::wifi::__init_runtime_heap();
 
             // Initialize newlib's _global_impure_ptr so C library functions
             // (calloc, printf, etc.) used by WiFi blob don't crash.
-            ::esp8266_hal::wifi::compat::entry::init_newlib_reent();
+            ::esp8266_hal::wifi::__init_newlib_reent();
 
-            unsafe { ::esp8266_hal::wifi::compat::entry::run_sdk_main_task(__esp8266_hal_executor_task) }
+            unsafe { ::esp8266_hal::wifi::__run_sdk_main_task(__esp8266_hal_executor_task) }
         }
 
         unsafe extern "C" fn __esp8266_hal_executor_task(_param: *mut ::core::ffi::c_void) {
-            ::esp8266_hal::wifi::compat::memory::reclaim_boot_stack_reservation();
-            static __EXECUTOR: ::static_cell::StaticCell<::esp8266_hal::wifi::executor::Executor> =
-                ::static_cell::StaticCell::new();
+            ::esp8266_hal::wifi::__reclaim_boot_stack_reservation();
+            static __EXECUTOR: ::esp8266_hal::wifi::__StaticCell<
+                ::esp8266_hal::wifi::executor::Executor,
+            > = ::esp8266_hal::wifi::__StaticCell::new();
             let executor = __EXECUTOR.init(::esp8266_hal::wifi::executor::Executor::new());
             executor.run(|spawner| {
                 spawner.must_spawn(__esp8266_hal_bootstrap_task(spawner));

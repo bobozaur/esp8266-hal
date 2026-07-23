@@ -1,32 +1,47 @@
+use super::packet::RawRxRecord;
+#[cfg(any(feature = "wifi-esp-now", feature = "wifi-promiscuous"))]
+use super::Channel;
+#[cfg(all(feature = "wifi", target_arch = "xtensa"))]
+use super::WifiRawDataLink;
 use super::{
-    ApStationInfo, Channel, ClientConfig, ConnectError, Deadline, DisconnectError, DriverError,
-    EspNowAccessPointPeerConfig, EspNowPeerConfig, EspNowRxFrame, EspNowStationPeerConfig,
-    EspNowTxStatus, EventCursor, HasAp, HasSta, LinkState, PromiscuousControlFilter,
-    PromiscuousFilter, PromiscuousRxFrame, RawRxRecord, SmartConfigStartConfig, SmartConfigTimeout,
-    SmartConfigType, Started, WifiBackend, WifiDataLink, WifiDriver, WifiEvent, WifiResources,
-    WpsConfig, ESP_NOW_MAX_PAYLOAD,
+    ApStationInfo, ConnectError, Deadline, DisconnectError, DriverError, HasAp, HasSta, LinkState,
+    Started, WifiBackend, WifiDataLink, WifiDriver, WifiResources,
 };
-use core::marker::PhantomData;
+#[cfg(feature = "wifi-smartconfig")]
+use super::{
+    ClientConfig, Ipv4Addr, SmartConfigCredentials, SmartConfigEvent, SmartConfigStartConfig,
+    SmartConfigTimeout, SmartConfigType,
+};
+#[cfg(feature = "wifi-esp-now")]
+use super::{
+    EspNowAccessPointPeerConfig, EspNowPeerConfig, EspNowRxFrame, EspNowSendStatus,
+    EspNowStationPeerConfig, ESP_NOW_MAX_PAYLOAD,
+};
+#[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+use super::{EventCursor, WifiEvent};
+#[cfg(feature = "wifi-promiscuous")]
+use super::{PromiscuousControlFilter, PromiscuousFilter, PromiscuousRxFrame};
+#[cfg(feature = "wifi-wps")]
+use super::{WpsConfig, WpsEvent};
 use core::task::{Poll, Waker};
+use core::{cell::RefCell, marker::PhantomData};
 
+#[cfg(feature = "wifi-promiscuous")]
 const PROMISCUOUS_SETTLE_SPINS: u8 = 2;
-
-pub struct StaSession {
-    connected: bool,
-}
-
-impl StaSession {
-    pub const fn is_connected(&self) -> bool {
-        self.connected
-    }
-}
+#[cfg(feature = "wifi-smartconfig")]
+const ESPTOUCH_ACK_PORT: u16 = 18_266;
+#[cfg(feature = "wifi-smartconfig")]
+const ESPTOUCH_ACK_FRAME_LEN: usize = 60;
+#[cfg(feature = "wifi-smartconfig")]
+const ESPTOUCH_ACK_COPIES: usize = 5;
+#[cfg(feature = "wifi-smartconfig")]
+const ESPTOUCH_ACK_ATTEMPTS: usize = 40;
 
 pub struct StaHandle<
     'a,
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -37,40 +52,16 @@ pub struct StaHandle<
     pub(crate) resources: &'a WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
         AP_RX_SLOTS,
         AP_RX_BYTES,
     >,
-    pub(crate) cursor: EventCursor,
 }
 
-pub struct ApHandle<
-    'a,
-    B,
-    const EVENTS: usize,
-    const RX: usize,
-    const SUBS: usize,
-    const ESP_NOW_PEERS: usize = 0,
-    const ESP_NOW_RX: usize = 0,
-    const PROMISCUOUS_RX: usize = 0,
-    const AP_RX_SLOTS: usize = 0,
-    const AP_RX_BYTES: usize = 0,
-> {
+pub struct ApHandle<'a, B> {
     pub(crate) backend: &'a mut B,
-    pub(crate) resources: &'a WifiResources<
-        EVENTS,
-        RX,
-        SUBS,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >,
-    pub(crate) cursor: EventCursor,
 }
 
 pub struct StaLink<
@@ -79,7 +70,6 @@ pub struct StaLink<
     B: WifiBackend,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -90,7 +80,6 @@ pub struct StaLink<
     pub(crate) resources: &'d WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -107,7 +96,6 @@ pub struct ApLink<
     B: WifiBackend,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -118,7 +106,6 @@ pub struct ApLink<
     pub(crate) resources: &'d WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -129,12 +116,88 @@ pub struct ApLink<
     pub(crate) _mode: PhantomData<M>,
 }
 
+/// Owner for simultaneous station and access-point packet paths.
+pub struct MixedLink<
+    'd,
+    B: WifiBackend,
+    const EVENTS: usize,
+    const RX: usize,
+    const ESP_NOW_PEERS: usize = 0,
+    const ESP_NOW_RX: usize = 0,
+    const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
+> {
+    pub(crate) backend: RefCell<Option<B>>,
+    pub(crate) resources: &'d WifiResources<
+        EVENTS,
+        RX,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
+    pub(crate) sta_rx_attached: bool,
+    pub(crate) ap_rx_attached: bool,
+}
+
+/// Station endpoint borrowed from a [`MixedLink`].
+pub struct MixedStaLink<
+    'a,
+    'd,
+    B: WifiBackend,
+    const EVENTS: usize,
+    const RX: usize,
+    const ESP_NOW_PEERS: usize = 0,
+    const ESP_NOW_RX: usize = 0,
+    const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
+> {
+    backend: &'a RefCell<Option<B>>,
+    resources: &'d WifiResources<
+        EVENTS,
+        RX,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
+}
+
+/// Access-point endpoint borrowed from a [`MixedLink`].
+pub struct MixedApLink<
+    'a,
+    'd,
+    B: WifiBackend,
+    const EVENTS: usize,
+    const RX: usize,
+    const ESP_NOW_PEERS: usize = 0,
+    const ESP_NOW_RX: usize = 0,
+    const PROMISCUOUS_RX: usize = 0,
+    const AP_RX_SLOTS: usize = 0,
+    const AP_RX_BYTES: usize = 0,
+> {
+    backend: &'a RefCell<Option<B>>,
+    resources: &'d WifiResources<
+        EVENTS,
+        RX,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >,
+}
+
+#[cfg(feature = "wifi-promiscuous")]
 pub struct PromiscuousSession<
     'a,
     B: WifiBackend,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -145,7 +208,6 @@ pub struct PromiscuousSession<
     pub(crate) resources: &'a WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -157,13 +219,13 @@ pub struct PromiscuousSession<
     control_filter: PromiscuousControlFilter,
 }
 
+#[cfg(feature = "wifi-esp-now")]
 pub struct EspNowSession<
     'a,
     M,
     B: WifiBackend,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -174,7 +236,6 @@ pub struct EspNowSession<
     pub(crate) resources: &'a WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -182,15 +243,16 @@ pub struct EspNowSession<
         AP_RX_BYTES,
     >,
     active: bool,
+    cleanup_needed: bool,
     _mode: PhantomData<M>,
 }
 
+#[cfg(feature = "wifi-wps")]
 pub struct WpsSession<
     'a,
     B: WifiBackend,
     const EVENTS: usize = 0,
     const RX: usize = 0,
-    const SUBS: usize = 0,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -201,7 +263,6 @@ pub struct WpsSession<
     resources: &'a WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -212,12 +273,12 @@ pub struct WpsSession<
     active: bool,
 }
 
+#[cfg(feature = "wifi-smartconfig")]
 pub struct SmartConfigSession<
     'a,
     B: WifiBackend,
     const EVENTS: usize = 0,
     const RX: usize = 0,
-    const SUBS: usize = 0,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -228,7 +289,6 @@ pub struct SmartConfigSession<
     resources: &'a WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -244,7 +304,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -256,7 +315,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -268,33 +326,18 @@ impl<
         self.backend.connect()
     }
 
-    pub fn connect_blocking(&mut self, timeout_ms: u32) -> Result<StaSession, DriverError> {
+    pub fn connect_blocking(&mut self, timeout_ms: u32) -> Result<(), DriverError> {
         if let Some(result) = self.backend.connect_blocking(timeout_ms) {
             result?;
-            return Ok(StaSession { connected: true });
+            return Ok(());
         }
 
         self.connect().map_err(map_connect_error)?;
         let deadline = Deadline::new(self.backend.now_ms(), timeout_ms);
 
         loop {
-            let cursor = &mut self.cursor;
-            if let Some(result) = self.resources.events.with(|events| {
-                while let Some(event) = events.try_next(cursor) {
-                    match event {
-                        WifiEvent::StaConnected => {
-                            return Some(Ok(StaSession { connected: true }));
-                        }
-                        WifiEvent::StaDisconnected { .. } => {
-                            return Some(Err(DriverError::Disconnected));
-                        }
-                        _ => {}
-                    }
-                }
-
-                None
-            }) {
-                return result;
+            if self.resources.link_state() == LinkState::Up {
+                return Ok(());
             }
 
             if deadline.is_expired(self.backend.now_ms()) {
@@ -310,30 +353,14 @@ impl<
     /// Dropping this future does not cancel the SDK connection attempt or its
     /// auto-retry state. Call [`disconnect`](Self::disconnect) when a timeout or
     /// higher-level cancellation should stop the in-flight association.
-    pub async fn connect_async(&mut self) -> Result<StaSession, ConnectError> {
+    pub async fn connect_async(&mut self) -> Result<(), ConnectError> {
         self.connect()?;
         let resources = self.resources;
-        let cursor = &mut self.cursor;
 
         core::future::poll_fn(|cx| {
-            resources.register_link_waker(cx.waker());
-
-            if let Some(result) = resources.events.with(|events| {
-                while let Some(event) = events.try_next(cursor) {
-                    match event {
-                        WifiEvent::StaConnected => {
-                            return Some(Ok(StaSession { connected: true }));
-                        }
-                        WifiEvent::StaDisconnected { .. } => {
-                            return Some(Err(ConnectError::Disconnected));
-                        }
-                        _ => {}
-                    }
-                }
-
-                None
-            }) {
-                Poll::Ready(result)
+            resources.register_sta_link_waker(cx.waker());
+            if resources.link_state() == LinkState::Up {
+                Poll::Ready(Ok(()))
             } else {
                 Poll::Pending
             }
@@ -346,92 +373,132 @@ impl<
     }
 }
 
-impl<
-        B,
-        const EVENTS: usize,
-        const RX: usize,
-        const SUBS: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    > Drop
-    for StaHandle<
-        '_,
-        B,
-        EVENTS,
-        RX,
-        SUBS,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    fn drop(&mut self) {
-        self.resources.release_event_cursor(&mut self.cursor);
-    }
-}
-
-impl<
-        'a,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const SUBS: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    ApHandle<
-        'a,
-        B,
-        EVENTS,
-        RX,
-        SUBS,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
+impl<B: WifiBackend> ApHandle<'_, B> {
     pub fn connected_stations<const N: usize>(
         &mut self,
     ) -> Result<heapless::Vec<ApStationInfo, N>, DriverError> {
         self.backend.connected_ap_stations()
     }
 
-    pub fn deauth_station(&mut self, aid: u16) -> Result<(), DriverError> {
-        self.backend.deauth_ap_station(aid)
-    }
-
     pub fn deauth_all(&mut self) -> Result<(), DriverError> {
-        self.backend.deauth_ap_station(0)
+        self.backend.deauth_all_ap_stations()
     }
 }
 
 impl<
-        B,
+        'd,
+        B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
+        const ESP_NOW_PEERS: usize,
+        const ESP_NOW_RX: usize,
+        const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    MixedLink<
+        'd,
+        B,
+        EVENTS,
+        RX,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
+{
+    pub fn split(
+        &mut self,
+    ) -> (
+        MixedStaLink<
+            '_,
+            'd,
+            B,
+            EVENTS,
+            RX,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
+        MixedApLink<
+            '_,
+            'd,
+            B,
+            EVENTS,
+            RX,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
+    ) {
+        (
+            MixedStaLink {
+                backend: &self.backend,
+                resources: self.resources,
+            },
+            MixedApLink {
+                backend: &self.backend,
+                resources: self.resources,
+            },
+        )
+    }
+
+    pub fn into_driver(
+        mut self,
+    ) -> Result<
+        WifiDriver<
+            'd,
+            Started<super::MixedMode>,
+            B,
+            EVENTS,
+            RX,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
+        DriverError,
+    > {
+        let backend = self.backend.get_mut();
+        let backend = backend.as_mut().ok_or(DriverError::BackendRejected)?;
+        backend.detach_ap_rx();
+        backend.detach_sta_rx();
+        self.resources.drain_ap_rx();
+        self.resources.drain_sta_rx();
+        self.ap_rx_attached = false;
+        self.sta_rx_attached = false;
+        let backend = self
+            .backend
+            .get_mut()
+            .take()
+            .ok_or(DriverError::BackendRejected)?;
+        let resources = self.resources;
+        core::mem::forget(self);
+        Ok(WifiDriver::from_started_parts(resources, backend))
+    }
+}
+
+impl<
+        B: WifiBackend,
+        const EVENTS: usize,
+        const RX: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
         const AP_RX_SLOTS: usize,
         const AP_RX_BYTES: usize,
     > Drop
-    for ApHandle<
+    for MixedLink<
         '_,
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -440,9 +507,239 @@ impl<
     >
 {
     fn drop(&mut self) {
-        self.resources.release_event_cursor(&mut self.cursor);
+        if let Some(backend) = self.backend.get_mut().as_mut() {
+            if self.ap_rx_attached {
+                backend.detach_ap_rx();
+            }
+            if self.sta_rx_attached {
+                backend.detach_sta_rx();
+            }
+        }
     }
 }
+
+macro_rules! impl_mixed_endpoint {
+    (
+        $link:ident,
+        $register_link:ident,
+        $register_rx:ident,
+        $link_state:ident,
+        $mac_address:ident,
+        $refresh_rx:ident,
+        $queued_rx:ident,
+        $dequeue_rx:ident,
+        $transmit:ident,
+        $max_frame_size:expr
+    ) => {
+        impl<
+                'd,
+                B: WifiBackend,
+                const EVENTS: usize,
+                const RX: usize,
+                const ESP_NOW_PEERS: usize,
+                const ESP_NOW_RX: usize,
+                const PROMISCUOUS_RX: usize,
+                const AP_RX_SLOTS: usize,
+                const AP_RX_BYTES: usize,
+            >
+            $link<
+                '_,
+                'd,
+                B,
+                EVENTS,
+                RX,
+                ESP_NOW_PEERS,
+                ESP_NOW_RX,
+                PROMISCUOUS_RX,
+                AP_RX_SLOTS,
+                AP_RX_BYTES,
+            >
+        {
+            pub fn register_link_waker(&self, waker: &Waker) {
+                self.resources.$register_link(waker);
+            }
+
+            pub fn register_rx_waker(&self, waker: &Waker) {
+                self.resources.$register_rx(waker);
+            }
+
+            pub fn link_state(&self) -> LinkState {
+                self.resources.$link_state()
+            }
+
+            pub fn mac_address(&self) -> Result<[u8; 6], DriverError> {
+                let backend = self
+                    .backend
+                    .try_borrow()
+                    .map_err(|_| DriverError::WouldBlock)?;
+                backend
+                    .as_ref()
+                    .ok_or(DriverError::BackendRejected)?
+                    .$mac_address()
+            }
+
+            pub const fn max_frame_size(&self) -> usize {
+                $max_frame_size
+            }
+
+            pub fn refresh_rx(&mut self) -> Result<(), DriverError> {
+                let mut backend = self
+                    .backend
+                    .try_borrow_mut()
+                    .map_err(|_| DriverError::WouldBlock)?;
+                backend
+                    .as_mut()
+                    .ok_or(DriverError::BackendRejected)?
+                    .$refresh_rx()
+            }
+
+            pub fn has_rx_data(&self) -> bool {
+                self.resources.$queued_rx() != 0
+            }
+
+            pub(crate) fn receive_record(&mut self) -> Option<RawRxRecord> {
+                self.resources.$dequeue_rx()
+            }
+
+            pub fn receive(&mut self, dst: &mut [u8]) -> Result<Option<usize>, DriverError> {
+                self.receive_record()
+                    .map(|record| record.copy_into(dst))
+                    .transpose()
+            }
+
+            pub fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+                super::validate_frame_len(frame.len())?;
+                let mut backend = self
+                    .backend
+                    .try_borrow_mut()
+                    .map_err(|_| DriverError::WouldBlock)?;
+                backend
+                    .as_mut()
+                    .ok_or(DriverError::BackendRejected)?
+                    .$transmit(frame)
+            }
+        }
+
+        impl<
+                B: WifiBackend,
+                const EVENTS: usize,
+                const RX: usize,
+                const ESP_NOW_PEERS: usize,
+                const ESP_NOW_RX: usize,
+                const PROMISCUOUS_RX: usize,
+                const AP_RX_SLOTS: usize,
+                const AP_RX_BYTES: usize,
+            > WifiDataLink
+            for $link<
+                '_,
+                '_,
+                B,
+                EVENTS,
+                RX,
+                ESP_NOW_PEERS,
+                ESP_NOW_RX,
+                PROMISCUOUS_RX,
+                AP_RX_SLOTS,
+                AP_RX_BYTES,
+            >
+        {
+            fn register_link_waker(&self, waker: &Waker) {
+                self.register_link_waker(waker);
+            }
+
+            fn register_rx_waker(&self, waker: &Waker) {
+                self.register_rx_waker(waker);
+            }
+
+            fn link_state(&self) -> LinkState {
+                self.link_state()
+            }
+
+            fn mac_address(&self) -> Result<[u8; 6], DriverError> {
+                self.mac_address()
+            }
+
+            fn max_frame_size(&self) -> usize {
+                self.max_frame_size()
+            }
+
+            fn refresh_rx(&mut self) -> Result<(), DriverError> {
+                self.refresh_rx()
+            }
+
+            fn has_rx_data(&self) -> bool {
+                self.has_rx_data()
+            }
+
+            fn receive(&mut self, dst: &mut [u8]) -> Result<Option<usize>, DriverError> {
+                self.receive(dst)
+            }
+
+            fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+                self.transmit(frame)
+            }
+        }
+
+        #[cfg(all(feature = "wifi", target_arch = "xtensa"))]
+        impl<
+                B: WifiBackend,
+                const EVENTS: usize,
+                const RX: usize,
+                const ESP_NOW_PEERS: usize,
+                const ESP_NOW_RX: usize,
+                const PROMISCUOUS_RX: usize,
+                const AP_RX_SLOTS: usize,
+                const AP_RX_BYTES: usize,
+            > WifiRawDataLink
+            for $link<
+                '_,
+                '_,
+                B,
+                EVENTS,
+                RX,
+                ESP_NOW_PEERS,
+                ESP_NOW_RX,
+                PROMISCUOUS_RX,
+                AP_RX_SLOTS,
+                AP_RX_BYTES,
+            >
+        {
+            fn receive_record(&mut self) -> Option<RawRxRecord> {
+                self.receive_record()
+            }
+        }
+    };
+}
+
+impl_mixed_endpoint!(
+    MixedStaLink,
+    register_sta_link_waker,
+    register_rx_waker,
+    link_state,
+    sta_mac_address,
+    refresh_sta_rx,
+    queued_rx,
+    dequeue_rx,
+    transmit,
+    super::MAX_ETHERNET_FRAME_SIZE
+);
+
+impl_mixed_endpoint!(
+    MixedApLink,
+    register_ap_link_waker,
+    register_ap_rx_waker,
+    ap_link_state,
+    ap_mac_address,
+    refresh_ap_rx,
+    queued_ap_rx,
+    dequeue_ap_rx,
+    transmit_ap,
+    if AP_RX_BYTES < super::MAX_ETHERNET_FRAME_SIZE {
+        AP_RX_BYTES
+    } else {
+        super::MAX_ETHERNET_FRAME_SIZE
+    }
+);
 
 impl<
         'd,
@@ -450,7 +747,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -463,7 +759,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -480,7 +775,7 @@ impl<
     }
 
     pub fn register_link_waker(&self, waker: &Waker) {
-        self.resources.register_link_waker(waker);
+        self.resources.register_sta_link_waker(waker);
     }
 
     pub fn register_rx_waker(&self, waker: &Waker) {
@@ -499,6 +794,10 @@ impl<
         self.backend()?.sta_mac_address()
     }
 
+    pub const fn max_frame_size(&self) -> usize {
+        super::MAX_ETHERNET_FRAME_SIZE
+    }
+
     pub fn refresh_sta_rx(&mut self) -> Result<(), DriverError> {
         self.backend_mut()?.refresh_sta_rx()
     }
@@ -507,23 +806,18 @@ impl<
         self.resources.queued_rx() != 0
     }
 
-    pub fn queued_rx(&self) -> usize {
-        self.resources.queued_rx()
-    }
-
-    pub fn rx_drops(&self) -> u32 {
-        self.resources.rx_drops()
-    }
-
-    pub fn receive_raw(&mut self) -> Option<RawRxRecord> {
+    pub(crate) fn receive_record(&mut self) -> Option<RawRxRecord> {
         self.resources.dequeue_rx()
     }
 
-    pub fn receive(&mut self, dst: &mut [u8]) -> Option<usize> {
-        self.receive_raw().map(|record| record.copy_into(dst))
+    pub fn receive(&mut self, dst: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        self.receive_record()
+            .map(|record| record.copy_into(dst))
+            .transpose()
     }
 
     pub fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+        super::validate_frame_len(frame.len())?;
         self.backend_mut()?.transmit(frame)
     }
 
@@ -532,7 +826,6 @@ impl<
     ) -> &'d WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -551,7 +844,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -561,6 +853,7 @@ impl<
         DriverError,
     > {
         self.backend_mut()?.detach_sta_rx();
+        self.resources.drain_sta_rx();
         self.rx_attached = false;
         let resources = self.resources;
         let backend = self.backend.take().ok_or(DriverError::BackendRejected)?;
@@ -574,7 +867,6 @@ impl<
         B,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -587,7 +879,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -612,7 +903,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -625,7 +915,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -642,7 +931,7 @@ impl<
     }
 
     pub fn register_link_waker(&self, waker: &Waker) {
-        self.resources.register_link_waker(waker);
+        self.resources.register_ap_link_waker(waker);
     }
 
     pub fn register_rx_waker(&self, waker: &Waker) {
@@ -657,6 +946,14 @@ impl<
         self.backend()?.ap_mac_address()
     }
 
+    pub const fn max_frame_size(&self) -> usize {
+        if AP_RX_BYTES < super::MAX_ETHERNET_FRAME_SIZE {
+            AP_RX_BYTES
+        } else {
+            super::MAX_ETHERNET_FRAME_SIZE
+        }
+    }
+
     pub fn refresh_ap_rx(&mut self) -> Result<(), DriverError> {
         self.backend_mut()?.refresh_ap_rx()
     }
@@ -665,23 +962,18 @@ impl<
         self.resources.queued_ap_rx() != 0
     }
 
-    pub fn queued_rx(&self) -> usize {
-        self.resources.queued_ap_rx()
-    }
-
-    pub fn rx_drops(&self) -> u32 {
-        self.resources.ap_rx_drops()
-    }
-
-    pub fn receive_raw(&mut self) -> Option<RawRxRecord> {
+    pub(crate) fn receive_record(&mut self) -> Option<RawRxRecord> {
         self.resources.dequeue_ap_rx()
     }
 
-    pub fn receive(&mut self, dst: &mut [u8]) -> Option<usize> {
-        self.receive_raw().map(|record| record.copy_into(dst))
+    pub fn receive(&mut self, dst: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        self.receive_record()
+            .map(|record| record.copy_into(dst))
+            .transpose()
     }
 
     pub fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+        super::validate_frame_len(frame.len())?;
         self.backend_mut()?.transmit_ap(frame)
     }
 
@@ -690,7 +982,6 @@ impl<
     ) -> &'d WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -709,7 +1000,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -719,6 +1009,7 @@ impl<
         DriverError,
     > {
         self.backend_mut()?.detach_ap_rx();
+        self.resources.drain_ap_rx();
         self.rx_attached = false;
         let resources = self.resources;
         let backend = self.backend.take().ok_or(DriverError::BackendRejected)?;
@@ -732,7 +1023,6 @@ impl<
         B,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -745,7 +1035,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -769,7 +1058,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -782,7 +1070,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -806,6 +1093,10 @@ impl<
         StaLink::mac_address(self)
     }
 
+    fn max_frame_size(&self) -> usize {
+        StaLink::max_frame_size(self)
+    }
+
     fn refresh_rx(&mut self) -> Result<(), DriverError> {
         self.refresh_sta_rx()
     }
@@ -814,16 +1105,8 @@ impl<
         StaLink::has_rx_data(self)
     }
 
-    fn queued_rx(&self) -> usize {
-        StaLink::queued_rx(self)
-    }
-
-    fn rx_drops(&self) -> u32 {
-        StaLink::rx_drops(self)
-    }
-
-    fn receive_raw(&mut self) -> Option<RawRxRecord> {
-        StaLink::receive_raw(self)
+    fn receive(&mut self, dst: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        StaLink::receive(self, dst)
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -836,7 +1119,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -849,7 +1131,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -873,6 +1154,10 @@ impl<
         ApLink::mac_address(self)
     }
 
+    fn max_frame_size(&self) -> usize {
+        ApLink::max_frame_size(self)
+    }
+
     fn refresh_rx(&mut self) -> Result<(), DriverError> {
         self.refresh_ap_rx()
     }
@@ -881,16 +1166,8 @@ impl<
         ApLink::has_rx_data(self)
     }
 
-    fn queued_rx(&self) -> usize {
-        ApLink::queued_rx(self)
-    }
-
-    fn rx_drops(&self) -> u32 {
-        ApLink::rx_drops(self)
-    }
-
-    fn receive_raw(&mut self) -> Option<RawRxRecord> {
-        ApLink::receive_raw(self)
+    fn receive(&mut self, dst: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        ApLink::receive(self, dst)
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -898,12 +1175,72 @@ impl<
     }
 }
 
+#[cfg(all(feature = "wifi", target_arch = "xtensa"))]
+impl<
+        M: HasSta,
+        B: WifiBackend,
+        const EVENTS: usize,
+        const RX: usize,
+        const ESP_NOW_PEERS: usize,
+        const ESP_NOW_RX: usize,
+        const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    > WifiRawDataLink
+    for StaLink<
+        '_,
+        M,
+        B,
+        EVENTS,
+        RX,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
+{
+    fn receive_record(&mut self) -> Option<RawRxRecord> {
+        StaLink::receive_record(self)
+    }
+}
+
+#[cfg(all(feature = "wifi", target_arch = "xtensa"))]
+impl<
+        M: HasAp,
+        B: WifiBackend,
+        const EVENTS: usize,
+        const RX: usize,
+        const ESP_NOW_PEERS: usize,
+        const ESP_NOW_RX: usize,
+        const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    > WifiRawDataLink
+    for ApLink<
+        '_,
+        M,
+        B,
+        EVENTS,
+        RX,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
+{
+    fn receive_record(&mut self) -> Option<RawRxRecord> {
+        ApLink::receive_record(self)
+    }
+}
+
+#[cfg(feature = "wifi-promiscuous")]
 impl<
         'a,
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -915,7 +1252,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -928,7 +1264,6 @@ impl<
         resources: &'a WifiResources<
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -946,21 +1281,29 @@ impl<
     }
 
     pub fn start(&mut self, filter: PromiscuousFilter) -> Result<(), DriverError> {
+        if self.active {
+            return Err(DriverError::BackendRejected);
+        }
+        self.resources.reset_promiscuous_runtime();
         for _ in 0..PROMISCUOUS_SETTLE_SPINS {
             self.backend.spin_once();
         }
         self.backend.enable_promiscuous(filter)?;
+        self.active = true;
+        self.filter = filter;
         if !self.control_filter.is_empty() {
             if let Err(error) = self
                 .backend
                 .set_promiscuous_control_filter(self.control_filter)
             {
-                let _ = self.backend.disable_promiscuous();
+                if self.backend.disable_promiscuous().is_ok() {
+                    self.active = false;
+                    self.filter = PromiscuousFilter::empty();
+                    self.resources.reset_promiscuous_runtime();
+                }
                 return Err(error);
             }
         }
-        self.active = true;
-        self.filter = filter;
         Ok(())
     }
 
@@ -989,6 +1332,7 @@ impl<
     pub fn stop(&mut self) -> Result<(), DriverError> {
         if self.active {
             self.backend.disable_promiscuous()?;
+            self.resources.reset_promiscuous_runtime();
             self.active = false;
             self.filter = PromiscuousFilter::empty();
         }
@@ -1010,21 +1354,13 @@ impl<
     pub fn receive(&mut self) -> Option<PromiscuousRxFrame> {
         self.resources.dequeue_promiscuous_rx()
     }
-
-    pub fn queued(&self) -> usize {
-        self.resources.queued_promiscuous_rx()
-    }
-
-    pub fn drops(&self) -> u32 {
-        self.resources.promiscuous_rx_drops()
-    }
 }
 
+#[cfg(feature = "wifi-promiscuous")]
 impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -1036,7 +1372,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -1045,19 +1380,19 @@ impl<
     >
 {
     fn drop(&mut self) {
-        if self.active {
-            let _ = self.backend.disable_promiscuous();
+        if self.active && self.backend.disable_promiscuous().is_ok() {
+            self.resources.reset_promiscuous_runtime();
         }
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl<
         'a,
         M,
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -1070,7 +1405,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -1083,7 +1417,6 @@ impl<
         resources: &'a WifiResources<
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -1095,6 +1428,7 @@ impl<
             backend,
             resources,
             active: false,
+            cleanup_needed: false,
             _mode: PhantomData,
         }
     }
@@ -1104,15 +1438,28 @@ impl<
             return Ok(());
         }
 
-        self.backend.enable_esp_now()?;
-        self.active = true;
-        Ok(())
+        if self.cleanup_needed {
+            self.backend.disable_esp_now()?;
+            self.resources.reset_esp_now_runtime();
+            self.cleanup_needed = false;
+        }
+
+        self.cleanup_needed = true;
+        match self.backend.enable_esp_now() {
+            Ok(()) => {
+                self.active = true;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn stop(&mut self) -> Result<(), DriverError> {
-        if self.active {
+        if self.cleanup_needed {
             self.backend.disable_esp_now()?;
+            self.resources.reset_esp_now_runtime();
             self.active = false;
+            self.cleanup_needed = false;
         }
         Ok(())
     }
@@ -1143,22 +1490,31 @@ impl<
         self.resources.register_esp_now_peer(peer.peer_record())
     }
 
-    fn update_peer_inner(&mut self, peer: &EspNowPeerConfig) -> Result<bool, DriverError> {
+    fn update_peer_inner(&mut self, peer: &EspNowPeerConfig) -> Result<(), DriverError> {
         self.ensure_active()?;
         if !self.resources.contains_esp_now_peer(peer.peer_addr()) {
             return Err(DriverError::BackendRejected);
         }
 
         self.backend.modify_esp_now_peer(peer)?;
-        self.resources.register_esp_now_peer(peer.peer_record())
+        self.resources.register_esp_now_peer(peer.peer_record())?;
+        Ok(())
     }
 
     pub fn remove_peer(&mut self, peer_addr: &[u8; 6]) -> Result<bool, DriverError> {
         self.ensure_active()?;
+        if !self.resources.contains_esp_now_peer(peer_addr) {
+            return Ok(false);
+        }
         self.backend.remove_esp_now_peer(peer_addr)?;
         Ok(self.resources.remove_esp_now_peer(peer_addr))
     }
 
+    /// Starts one asynchronous ESP-NOW transmission.
+    ///
+    /// Only one transmission may be in flight. This returns
+    /// [`DriverError::WouldBlock`] until the previous completion has been
+    /// consumed with [`send_status`](Self::send_status).
     pub fn send(&mut self, peer_addr: &[u8; 6], payload: &[u8]) -> Result<(), DriverError> {
         self.ensure_active()?;
         if payload.len() > ESP_NOW_MAX_PAYLOAD {
@@ -1167,31 +1523,24 @@ impl<
         if !self.resources.contains_esp_now_peer(peer_addr) {
             return Err(DriverError::BackendRejected);
         }
-        self.backend.send_esp_now(peer_addr, payload)
+        self.resources.reserve_esp_now_tx()?;
+        if let Err(error) = self.backend.send_esp_now(peer_addr, payload) {
+            self.resources.cancel_esp_now_tx();
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn receive(&mut self) -> Option<EspNowRxFrame> {
         self.resources.dequeue_esp_now_rx()
     }
 
-    pub fn send_status(&mut self) -> Option<EspNowTxStatus> {
-        self.resources.dequeue_esp_now_tx_status()
-    }
-
-    pub fn queued(&self) -> usize {
-        self.resources.queued_esp_now_rx()
-    }
-
-    pub fn drops(&self) -> u32 {
-        self.resources.esp_now_rx_drops()
-    }
-
-    pub fn queued_send_status(&self) -> usize {
-        self.resources.queued_esp_now_tx_status()
-    }
-
-    pub fn send_status_drops(&self) -> u32 {
-        self.resources.esp_now_tx_status_drops()
+    /// Takes the completed send status and releases the TX slot.
+    ///
+    /// `None` means either that no send is active or that its completion is
+    /// still pending.
+    pub fn send_status(&mut self) -> Option<EspNowSendStatus> {
+        self.resources.take_esp_now_tx_status()
     }
 
     pub fn peer_count(&self) -> usize {
@@ -1207,13 +1556,13 @@ impl<
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl<
         'a,
         M: HasSta,
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -1226,7 +1575,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -1241,18 +1589,18 @@ impl<
     pub fn update_station_peer(
         &mut self,
         peer: EspNowStationPeerConfig,
-    ) -> Result<bool, DriverError> {
+    ) -> Result<(), DriverError> {
         self.update_peer_inner(peer.inner())
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl<
         'a,
         M: HasAp,
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -1265,7 +1613,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -1283,17 +1630,17 @@ impl<
     pub fn update_access_point_peer(
         &mut self,
         peer: EspNowAccessPointPeerConfig,
-    ) -> Result<bool, DriverError> {
+    ) -> Result<(), DriverError> {
         self.update_peer_inner(peer.inner())
     }
 }
 
+#[cfg(feature = "wifi-esp-now")]
 impl<
         M,
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -1306,7 +1653,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -1315,18 +1661,18 @@ impl<
     >
 {
     fn drop(&mut self) {
-        if self.active {
-            let _ = self.backend.disable_esp_now();
+        if self.cleanup_needed && self.backend.disable_esp_now().is_ok() {
+            self.resources.reset_esp_now_runtime();
         }
     }
 }
 
+#[cfg(feature = "wifi-wps")]
 impl<
         'a,
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -1338,7 +1684,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -1351,7 +1696,6 @@ impl<
         resources: &'a WifiResources<
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -1368,13 +1712,19 @@ impl<
         })
     }
 
-    pub fn start(&mut self, config: &WpsConfig, timeout_ms: i32) -> Result<(), DriverError> {
+    pub fn start(&mut self, config: &WpsConfig<'_>) -> Result<(), DriverError> {
+        if self.active {
+            return Err(DriverError::BackendRejected);
+        }
+        self.resources.clear_event_cursor(&self.cursor);
         self.backend.enable_wps(config)?;
-        if let Err(error) = self.backend.start_wps(timeout_ms) {
-            let _ = self.backend.disable_wps();
+        self.active = true;
+        if let Err(error) = self.backend.start_wps() {
+            if self.backend.disable_wps().is_ok() {
+                self.active = false;
+            }
             return Err(error);
         }
-        self.active = true;
         Ok(())
     }
 
@@ -1390,18 +1740,29 @@ impl<
         self.active
     }
 
-    pub fn next_event(&mut self) -> Option<WifiEvent> {
-        self.resources
-            .events
-            .with(|events| events.try_next(&mut self.cursor))
+    pub fn next_event(&mut self) -> Option<WpsEvent> {
+        self.resources.events.with(|events| {
+            while let Some(event) = events.try_next(&mut self.cursor) {
+                let event = match event {
+                    WifiEvent::WpsSucceeded => WpsEvent::Succeeded,
+                    WifiEvent::WpsFailed { reason } => WpsEvent::Failed { reason },
+                    WifiEvent::WpsTimedOut => WpsEvent::TimedOut,
+                    WifiEvent::WpsPin { pin } => WpsEvent::Pin { pin },
+                    WifiEvent::StaDisconnected { reason } => WpsEvent::Disconnected { reason },
+                    _ => continue,
+                };
+                return Some(event);
+            }
+            None
+        })
     }
 }
 
+#[cfg(feature = "wifi-wps")]
 impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -1413,7 +1774,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -1429,12 +1789,12 @@ impl<
     }
 }
 
+#[cfg(feature = "wifi-smartconfig")]
 impl<
         'a,
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -1446,7 +1806,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -1459,7 +1818,6 @@ impl<
         resources: &'a WifiResources<
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -1489,19 +1847,24 @@ impl<
     }
 
     pub fn start(&mut self, config: &SmartConfigStartConfig) -> Result<(), DriverError> {
+        if self.active {
+            return Err(DriverError::BackendRejected);
+        }
+        self.resources.clear_event_cursor(&self.cursor);
+        self.resources.clear_smartconfig_credentials();
         self.backend.start_smartconfig(config)?;
         self.active = true;
         Ok(())
     }
 
-    pub fn configure_station(&mut self, config: &ClientConfig) -> Result<(), DriverError> {
+    pub fn configure_station(&mut self, config: &ClientConfig<'_>) -> Result<(), DriverError> {
         self.backend.configure_sta(config)
     }
 
-    pub fn connect_blocking(&mut self, timeout_ms: u32) -> Result<StaSession, DriverError> {
+    pub fn connect_blocking(&mut self, timeout_ms: u32) -> Result<(), DriverError> {
         if let Some(result) = self.backend.connect_blocking(timeout_ms) {
             result?;
-            return Ok(StaSession { connected: true });
+            return Ok(());
         }
 
         self.backend.connect().map_err(map_connect_error)?;
@@ -1513,7 +1876,7 @@ impl<
                 while let Some(event) = events.try_next(cursor) {
                     match event {
                         WifiEvent::StaConnected => {
-                            return Some(Ok(StaSession { connected: true }));
+                            return Some(Ok(()));
                         }
                         WifiEvent::StaDisconnected { .. } => {
                             return Some(Err(DriverError::Disconnected));
@@ -1535,6 +1898,48 @@ impl<
         }
     }
 
+    /// Sends the UDP acknowledgement expected by ESPTouch senders.
+    ///
+    /// `source_ip` must be the IPv4 address assigned to this station. The ACK
+    /// is sent while SmartConfig remains active so its radio work continues
+    /// until all copies have entered the transmit queue.
+    pub fn send_esptouch_ack(
+        &mut self,
+        credentials: &SmartConfigCredentials,
+        source_ip: Ipv4Addr,
+    ) -> Result<(), DriverError> {
+        if !self.active {
+            return Err(DriverError::NotStarted);
+        }
+        if source_ip.is_unspecified() || credentials.cellphone_ip().is_unspecified() {
+            return Err(DriverError::BackendRejected);
+        }
+
+        let station_mac = self.backend.sta_mac_address()?;
+        let bssid = match credentials.bssid() {
+            Some(bssid) => bssid,
+            None => self.backend.associated_bssid()?,
+        };
+        let frame = esptouch_ack_frame(credentials, station_mac, bssid, source_ip);
+
+        let mut sent = 0;
+        for _ in 0..ESPTOUCH_ACK_ATTEMPTS {
+            match self.backend.transmit(&frame) {
+                Ok(()) => {
+                    sent += 1;
+                    if sent == ESPTOUCH_ACK_COPIES {
+                        return Ok(());
+                    }
+                }
+                Err(DriverError::WouldBlock) => {}
+                Err(error) => return Err(error),
+            }
+            self.backend.spin_once();
+        }
+
+        Err(DriverError::WouldBlock)
+    }
+
     pub fn stop(&mut self) -> Result<(), DriverError> {
         if self.active {
             self.backend.stop_smartconfig()?;
@@ -1551,18 +1956,71 @@ impl<
         self.backend.read_smartconfig_reserved_data(buffer)
     }
 
-    pub fn next_event(&mut self) -> Option<WifiEvent> {
-        self.resources
-            .events
-            .with(|events| events.try_next(&mut self.cursor))
+    pub fn next_event(&mut self) -> Option<SmartConfigEvent> {
+        self.resources.next_smartconfig_event(&mut self.cursor)
     }
 }
 
+#[cfg(feature = "wifi-smartconfig")]
+fn esptouch_ack_frame(
+    credentials: &SmartConfigCredentials,
+    station_mac: [u8; 6],
+    bssid: [u8; 6],
+    source_ip: Ipv4Addr,
+) -> [u8; ESPTOUCH_ACK_FRAME_LEN] {
+    let source_ip = source_ip.octets();
+    let destination_ip = credentials.cellphone_ip().octets();
+    let mut frame = [0; ESPTOUCH_ACK_FRAME_LEN];
+
+    frame[0..6].copy_from_slice(&bssid);
+    frame[6..12].copy_from_slice(&station_mac);
+    frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+
+    let ip = &mut frame[14..34];
+    ip[0] = 0x45;
+    ip[2..4].copy_from_slice(&(20_u16 + 8 + 11).to_be_bytes());
+    ip[4..6].copy_from_slice(&0x1234_u16.to_be_bytes());
+    ip[8] = 64;
+    ip[9] = 17;
+    ip[12..16].copy_from_slice(&source_ip);
+    ip[16..20].copy_from_slice(&destination_ip);
+    let checksum = ipv4_checksum(ip);
+    ip[10..12].copy_from_slice(&checksum.to_be_bytes());
+
+    let udp = &mut frame[34..42];
+    udp[0..2].copy_from_slice(&ESPTOUCH_ACK_PORT.to_be_bytes());
+    udp[2..4].copy_from_slice(&ESPTOUCH_ACK_PORT.to_be_bytes());
+    udp[4..6].copy_from_slice(&(8_u16 + 11).to_be_bytes());
+
+    let payload = &mut frame[42..53];
+    payload[0] = credentials.token();
+    payload[1..7].copy_from_slice(&station_mac);
+    payload[7..11].copy_from_slice(&source_ip);
+
+    frame
+}
+
+#[cfg(feature = "wifi-smartconfig")]
+fn ipv4_checksum(header: &[u8]) -> u16 {
+    let mut sum = 0_u32;
+    let mut chunks = header.chunks_exact(2);
+    for chunk in chunks.by_ref() {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    if let Some(byte) = chunks.remainder().first() {
+        sum += (*byte as u32) << 8;
+    }
+    while sum > u16::MAX as u32 {
+        sum = (sum & u16::MAX as u32) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+#[cfg(feature = "wifi-smartconfig")]
 impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -1574,7 +2032,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -1600,11 +2057,21 @@ fn map_connect_error(error: ConnectError) -> DriverError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+    use core::future::Future;
+    extern crate std;
+    #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+    use std::sync::Arc;
+    #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+    use std::task::{Context, Wake, Waker};
+
     use crate::wifi_core::{
-        ClientConfig, Credential, InitConfig, LinkState, RawMode, RawRxRecord, Ssid, WifiApBackend,
-        WifiDriver, WifiEvent, WifiFeatureBackend, WifiLifecycleBackend, WifiPacketBackend,
-        WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
+        ClientConfig, InitConfig, LinkState, RawMode, RawRxRecord, Ssid, StationCredential,
+        WifiApBackend, WifiDriver, WifiEvent, WifiFeatureBackend, WifiLifecycleBackend,
+        WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
     };
+    #[cfg(feature = "wifi-smartconfig")]
+    use crate::wifi_core::{Ipv4Addr, SmartConfigCredentials, SmartConfigType};
 
     #[derive(Default)]
     struct FakeBackend {
@@ -1638,6 +2105,13 @@ mod tests {
     }
 
     impl WifiStaBackend for FakeBackend {
+        fn configure_sta(
+            &mut self,
+            _config: &ClientConfig<'_>,
+        ) -> Result<(), crate::wifi_core::DriverError> {
+            Ok(())
+        }
+
         fn connect(&mut self) -> Result<(), crate::wifi_core::ConnectError> {
             self.connect_called = true;
             Ok(())
@@ -1655,20 +2129,63 @@ mod tests {
 
     #[test]
     fn sta_handle_invokes_backend_connect() {
-        let resources = WifiResources::<8, 4, 2>::new();
+        let resources = WifiResources::<8, 4>::new();
         let driver = WifiDriver::with_backend(&resources, FakeBackend::default());
         let driver = driver.initialize(InitConfig::default()).unwrap();
         let mut driver = driver
             .configure_sta(ClientConfig::new(
                 Ssid::try_from("core-net").unwrap(),
-                Credential::Open,
+                StationCredential::open(),
             ))
             .unwrap()
             .start()
             .unwrap();
 
-        let mut sta = driver.sta().unwrap();
+        let mut sta = driver.sta();
         sta.connect().unwrap();
+    }
+
+    #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+    struct NoopWake;
+
+    #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    #[test]
+    #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+    fn async_connect_uses_link_mirror_when_the_event_ring_overflows() {
+        let resources = WifiResources::<1, 1>::new();
+        let mut cursor = resources.claim_event_cursor().unwrap();
+        resources
+            .publish_event(WifiEvent::StaDisconnected { reason: Some(1) })
+            .unwrap();
+        assert_eq!(
+            resources.publish_event(WifiEvent::StaConnected),
+            Err(crate::wifi_core::DriverError::EventOverflow)
+        );
+
+        let mut driver = WifiDriver::with_backend(&resources, FakeBackend::default())
+            .initialize(InitConfig::default())
+            .unwrap()
+            .configure_sta(ClientConfig::new(
+                Ssid::try_from("core-net").unwrap(),
+                StationCredential::open(),
+            ))
+            .unwrap()
+            .start()
+            .unwrap();
+        let mut sta = driver.sta();
+        let mut future = core::pin::pin!(sta.connect_async());
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(
+            future.as_mut().poll(&mut context),
+            core::task::Poll::Ready(Ok(()))
+        ));
+        resources.release_event_cursor(&mut cursor);
     }
 
     #[derive(Default)]
@@ -1704,6 +2221,13 @@ mod tests {
     }
 
     impl WifiStaBackend for LinkBackend {
+        fn configure_sta(
+            &mut self,
+            _config: &ClientConfig<'_>,
+        ) -> Result<(), crate::wifi_core::DriverError> {
+            Ok(())
+        }
+
         fn connect(&mut self) -> Result<(), crate::wifi_core::ConnectError> {
             Ok(())
         }
@@ -1718,6 +2242,10 @@ mod tests {
     }
 
     impl WifiPacketBackend for LinkBackend {
+        fn attach_sta_rx(&mut self) -> Result<(), crate::wifi_core::DriverError> {
+            Ok(())
+        }
+
         fn transmit(&mut self, frame: &[u8]) -> Result<(), crate::wifi_core::DriverError> {
             self.transmitted.push(frame.len()).unwrap();
             Ok(())
@@ -1730,11 +2258,17 @@ mod tests {
 
     #[test]
     fn sta_link_reads_core_state_and_transmits_frames() {
-        let resources = WifiResources::<8, 4, 2>::new();
+        static RX_BYTES: [u8; 24] = [0; 24];
+        let resources = WifiResources::<8, 4>::new();
         resources.publish_event(WifiEvent::StaConnected).unwrap();
         resources
             .enqueue_rx(unsafe {
-                RawRxRecord::from_raw(core::ptr::null_mut(), 24, core::ptr::null_mut(), None)
+                RawRxRecord::from_raw(
+                    RX_BYTES.as_ptr().cast_mut().cast(),
+                    RX_BYTES.len() as u16,
+                    core::ptr::null_mut(),
+                    None,
+                )
             })
             .unwrap();
 
@@ -1748,7 +2282,7 @@ mod tests {
             .unwrap()
             .configure_sta(ClientConfig::new(
                 Ssid::try_from("core-net").unwrap(),
-                Credential::Open,
+                StationCredential::open(),
             ))
             .unwrap()
             .start()
@@ -1759,7 +2293,40 @@ mod tests {
 
         assert_eq!(link.link_state(), LinkState::Up);
         assert_eq!(link.mac_address().unwrap(), [1, 2, 3, 4, 5, 6]);
-        assert_eq!(link.receive(&mut rx_buf), Some(24));
+        assert_eq!(link.receive(&mut rx_buf), Ok(Some(24)));
         link.transmit(&[9, 8, 7]).unwrap();
+    }
+
+    #[cfg(feature = "wifi-smartconfig")]
+    #[test]
+    fn esptouch_ack_frame_has_valid_ipv4_udp_layout() {
+        let credentials = SmartConfigCredentials::new(
+            b"network",
+            b"password",
+            Some([0x10, 0x20, 0x30, 0x40, 0x50, 0x60]),
+            SmartConfigType::EspTouch,
+            0x42,
+            Ipv4Addr::new(192, 168, 4, 3),
+        )
+        .unwrap();
+        let station_mac = [1, 2, 3, 4, 5, 6];
+        let source_ip = Ipv4Addr::new(192, 168, 4, 2);
+
+        let frame = super::esptouch_ack_frame(
+            &credentials,
+            station_mac,
+            credentials.bssid().unwrap(),
+            source_ip,
+        );
+
+        assert_eq!(&frame[0..6], credentials.bssid().unwrap().as_slice());
+        assert_eq!(&frame[6..12], &station_mac);
+        assert_eq!(&frame[12..14], &0x0800_u16.to_be_bytes());
+        assert_eq!(super::ipv4_checksum(&frame[14..34]), 0);
+        assert_eq!(&frame[34..36], &super::ESPTOUCH_ACK_PORT.to_be_bytes());
+        assert_eq!(&frame[36..38], &super::ESPTOUCH_ACK_PORT.to_be_bytes());
+        assert_eq!(frame[42], credentials.token());
+        assert_eq!(&frame[43..49], &station_mac);
+        assert_eq!(&frame[49..53], &source_ip.octets());
     }
 }

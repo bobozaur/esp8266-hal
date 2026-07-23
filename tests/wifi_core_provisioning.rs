@@ -1,19 +1,34 @@
+#![cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+
+#[cfg(feature = "wifi-wps")]
+use esp8266_hal::wifi_core::WpsConfig;
 use esp8266_hal::wifi_core::{
-    Credential, DriverError, InitConfig, Ipv4Addr, RawMode, SmartConfigCredentials,
-    SmartConfigStartConfig, SmartConfigTimeout, SmartConfigType, WifiApBackend, WifiDriver,
-    WifiEvent, WifiFeatureBackend, WifiLifecycleBackend, WifiPacketBackend, WifiResources,
-    WifiRuntimeBackend, WifiScanBackend, WifiStaBackend, WpsConfig,
+    DriverError, InitConfig, RawMode, WifiApBackend, WifiDriver, WifiFeatureBackend,
+    WifiLifecycleBackend, WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend,
+    WifiStaBackend,
+};
+#[cfg(feature = "wifi-smartconfig")]
+use esp8266_hal::wifi_core::{
+    Ipv4Addr, SmartConfigCredentials, SmartConfigStartConfig, SmartConfigTimeout, SmartConfigType,
 };
 
 #[derive(Default)]
 struct FakeProvisioningBackend {
+    #[cfg(feature = "wifi-wps")]
     wps_enabled: bool,
+    #[cfg(feature = "wifi-wps")]
     wps_started: bool,
+    #[cfg(feature = "wifi-wps")]
     wps_disabled: bool,
+    #[cfg(feature = "wifi-smartconfig")]
     smartconfig_started: bool,
+    #[cfg(feature = "wifi-smartconfig")]
     smartconfig_stopped: bool,
+    #[cfg(feature = "wifi-smartconfig")]
     smartconfig_type: Option<SmartConfigType>,
+    #[cfg(feature = "wifi-smartconfig")]
     smartconfig_timeout: Option<SmartConfigTimeout>,
+    #[cfg(feature = "wifi-smartconfig")]
     smartconfig_fast: bool,
 }
 
@@ -47,41 +62,49 @@ impl WifiLifecycleBackend for FakeProvisioningBackend {
 }
 
 impl WifiFeatureBackend for FakeProvisioningBackend {
-    fn enable_wps(&mut self, _config: &WpsConfig) -> Result<(), DriverError> {
+    #[cfg(feature = "wifi-wps")]
+    fn enable_wps(&mut self, _config: &WpsConfig<'_>) -> Result<(), DriverError> {
         self.wps_enabled = true;
         Ok(())
     }
 
-    fn start_wps(&mut self, _timeout_ms: i32) -> Result<(), DriverError> {
+    #[cfg(feature = "wifi-wps")]
+    fn start_wps(&mut self) -> Result<(), DriverError> {
         self.wps_started = true;
         Ok(())
     }
 
+    #[cfg(feature = "wifi-wps")]
     fn disable_wps(&mut self) -> Result<(), DriverError> {
         self.wps_disabled = true;
         Ok(())
     }
 
+    #[cfg(feature = "wifi-smartconfig")]
     fn set_smartconfig_type(&mut self, kind: SmartConfigType) -> Result<(), DriverError> {
         self.smartconfig_type = Some(kind);
         Ok(())
     }
 
+    #[cfg(feature = "wifi-smartconfig")]
     fn set_smartconfig_timeout(&mut self, timeout: SmartConfigTimeout) -> Result<(), DriverError> {
         self.smartconfig_timeout = Some(timeout);
         Ok(())
     }
 
+    #[cfg(feature = "wifi-smartconfig")]
     fn set_smartconfig_fast_mode(&mut self, enabled: bool) -> Result<(), DriverError> {
         self.smartconfig_fast = enabled;
         Ok(())
     }
 
+    #[cfg(feature = "wifi-smartconfig")]
     fn start_smartconfig(&mut self, _config: &SmartConfigStartConfig) -> Result<(), DriverError> {
         self.smartconfig_started = true;
         Ok(())
     }
 
+    #[cfg(feature = "wifi-smartconfig")]
     fn stop_smartconfig(&mut self) -> Result<(), DriverError> {
         self.smartconfig_stopped = true;
         Ok(())
@@ -94,8 +117,9 @@ impl WifiPacketBackend for FakeProvisioningBackend {}
 impl WifiScanBackend for FakeProvisioningBackend {}
 
 #[test]
-fn wps_session_owns_lifecycle_and_reads_events() {
-    let resources = WifiResources::<8, 1, 1>::new();
+#[cfg(feature = "wifi-wps")]
+fn wps_session_owns_lifecycle() {
+    let resources = WifiResources::<8, 1>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeProvisioningBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -105,19 +129,20 @@ fn wps_session_owns_lifecycle_and_reads_events() {
         .unwrap();
 
     let mut session = driver.wps().unwrap();
-    session.start(&WpsConfig::pbc(), 0).unwrap();
+    session.start(&WpsConfig::pbc()).unwrap();
     assert!(session.is_active());
 
-    resources.publish_event(WifiEvent::WpsSucceeded).unwrap();
-    assert_eq!(session.next_event(), Some(WifiEvent::WpsSucceeded));
+    session.stop().unwrap();
+    session.start(&WpsConfig::pbc()).unwrap();
 
     session.stop().unwrap();
     assert!(!session.is_active());
 }
 
 #[test]
-fn smartconfig_session_owns_lifecycle_and_reads_credentials() {
-    let resources = WifiResources::<8, 1, 1>::new();
+#[cfg(feature = "wifi-smartconfig")]
+fn smartconfig_session_owns_lifecycle() {
+    let resources = WifiResources::<8, 1>::new();
     let mut driver = WifiDriver::with_backend(&resources, FakeProvisioningBackend::default())
         .initialize(InitConfig::default())
         .unwrap()
@@ -125,16 +150,6 @@ fn smartconfig_session_owns_lifecycle_and_reads_credentials() {
         .unwrap()
         .start()
         .unwrap();
-
-    let credentials = SmartConfigCredentials::new(
-        b"network",
-        b"password123",
-        Some([1, 2, 3, 4, 5, 6]),
-        SmartConfigType::EspTouch,
-        7,
-        Ipv4Addr::new(192, 168, 0, 2),
-    )
-    .unwrap();
 
     let mut session = driver.smart_config().unwrap();
     session.set_type(SmartConfigType::EspTouch).unwrap();
@@ -144,17 +159,13 @@ fn smartconfig_session_owns_lifecycle_and_reads_credentials() {
     session.set_fast_mode(true).unwrap();
     session.start(&SmartConfigStartConfig::default()).unwrap();
 
-    resources
-        .publish_event(WifiEvent::SmartConfigGotCredentials { credentials })
-        .unwrap();
-    assert_eq!(
-        session.next_event(),
-        Some(WifiEvent::SmartConfigGotCredentials { credentials })
-    );
+    session.stop().unwrap();
+    session.start(&SmartConfigStartConfig::default()).unwrap();
     session.stop().unwrap();
 }
 
 #[test]
+#[cfg(feature = "wifi-smartconfig")]
 fn smartconfig_credentials_convert_to_client_config() {
     let credentials = SmartConfigCredentials::new(
         b"network",
@@ -168,7 +179,7 @@ fn smartconfig_credentials_convert_to_client_config() {
 
     let client = credentials.client_config().unwrap();
     assert_eq!(client.ssid().as_bytes(), b"network");
-    assert!(matches!(client.credential(), Credential::Wpa2(_)));
+    assert!(client.credential().passphrase().is_some());
 
     let open = SmartConfigCredentials::new(
         b"open",
@@ -181,5 +192,28 @@ fn smartconfig_credentials_convert_to_client_config() {
     .unwrap();
     let client = open.client_config().unwrap();
     assert_eq!(client.ssid().as_bytes(), b"open");
-    assert!(matches!(client.credential(), Credential::Open));
+    assert!(client.credential().is_open());
+}
+
+#[test]
+#[cfg(feature = "wifi-smartconfig")]
+fn smartconfig_credentials_reject_invalid_network_configuration() {
+    assert!(SmartConfigCredentials::new(
+        b"",
+        b"",
+        None,
+        SmartConfigType::EspTouch,
+        0,
+        Ipv4Addr::UNSPECIFIED,
+    )
+    .is_err());
+    assert!(SmartConfigCredentials::new(
+        b"network",
+        b"short",
+        None,
+        SmartConfigType::EspTouch,
+        0,
+        Ipv4Addr::UNSPECIFIED,
+    )
+    .is_err());
 }

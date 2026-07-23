@@ -33,6 +33,7 @@ pub enum DhcpMessageType {
     Request,
     Ack,
     Nak,
+    Release,
 }
 
 impl DhcpMessageType {
@@ -43,6 +44,7 @@ impl DhcpMessageType {
             3 => Some(Self::Request),
             5 => Some(Self::Ack),
             6 => Some(Self::Nak),
+            7 => Some(Self::Release),
             _ => None,
         }
     }
@@ -54,6 +56,7 @@ impl DhcpMessageType {
             Self::Request => 3,
             Self::Ack => 5,
             Self::Nak => 6,
+            Self::Release => 7,
         }
     }
 }
@@ -180,6 +183,7 @@ impl DhcpServerConfig {
 pub struct DhcpLease {
     mac: [u8; 6],
     ip: Ipv4Addr,
+    expires_at_seconds: u64,
 }
 
 impl DhcpLease {
@@ -189,6 +193,10 @@ impl DhcpLease {
 
     pub const fn ip(self) -> Ipv4Addr {
         self.ip
+    }
+
+    pub const fn expires_at_seconds(self) -> u64 {
+        self.expires_at_seconds
     }
 }
 
@@ -250,13 +258,15 @@ impl<const LEASES: usize> DhcpServer<LEASES> {
 
     pub fn handle(
         &mut self,
+        now_seconds: u64,
         request: &[u8],
         response: &mut [u8],
     ) -> Result<Option<DhcpReply>, DhcpServerError> {
+        self.expire_leases(now_seconds);
         let request = DhcpRequest::parse(request)?;
         match request.message_type {
             DhcpMessageType::Discover => {
-                let lease = self.lease_or_allocate(request.client_mac)?;
+                let lease = self.lease_or_allocate(request.client_mac, now_seconds)?;
                 let len = render_reply(
                     self.config,
                     &request,
@@ -319,7 +329,7 @@ impl<const LEASES: usize> DhcpServer<LEASES> {
                     }));
                 }
 
-                let lease = self.assign_lease(request.client_mac, requested_ip)?;
+                let lease = self.assign_lease(request.client_mac, requested_ip, now_seconds)?;
                 let len = render_reply(
                     self.config,
                     &request,
@@ -335,7 +345,31 @@ impl<const LEASES: usize> DhcpServer<LEASES> {
                     broadcast: request.broadcast(),
                 }))
             }
+            DhcpMessageType::Release => {
+                self.release(request.client_mac);
+                Ok(None)
+            }
             _ => Ok(None),
+        }
+    }
+
+    pub fn release(&mut self, mac: [u8; 6]) -> bool {
+        let Some(slot) = self
+            .leases
+            .iter_mut()
+            .find(|slot| slot.is_some_and(|lease| lease.mac == mac))
+        else {
+            return false;
+        };
+        *slot = None;
+        true
+    }
+
+    fn expire_leases(&mut self, now_seconds: u64) {
+        for lease in &mut self.leases {
+            if lease.is_some_and(|lease| lease.expires_at_seconds <= now_seconds) {
+                *lease = None;
+            }
         }
     }
 
@@ -347,22 +381,32 @@ impl<const LEASES: usize> DhcpServer<LEASES> {
             .map(|lease| lease.ip)
     }
 
-    fn lease_or_allocate(&mut self, mac: [u8; 6]) -> Result<DhcpLease, DhcpServerError> {
+    fn lease_or_allocate(
+        &mut self,
+        mac: [u8; 6],
+        now_seconds: u64,
+    ) -> Result<DhcpLease, DhcpServerError> {
         if let Some(ip) = self.lookup_ip(mac) {
-            return Ok(DhcpLease { mac, ip });
+            return self.assign_lease(mac, ip, now_seconds);
         }
 
         for offset in 0..self.config.lease_count {
             let ip = u32_to_ipv4(ipv4_to_u32(self.config.lease_start) + u32::from(offset));
             if !self.ip_is_leased(ip) {
-                return self.assign_lease(mac, ip);
+                return self.assign_lease(mac, ip, now_seconds);
             }
         }
 
         Err(DhcpServerError::LeasePoolFull)
     }
 
-    fn assign_lease(&mut self, mac: [u8; 6], ip: Ipv4Addr) -> Result<DhcpLease, DhcpServerError> {
+    fn assign_lease(
+        &mut self,
+        mac: [u8; 6],
+        ip: Ipv4Addr,
+        now_seconds: u64,
+    ) -> Result<DhcpLease, DhcpServerError> {
+        let expires_at_seconds = now_seconds.saturating_add(u64::from(self.config.lease_seconds));
         if let Some(lease) = self
             .leases
             .iter_mut()
@@ -370,6 +414,7 @@ impl<const LEASES: usize> DhcpServer<LEASES> {
             .find(|lease| lease.mac == mac)
         {
             lease.ip = ip;
+            lease.expires_at_seconds = expires_at_seconds;
             return Ok(*lease);
         }
 
@@ -378,7 +423,11 @@ impl<const LEASES: usize> DhcpServer<LEASES> {
             .iter_mut()
             .find(|lease| lease.is_none())
             .ok_or(DhcpServerError::LeasePoolFull)?;
-        let lease = DhcpLease { mac, ip };
+        let lease = DhcpLease {
+            mac,
+            ip,
+            expires_at_seconds,
+        };
         *slot = Some(lease);
         Ok(lease)
     }

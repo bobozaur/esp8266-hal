@@ -1,10 +1,15 @@
 use core::marker::PhantomData;
 
+#[cfg(feature = "wifi-esp-now")]
+use super::interface::EspNowSession;
+#[cfg(feature = "wifi-promiscuous")]
+use super::interface::PromiscuousSession;
+#[cfg(feature = "wifi-smartconfig")]
+use super::interface::SmartConfigSession;
+#[cfg(feature = "wifi-wps")]
+use super::interface::WpsSession;
 use super::{
-    interface::{
-        ApHandle, ApLink, EspNowSession, PromiscuousSession, SmartConfigSession, StaHandle,
-        StaLink, WpsSession,
-    },
+    interface::{ApHandle, ApLink, MixedLink, StaHandle, StaLink},
     AccessPointConfig, AccessPointRecord, ApMode, ClientConfig, Configured, DriverError, HasAp,
     HasSta, InitConfig, InitError, Initialized, MixedConfig, MixedMode, RawMode, ScanOptions,
     StaMode, Started, Uninitialized, WifiBackend, WifiResources,
@@ -16,7 +21,6 @@ pub struct WifiDriver<
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -27,7 +31,6 @@ pub struct WifiDriver<
     resources: &'d WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -42,7 +45,6 @@ impl<
         B,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -55,7 +57,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -67,7 +68,6 @@ impl<
         resources: &'d WifiResources<
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -89,7 +89,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -102,7 +101,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -120,7 +118,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -143,7 +140,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -156,7 +152,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -166,7 +161,7 @@ impl<
 {
     pub fn configure_sta(
         mut self,
-        config: ClientConfig,
+        config: ClientConfig<'_>,
     ) -> Result<
         WifiDriver<
             'd,
@@ -174,7 +169,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -200,7 +194,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -227,7 +220,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -246,7 +238,7 @@ impl<
 
     pub fn configure_mixed(
         mut self,
-        config: MixedConfig,
+        config: MixedConfig<'_>,
     ) -> Result<
         WifiDriver<
             'd,
@@ -254,7 +246,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -278,7 +269,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -291,7 +281,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -308,7 +297,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -332,7 +320,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -345,7 +332,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -355,27 +341,21 @@ impl<
 {
     pub fn sta(
         &mut self,
-    ) -> Result<
-        StaHandle<
-            '_,
-            B,
-            EVENTS,
-            RX,
-            SUBS,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
+    ) -> StaHandle<
+        '_,
+        B,
+        EVENTS,
+        RX,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
     > {
-        let cursor = self.resources.claim_event_cursor()?;
-        Ok(StaHandle {
+        StaHandle {
             backend: &mut self.backend,
             resources: self.resources,
-            cursor,
-        })
+        }
     }
 
     pub fn resources(
@@ -383,7 +363,6 @@ impl<
     ) -> &WifiResources<
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -393,6 +372,10 @@ impl<
         self.resources
     }
 
+    /// Performs a blocking station scan.
+    ///
+    /// The ESP8266 backend rejects scans while associated; disconnect first so
+    /// its blocking-scan event-handler workaround cannot hide a link change.
     pub fn scan_blocking<const N: usize>(
         &mut self,
         options: &ScanOptions,
@@ -400,6 +383,10 @@ impl<
         self.backend.scan(options)
     }
 
+    /// Performs a blocking station scan into caller-owned storage.
+    ///
+    /// The ESP8266 backend rejects scans while associated; disconnect first so
+    /// its blocking-scan event-handler workaround cannot hide a link change.
     pub fn scan_blocking_into<const N: usize>(
         &mut self,
         options: &ScanOptions,
@@ -417,7 +404,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -426,6 +412,9 @@ impl<
         >,
         DriverError,
     > {
+        if RX == 0 {
+            return Err(DriverError::PacketOverflow);
+        }
         self.backend.attach_sta_rx()?;
         Ok(StaLink {
             backend: Some(self.backend),
@@ -435,32 +424,7 @@ impl<
         })
     }
 
-    pub fn esp_now(
-        &mut self,
-    ) -> Result<
-        EspNowSession<
-            '_,
-            M,
-            B,
-            EVENTS,
-            RX,
-            SUBS,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        if self.resources.esp_now_peer_capacity() == 0 || self.resources.esp_now_rx_capacity() == 0
-        {
-            return Err(DriverError::PacketOverflow);
-        }
-
-        Ok(EspNowSession::new(&mut self.backend, self.resources))
-    }
-
+    #[cfg(feature = "wifi-wps")]
     pub fn wps(
         &mut self,
     ) -> Result<
@@ -469,7 +433,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -481,6 +444,7 @@ impl<
         WpsSession::new(&mut self.backend, self.resources)
     }
 
+    #[cfg(feature = "wifi-smartconfig")]
     pub fn smart_config(
         &mut self,
     ) -> Result<
@@ -489,7 +453,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -504,11 +467,69 @@ impl<
 
 impl<
         'd,
+        B: WifiBackend,
+        const EVENTS: usize,
+        const RX: usize,
+        const ESP_NOW_PEERS: usize,
+        const ESP_NOW_RX: usize,
+        const PROMISCUOUS_RX: usize,
+        const AP_RX_SLOTS: usize,
+        const AP_RX_BYTES: usize,
+    >
+    WifiDriver<
+        'd,
+        Started<MixedMode>,
+        B,
+        EVENTS,
+        RX,
+        ESP_NOW_PEERS,
+        ESP_NOW_RX,
+        PROMISCUOUS_RX,
+        AP_RX_SLOTS,
+        AP_RX_BYTES,
+    >
+{
+    pub fn mixed_link(
+        mut self,
+    ) -> Result<
+        MixedLink<
+            'd,
+            B,
+            EVENTS,
+            RX,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
+        DriverError,
+    > {
+        if RX == 0 || AP_RX_SLOTS == 0 || AP_RX_BYTES == 0 {
+            return Err(DriverError::PacketOverflow);
+        }
+
+        self.backend.attach_sta_rx()?;
+        if let Err(error) = self.backend.attach_ap_rx() {
+            self.backend.detach_sta_rx();
+            return Err(error);
+        }
+
+        Ok(MixedLink {
+            backend: core::cell::RefCell::new(Some(self.backend)),
+            resources: self.resources,
+            sta_rx_attached: true,
+            ap_rx_attached: true,
+        })
+    }
+}
+
+impl<
+        'd,
         M: HasAp,
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -521,7 +542,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -529,29 +549,10 @@ impl<
         AP_RX_BYTES,
     >
 {
-    pub fn ap(
-        &mut self,
-    ) -> Result<
-        ApHandle<
-            '_,
-            B,
-            EVENTS,
-            RX,
-            SUBS,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        let cursor = self.resources.claim_event_cursor()?;
-        Ok(ApHandle {
+    pub fn ap(&mut self) -> ApHandle<'_, B> {
+        ApHandle {
             backend: &mut self.backend,
-            resources: self.resources,
-            cursor,
-        })
+        }
     }
 
     pub fn ap_link(
@@ -563,7 +564,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -572,6 +572,9 @@ impl<
         >,
         DriverError,
     > {
+        if AP_RX_SLOTS == 0 || AP_RX_BYTES == 0 {
+            return Err(DriverError::PacketOverflow);
+        }
         self.backend.attach_ap_rx()?;
         Ok(ApLink {
             backend: Some(self.backend),
@@ -587,7 +590,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -600,7 +602,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -617,7 +618,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -640,7 +640,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -653,7 +652,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -670,7 +668,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -694,7 +691,6 @@ impl<
         B: WifiBackend,
         const EVENTS: usize,
         const RX: usize,
-        const SUBS: usize,
         const ESP_NOW_PEERS: usize,
         const ESP_NOW_RX: usize,
         const PROMISCUOUS_RX: usize,
@@ -707,7 +703,6 @@ impl<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -719,7 +714,6 @@ impl<
         resources: &'d WifiResources<
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -735,6 +729,33 @@ impl<
         }
     }
 
+    #[cfg(feature = "wifi-esp-now")]
+    pub fn esp_now(
+        &mut self,
+    ) -> Result<
+        EspNowSession<
+            '_,
+            M,
+            B,
+            EVENTS,
+            RX,
+            ESP_NOW_PEERS,
+            ESP_NOW_RX,
+            PROMISCUOUS_RX,
+            AP_RX_SLOTS,
+            AP_RX_BYTES,
+        >,
+        DriverError,
+    > {
+        if self.resources.esp_now_peer_capacity() == 0 && self.resources.esp_now_rx_capacity() == 0
+        {
+            return Err(DriverError::PacketOverflow);
+        }
+
+        Ok(EspNowSession::new(&mut self.backend, self.resources))
+    }
+
+    #[cfg(feature = "wifi-promiscuous")]
     pub fn promiscuous(
         &mut self,
     ) -> Result<
@@ -743,7 +764,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -768,7 +788,6 @@ impl<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -794,9 +813,9 @@ mod tests {
     use std::{cell::RefCell, rc::Rc, vec::Vec};
 
     use crate::wifi_core::{
-        AccessPointConfig, Channel, ClientConfig, Credential, InitConfig, MixedConfig, RawMode,
-        Ssid, WifiApBackend, WifiFeatureBackend, WifiLifecycleBackend, WifiPacketBackend,
-        WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
+        AccessPointConfig, Channel, ClientConfig, InitConfig, MixedConfig, RawMode, RawRxRecord,
+        Ssid, StationCredential, WifiApBackend, WifiFeatureBackend, WifiLifecycleBackend,
+        WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
     };
 
     #[derive(Default)]
@@ -836,6 +855,13 @@ mod tests {
     }
 
     impl WifiStaBackend for FakeBackend {
+        fn configure_sta(
+            &mut self,
+            _config: &ClientConfig<'_>,
+        ) -> Result<(), crate::wifi_core::DriverError> {
+            Ok(())
+        }
+
         fn connect(&mut self) -> Result<(), crate::wifi_core::ConnectError> {
             Ok(())
         }
@@ -852,13 +878,13 @@ mod tests {
 
     #[test]
     fn lifecycle_moves_between_explicit_driver_states() {
-        let resources = WifiResources::<8, 4, 2>::new();
+        let resources = WifiResources::<8, 4>::new();
         let driver = WifiDriver::with_backend(&resources, FakeBackend::default());
         let driver = driver.initialize(InitConfig::default()).unwrap();
         let driver = driver
             .configure_sta(ClientConfig::new(
                 Ssid::try_from("core-net").unwrap(),
-                Credential::Open,
+                StationCredential::open(),
             ))
             .unwrap();
         let driver = driver.start().unwrap();
@@ -929,7 +955,7 @@ mod tests {
     impl WifiStaBackend for TrackingBackend {
         fn configure_sta(
             &mut self,
-            _config: &ClientConfig,
+            _config: &ClientConfig<'_>,
         ) -> Result<(), crate::wifi_core::DriverError> {
             self.push(Op::ConfigureSta);
             Ok(())
@@ -955,7 +981,7 @@ mod tests {
 
         fn configure_mixed(
             &mut self,
-            _client: &ClientConfig,
+            _client: &ClientConfig<'_>,
             _access_point: &AccessPointConfig,
         ) -> Result<(), crate::wifi_core::DriverError> {
             self.push(Op::ConfigureMixed);
@@ -989,13 +1015,13 @@ mod tests {
     #[test]
     fn sta_start_does_not_reissue_mode_after_configuration() {
         let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4, 2>::new();
+        let resources = WifiResources::<8, 4>::new();
         let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
         let driver = driver.initialize(InitConfig::default()).unwrap();
         let driver = driver
             .configure_sta(ClientConfig::new(
                 Ssid::try_from("core-net").unwrap(),
-                Credential::Open,
+                StationCredential::open(),
             ))
             .unwrap();
 
@@ -1010,7 +1036,7 @@ mod tests {
     #[test]
     fn ap_start_does_not_reissue_mode_after_configuration() {
         let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4, 2>::new();
+        let resources = WifiResources::<8, 4>::new();
         let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
         let driver = driver.initialize(InitConfig::default()).unwrap();
         let driver = driver
@@ -1031,12 +1057,15 @@ mod tests {
     #[test]
     fn mixed_start_does_not_reissue_mode_after_configuration() {
         let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4, 2>::new();
+        let resources = WifiResources::<8, 4>::new();
         let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
         let driver = driver.initialize(InitConfig::default()).unwrap();
         let driver = driver
             .configure_mixed(MixedConfig::new(
-                ClientConfig::new(Ssid::try_from("core-net").unwrap(), Credential::Open),
+                ClientConfig::new(
+                    Ssid::try_from("core-net").unwrap(),
+                    StationCredential::open(),
+                ),
                 AccessPointConfig::open(
                     Ssid::try_from("core-ap").unwrap(),
                     Channel::try_from(6).unwrap(),
@@ -1055,13 +1084,13 @@ mod tests {
     #[test]
     fn sta_link_attaches_rx_on_typestate_transfer() {
         let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4, 2>::new();
+        let resources = WifiResources::<8, 4>::new();
         let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
         let driver = driver.initialize(InitConfig::default()).unwrap();
         let driver = driver
             .configure_sta(ClientConfig::new(
                 Ssid::try_from("core-net").unwrap(),
-                Credential::Open,
+                StationCredential::open(),
             ))
             .unwrap()
             .start()
@@ -1078,20 +1107,33 @@ mod tests {
     #[test]
     fn link_into_driver_detaches_rx_before_returning_started_driver() {
         let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4, 2>::new();
+        let resources = WifiResources::<8, 4>::new();
         let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
         let driver = driver.initialize(InitConfig::default()).unwrap();
         let driver = driver
             .configure_sta(ClientConfig::new(
                 Ssid::try_from("core-net").unwrap(),
-                Credential::Open,
+                StationCredential::open(),
             ))
             .unwrap()
             .start()
             .unwrap();
 
+        static FRAME: [u8; 8] = [0; 8];
         let link = driver.sta_link().unwrap();
+        resources
+            .enqueue_rx(unsafe {
+                RawRxRecord::from_raw(
+                    FRAME.as_ptr().cast_mut().cast(),
+                    FRAME.len() as u16,
+                    core::ptr::null_mut(),
+                    None,
+                )
+            })
+            .unwrap();
+        assert_eq!(resources.queued_rx(), 1);
         let _driver = link.into_driver().unwrap();
+        assert_eq!(resources.queued_rx(), 0);
 
         assert_eq!(
             &*ops.borrow(),
@@ -1106,15 +1148,58 @@ mod tests {
     }
 
     #[test]
+    fn mixed_link_attaches_and_detaches_both_packet_paths() {
+        let ops = Rc::new(RefCell::new(Vec::new()));
+        let resources = WifiResources::<8, 4, 0, 0, 0, 2, 1514>::new();
+        let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()))
+            .initialize(InitConfig::default())
+            .unwrap()
+            .configure_mixed(MixedConfig::new(
+                ClientConfig::new(
+                    Ssid::try_from("core-net").unwrap(),
+                    StationCredential::open(),
+                ),
+                AccessPointConfig::open(
+                    Ssid::try_from("core-ap").unwrap(),
+                    Channel::try_from(6).unwrap(),
+                ),
+            ))
+            .unwrap()
+            .start()
+            .unwrap();
+
+        let mut mixed = driver.mixed_link().unwrap();
+        {
+            let (sta, ap) = mixed.split();
+            assert_eq!(sta.max_frame_size(), 1514);
+            assert_eq!(ap.max_frame_size(), 1514);
+        }
+        let _driver = mixed.into_driver().unwrap();
+
+        assert_eq!(
+            &*ops.borrow(),
+            &[
+                Op::Initialize,
+                Op::ConfigureMixed,
+                Op::Start,
+                Op::AttachStaRx,
+                Op::AttachApRx,
+                Op::DetachApRx,
+                Op::DetachStaRx,
+            ]
+        );
+    }
+
+    #[test]
     fn dropped_sta_link_detaches_rx_callback() {
         let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4, 2>::new();
+        let resources = WifiResources::<8, 4>::new();
         let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
         let driver = driver.initialize(InitConfig::default()).unwrap();
         let driver = driver
             .configure_sta(ClientConfig::new(
                 Ssid::try_from("core-net").unwrap(),
-                Credential::Open,
+                StationCredential::open(),
             ))
             .unwrap()
             .start()
@@ -1139,7 +1224,7 @@ mod tests {
     #[test]
     fn dropped_ap_link_detaches_rx_callback() {
         let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4, 2>::new();
+        let resources = WifiResources::<8, 4, 0, 0, 0, 2, 1514>::new();
         let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
         let driver = driver.initialize(InitConfig::default()).unwrap();
         let driver = driver

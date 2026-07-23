@@ -9,13 +9,11 @@ use embassy_time::{Duration, Timer};
 
 use crate::wifi_core::{
     ApLink, DriverError, EthernetNeighborHints, HasAp, HasSta, LinkState, StaLink, WifiBackend,
-    WifiDataLink,
+    WifiDataLink, MAX_ETHERNET_FRAME_SIZE, MIN_IPV4_ETHERNET_FRAME_SIZE,
 };
-#[cfg(feature = "wifi-debug-trace")]
-use crate::wifi_core::{RunnerDebug, RunnerDebugSnapshot};
 
 /// Default maximum Ethernet frame size (MTU 1500 + 14-byte header).
-pub const DEFAULT_MTU: usize = 1514;
+pub const DEFAULT_MTU: usize = MAX_ETHERNET_FRAME_SIZE;
 
 /// Default number of RX packet buffers reserved for the embassy-net bridge.
 ///
@@ -27,27 +25,6 @@ pub const DEFAULT_RX_PACKET_BUFFERS: usize = 1;
 /// Default number of TX packet buffers reserved for the embassy-net bridge.
 pub const DEFAULT_TX_PACKET_BUFFERS: usize = 1;
 const COOPERATIVE_PROGRESS_BUDGET: u8 = 8;
-
-#[cfg(feature = "wifi-debug-trace")]
-#[no_mangle]
-pub static mut g_net_runner_stage: u32 = 0;
-#[cfg(feature = "wifi-debug-trace")]
-static RUNNER_DEBUG: RunnerDebug = RunnerDebug::new();
-
-#[inline(always)]
-fn record_net_runner_stage(stage: u8) {
-    #[cfg(feature = "wifi-debug-trace")]
-    unsafe {
-        g_net_runner_stage = stage as u32
-    };
-    #[cfg(not(feature = "wifi-debug-trace"))]
-    let _ = stage;
-}
-
-#[cfg(feature = "wifi-debug-trace")]
-pub fn runner_debug_snapshot() -> RunnerDebugSnapshot {
-    RUNNER_DEBUG.snapshot()
-}
 
 pub type NetDriverState<
     const N_RX: usize = DEFAULT_RX_PACKET_BUFFERS,
@@ -61,6 +38,7 @@ pub type NetDriverStateWithMtu<
 pub type NetDevice<'s> = ch::Device<'s, DEFAULT_MTU>;
 pub type NetDeviceWithMtu<'s, const MTU: usize> = ch::Device<'s, MTU>;
 
+#[cfg(target_arch = "xtensa")]
 const _: () = assert!(
     core::mem::size_of::<NetDriverState>() <= 0x0c80,
     "default embassy-net state exceeds ESP8266 DRAM budget"
@@ -73,7 +51,6 @@ pub fn new<
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
@@ -89,7 +66,6 @@ pub fn new<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -105,7 +81,6 @@ pub fn new<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -130,7 +105,6 @@ pub fn new_with_mtu<
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
@@ -147,7 +121,6 @@ pub fn new_with_mtu<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -163,7 +136,6 @@ pub fn new_with_mtu<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -189,7 +161,6 @@ pub fn new_ap<
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
@@ -205,7 +176,6 @@ pub fn new_ap<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -221,7 +191,6 @@ pub fn new_ap<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -246,7 +215,6 @@ pub fn new_ap_with_mtu<
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize,
     const ESP_NOW_RX: usize,
     const PROMISCUOUS_RX: usize,
@@ -263,7 +231,6 @@ pub fn new_ap_with_mtu<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -279,7 +246,6 @@ pub fn new_ap_with_mtu<
             B,
             EVENTS,
             RX,
-            SUBS,
             ESP_NOW_PEERS,
             ESP_NOW_RX,
             PROMISCUOUS_RX,
@@ -298,13 +264,27 @@ where
     new_link(state, link)
 }
 
-fn new_link<'s, L, const MTU: usize, const N_RX: usize, const N_TX: usize>(
-    state: &'s mut NetDriverStateWithMtu<MTU, N_RX, N_TX>,
-    link: L,
-) -> Result<(LinkRunner<'s, L, MTU>, NetDeviceWithMtu<'s, MTU>), DriverError>
+/// Builds an embassy-net channel around any Wi-Fi data endpoint.
+///
+/// This is also the constructor for both endpoints returned by
+/// [`MixedLink::split`](crate::wifi_core::MixedLink::split).
+pub fn new_link<L, const MTU: usize, const N_RX: usize, const N_TX: usize>(
+    state: &mut NetDriverStateWithMtu<MTU, N_RX, N_TX>,
+    mut link: L,
+) -> Result<(LinkRunner<'_, L, MTU>, NetDeviceWithMtu<'_, MTU>), DriverError>
 where
     L: WifiDataLink,
 {
+    if N_RX == 0 || N_TX == 0 {
+        return Err(DriverError::PacketOverflow);
+    }
+    if MTU < MIN_IPV4_ETHERNET_FRAME_SIZE {
+        return Err(DriverError::InvalidFrameSize);
+    }
+    if MTU > link.max_frame_size() {
+        return Err(DriverError::PayloadTooLong);
+    }
+    link.refresh_rx()?;
     let mac = link.mac_address()?;
     let (ch_runner, net_device) = ch::new(state, ch::driver::HardwareAddress::Ethernet(mac));
     let (state_runner, rx_runner, tx_runner) = ch_runner.split();
@@ -329,7 +309,6 @@ pub type Runner<
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -343,7 +322,6 @@ pub type Runner<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -360,7 +338,6 @@ pub type RunnerWithMtu<
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -375,7 +352,6 @@ pub type RunnerWithMtu<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -392,7 +368,6 @@ pub type ApRunner<
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -406,7 +381,6 @@ pub type ApRunner<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -423,7 +397,6 @@ pub type ApRunnerWithMtu<
     B,
     const EVENTS: usize,
     const RX: usize,
-    const SUBS: usize,
     const ESP_NOW_PEERS: usize = 0,
     const ESP_NOW_RX: usize = 0,
     const PROMISCUOUS_RX: usize = 0,
@@ -438,7 +411,6 @@ pub type ApRunnerWithMtu<
         B,
         EVENTS,
         RX,
-        SUBS,
         ESP_NOW_PEERS,
         ESP_NOW_RX,
         PROMISCUOUS_RX,
@@ -475,19 +447,11 @@ where
         let initial = self.link.link_state();
         self.state_runner.set_link_state(map_link_state(initial));
         self.last_link = initial;
-        let _ = self.link.refresh_rx();
         let mut progress_budget = COOPERATIVE_PROGRESS_BUDGET;
 
         loop {
-            #[cfg(feature = "wifi-debug-trace")]
-            RUNNER_DEBUG.note_loop();
-            record_net_runner_stage(b'E');
             self.apply_link_state();
-
-            record_net_runner_stage(b'R');
             let rx = self.poll_rx();
-
-            record_net_runner_stage(b'X');
             let tx = self.poll_tx();
 
             if tx.blocked {
@@ -505,7 +469,6 @@ where
             }
 
             progress_budget = COOPERATIVE_PROGRESS_BUDGET;
-            record_net_runner_stage(if rx.pending_rx { b'B' } else { b'W' });
             self.wait_for_work(rx.pending_rx).await;
         }
     }
@@ -513,8 +476,6 @@ where
     fn apply_link_state(&mut self) {
         let current = self.link.link_state();
         if current != self.last_link {
-            #[cfg(feature = "wifi-debug-trace")]
-            RUNNER_DEBUG.note_link_update();
             self.state_runner.set_link_state(map_link_state(current));
             self.last_link = current;
         }
@@ -532,13 +493,19 @@ where
                 break;
             };
 
-            if let Some(len) = self.neighbor_hints.receive_into(&mut self.link, buf) {
-                made_progress = true;
-                #[cfg(feature = "wifi-debug-trace")]
-                RUNNER_DEBUG.note_rx_frame();
-                self.rx_runner.rx_done(len);
-            } else {
-                break;
+            match self.neighbor_hints.receive_into(&mut self.link, buf) {
+                Ok(Some(len)) => {
+                    made_progress = true;
+                    self.rx_runner.rx_done(len);
+                }
+                Ok(None) => {
+                    self.rx_runner.rx_done(0);
+                    break;
+                }
+                Err(_) => {
+                    made_progress = true;
+                    self.rx_runner.rx_done(0);
+                }
             }
         }
 
@@ -566,20 +533,14 @@ where
             match self.link.transmit(buf) {
                 Ok(()) => {
                     made_progress = true;
-                    #[cfg(feature = "wifi-debug-trace")]
-                    RUNNER_DEBUG.note_tx_frame();
                     self.tx_runner.tx_done()
                 }
                 Err(DriverError::WouldBlock) => {
-                    #[cfg(feature = "wifi-debug-trace")]
-                    RUNNER_DEBUG.note_tx_would_block();
                     blocked = true;
                     break;
                 }
                 Err(_) => {
                     made_progress = true;
-                    #[cfg(feature = "wifi-debug-trace")]
-                    RUNNER_DEBUG.note_tx_error();
                     self.tx_runner.tx_done()
                 }
             }
@@ -598,35 +559,20 @@ where
         let tx_runner = &mut self.tx_runner;
 
         if pending_rx {
-            match embassy_futures::select::select(
-                async {
-                    let buf = rx_runner.rx_buf().await;
-                    neighbor_hints.receive_into(link, buf)
-                },
-                tx_runner.tx_buf(),
-            )
-            .await
-            {
-                Either::First(Some(len)) => {
-                    #[cfg(feature = "wifi-debug-trace")]
-                    RUNNER_DEBUG.note_ready_wake();
-                    #[cfg(feature = "wifi-debug-trace")]
-                    RUNNER_DEBUG.note_rx_frame();
+            let receive = async {
+                let buf = rx_runner.rx_buf().await;
+                neighbor_hints.receive_into(link, buf)
+            };
+            let work = embassy_futures::select::select(receive, tx_runner.tx_buf()).await;
+            match work {
+                Either::First(result) => {
+                    let len = match result {
+                        Ok(Some(len)) => len,
+                        Ok(None) | Err(_) => 0,
+                    };
                     rx_runner.rx_done(len);
                 }
-                Either::First(None) => {
-                    #[cfg(feature = "wifi-debug-trace")]
-                    RUNNER_DEBUG.note_ready_wake();
-                    debug_assert!(
-                        false,
-                        "wifi_core rx queue emptied while awaiting embassy rx buffer"
-                    );
-                    rx_runner.rx_done(0);
-                }
                 Either::Second(buf) => {
-                    #[cfg(feature = "wifi-debug-trace")]
-                    RUNNER_DEBUG.note_ready_wake();
-
                     if buf.is_empty() {
                         tx_runner.tx_done();
                         return;
@@ -634,17 +580,10 @@ where
 
                     match link.transmit(buf) {
                         Ok(()) => {
-                            #[cfg(feature = "wifi-debug-trace")]
-                            RUNNER_DEBUG.note_tx_frame();
                             tx_runner.tx_done();
                         }
-                        Err(DriverError::WouldBlock) => {
-                            #[cfg(feature = "wifi-debug-trace")]
-                            RUNNER_DEBUG.note_tx_would_block();
-                        }
+                        Err(DriverError::WouldBlock) => {}
                         Err(_) => {
-                            #[cfg(feature = "wifi-debug-trace")]
-                            RUNNER_DEBUG.note_tx_error();
                             tx_runner.tx_done();
                         }
                     }
@@ -654,29 +593,20 @@ where
         }
 
         let last_link = self.last_link;
-        match embassy_futures::select::select(
-            core::future::poll_fn(|cx| {
-                link.register_rx_waker(cx.waker());
-                link.register_link_waker(cx.waker());
+        let link_work = core::future::poll_fn(|cx| {
+            link.register_rx_waker(cx.waker());
+            link.register_link_waker(cx.waker());
 
-                if link.has_rx_data() || link.link_state() != last_link {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
-            }),
-            tx_runner.tx_buf(),
-        )
-        .await
-        {
-            Either::First(()) => {
-                #[cfg(feature = "wifi-debug-trace")]
-                RUNNER_DEBUG.note_ready_wake();
+            if link.has_rx_data() || link.link_state() != last_link {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
             }
+        });
+        let work = embassy_futures::select::select(link_work, tx_runner.tx_buf()).await;
+        match work {
+            Either::First(()) => {}
             Either::Second(buf) => {
-                #[cfg(feature = "wifi-debug-trace")]
-                RUNNER_DEBUG.note_ready_wake();
-
                 if buf.is_empty() {
                     tx_runner.tx_done();
                     return;
@@ -684,17 +614,10 @@ where
 
                 match link.transmit(buf) {
                     Ok(()) => {
-                        #[cfg(feature = "wifi-debug-trace")]
-                        RUNNER_DEBUG.note_tx_frame();
                         tx_runner.tx_done();
                     }
-                    Err(DriverError::WouldBlock) => {
-                        #[cfg(feature = "wifi-debug-trace")]
-                        RUNNER_DEBUG.note_tx_would_block();
-                    }
+                    Err(DriverError::WouldBlock) => {}
                     Err(_) => {
-                        #[cfg(feature = "wifi-debug-trace")]
-                        RUNNER_DEBUG.note_tx_error();
                         tx_runner.tx_done();
                     }
                 }
