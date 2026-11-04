@@ -1,10 +1,44 @@
 //! PHY initialization and RF calibration.
 //!
 //! Replaces `sdk_overrides/phy_init.c`. Manages the PHY/RF init sequence,
-//! calibration data persistence via NVS, and clock initialization.
+//! calibration data persistence via NVS. The HAL reset path owns PLL setup.
 
-use core::ffi::c_void;
+use core::{ffi::c_void, ptr};
 use esp8266_wifi_sys as sys;
+use portable_atomic::{AtomicI32, Ordering};
+
+// The native load-calibration hook returns void. Reserve both temporary buffers
+// before entering native initialization, where an OOM cannot be propagated.
+const CALIBRATION_BYTES: usize = 128 + 4 * 125;
+const RF_INIT_BYTES: usize = 256;
+static mut WORKSPACE: *mut u8 = ptr::null_mut();
+static INIT_RESULT: AtomicI32 = AtomicI32::new(sys::ESP_OK);
+
+pub(crate) unsafe fn prepare_workspace() -> i32 {
+    unsafe {
+        INIT_RESULT.store(sys::ESP_OK, Ordering::Release);
+        WORKSPACE =
+            super::super::compat::memory::calloc(1, CALIBRATION_BYTES + RF_INIT_BYTES).cast();
+        if WORKSPACE.is_null() {
+            sys::ESP_ERR_NO_MEM
+        } else {
+            sys::ESP_OK
+        }
+    }
+}
+
+pub(crate) fn initialization_result() -> i32 {
+    INIT_RESULT.load(Ordering::Acquire)
+}
+
+/// Called only after completed initialization or proven native cleanup.
+pub(crate) unsafe fn release_workspace() {
+    unsafe {
+        let workspace = WORKSPACE;
+        WORKSPACE = ptr::null_mut();
+        super::super::compat::memory::free(workspace.cast());
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PHY init data (128 bytes, from esp_private/phy_init_data.h)
@@ -48,10 +82,7 @@ extern "C" {
     fn phy_check_data_table(table: *const u32, len: u32, mode: u32) -> u8;
     fn get_data_from_rtc(data: *mut u8);
     fn write_data_to_rtc(data: *const u8);
-    fn rtc_init() -> i32;
-    fn rtc_init_clk(init_data: *const u8);
     fn uart_tx_wait_idle(uart_no: u8);
-    fn uart_div_modify(uart_no: u8, divisor: u32);
 
     fn nvs_open(name: *const u8, mode: u32, handle: *mut u32) -> i32;
     fn nvs_close(handle: u32);
@@ -66,10 +97,6 @@ extern "C" {
 // NVS constants
 const NVS_READONLY: u32 = 0;
 const NVS_READWRITE: u32 = 1;
-
-// UART
-const UART_CLK_FREQ: u32 = 80_000_000 / 1; // APB_CLK_FREQ
-const UART_BAUDRATE: u32 = 115_200;
 
 // ---------------------------------------------------------------------------
 // Calibration data
@@ -131,10 +158,10 @@ pub unsafe extern "C" fn esp_phy_rf_init(
 ) -> i32 {
     unsafe {
         // Build 256-byte buffer: [128 init_data | 128 cal_data]
-        let local_init_data = super::super::compat::memory::calloc(1, 256) as *mut u8;
-        if local_init_data.is_null() {
-            return sys::ESP_ERR_NO_MEM;
+        if WORKSPACE.is_null() {
+            return sys::ESP_ERR_INVALID_STATE;
         }
+        let local_init_data = WORKSPACE.add(CALIBRATION_BYTES);
 
         core::ptr::copy_nonoverlapping(init_data, local_init_data, 128);
         // cal_data starts at offset 0 in esp_phy_calibration_data_t.rf_cal_data
@@ -172,8 +199,6 @@ pub unsafe extern "C" fn esp_phy_rf_init(
         // Copy RX gain DC table to persistent storage
         core::ptr::copy_nonoverlapping(cal_dc_table, rx_gain_dc_table.as_mut_ptr(), 125);
         phy_rx_gain_dc_table = rx_gain_dc_table.as_mut_ptr();
-
-        super::super::compat::memory::free(local_init_data as *mut c_void);
 
         sys::ESP_OK
     }
@@ -303,18 +328,12 @@ pub unsafe extern "C" fn esp_phy_store_cal_data_to_nvs(cal_data: *const u8) -> i
 #[no_mangle]
 pub unsafe extern "C" fn esp_phy_load_cal_and_init(_module: u32) {
     unsafe {
-        // esp_phy_calibration_data_t = rf_cal_data[128] + rx_gain_dc_table[500]
-        let cal_data_size = 128 + 4 * 125; // 628 bytes
-        let cal_data = super::super::compat::memory::calloc(1, cal_data_size) as *mut u8;
+        let cal_data = WORKSPACE;
         if cal_data.is_null() {
-            // Fatal: can't allocate calibration buffer
-            loop {}
+            INIT_RESULT.store(sys::ESP_ERR_INVALID_STATE, Ordering::Release);
+            return;
         }
-
         let init_data = esp_phy_get_init_data();
-        if init_data.is_null() {
-            loop {}
-        }
 
         let mut mode: u32 = 0;
         let err = esp_phy_load_cal_data_from_nvs(cal_data);
@@ -322,7 +341,11 @@ pub unsafe extern "C" fn esp_phy_load_cal_and_init(_module: u32) {
             mode = 2;
         }
 
-        esp_phy_rf_init(init_data, mode, cal_data, _module);
+        let result = esp_phy_rf_init(init_data, mode, cal_data, _module);
+        INIT_RESULT.store(result, Ordering::Release);
+        if result != sys::ESP_OK {
+            return;
+        }
 
         // Store calibration data back to NVS if we did a full cal
         if mode == 2 || err != sys::ESP_OK {
@@ -330,7 +353,9 @@ pub unsafe extern "C" fn esp_phy_load_cal_and_init(_module: u32) {
         }
 
         esp_phy_release_init_data(init_data);
-        super::super::compat::memory::free(cal_data as *mut c_void);
+        // The PHY retained only the persistent DC table. Reclaim both temporary
+        // buffers before native initialization creates its larger runtime tasks.
+        release_workspace();
     }
 }
 
@@ -374,28 +399,4 @@ pub unsafe extern "C" fn esp_wifi_set_max_tx_power_via_vdd33(vdd33: u16) {
 #[no_mangle]
 pub unsafe extern "C" fn phy_printf() -> i32 {
     0
-}
-
-// ---------------------------------------------------------------------------
-// Clock initialization
-// ---------------------------------------------------------------------------
-
-/// Initialize RTC and PLL clocks using PHY init data.
-///
-/// After this call, the APB clock runs at 80 MHz. UART baud rates are
-/// reconfigured for 115200.
-#[no_mangle]
-pub unsafe extern "C" fn esp_phy_init_clk() {
-    unsafe {
-        let mut buf = [0u8; 128];
-        buf.copy_from_slice(&PHY_INIT_DATA);
-
-        uart_tx_wait_idle(0);
-        uart_div_modify(0, UART_CLK_FREQ / UART_BAUDRATE);
-        uart_tx_wait_idle(1);
-        uart_div_modify(1, UART_CLK_FREQ / UART_BAUDRATE);
-
-        rtc_init();
-        rtc_init_clk(buf.as_ptr());
-    }
 }

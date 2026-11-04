@@ -166,9 +166,8 @@
 #define CONFIG_MBEDTLS_AES_C 1
 #define CONFIG_MBEDTLS_CCM_C 1
 #define CONFIG_MBEDTLS_GCM_C 1
-#define CONFIG_MBEDTLS_DES_C 1
-#define CONFIG_MBEDTLS_BLOWFISH_C 1
-#define CONFIG_MBEDTLS_CAMELLIA_C 1
+/* Keep the SDK-default optional legacy ciphers disabled. WPA's separate DES
+ * implementation remains available for MSCHAPv2. */
 /* Asymmetric / EC */
 #define CONFIG_MBEDTLS_ECDSA_C 1
 #define CONFIG_MBEDTLS_ECP_C 1

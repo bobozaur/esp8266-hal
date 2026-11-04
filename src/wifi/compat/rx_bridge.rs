@@ -39,7 +39,7 @@ fn copy_has_capacity(free: u32, frame_bytes: u32) -> bool {
 }
 
 /// Delivers one SDK RX packet to the registered STA/AP callback.
-#[no_mangle]
+#[export_name = "__esp8266_hal_ieee80211_deliver_data"]
 pub unsafe extern "C" fn ieee80211_deliver_data(interface: u32, packet: *mut c_void) {
     let callback = if interface < 2 {
         unsafe { ptr::read_volatile(ptr::addr_of!(sta_rxcb[interface as usize])) }

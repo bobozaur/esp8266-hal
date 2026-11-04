@@ -1,9 +1,7 @@
 //! FreeRTOS-compatible software timer implementation.
 //!
-//! Timers are stored in a flat array. The tick ISR marks expired timers, and
-//! their callbacks are executed from a dedicated timer service task (not from
-//! ISR context). This matches FreeRTOS behavior where timer callbacks run in
-//! the timer daemon task and can safely call blocking APIs.
+//! Timers are stored in a bounded array. A command queue wakes the timer
+//! daemon, which dispatches expired callbacks in task context.
 
 use core::ffi::c_void;
 
@@ -19,9 +17,8 @@ const MAX_TIMERS: usize = 12;
 const TIMER_QUEUE_LENGTH: u32 = 10;
 const PD_PASS: i32 = 1;
 const PD_FALSE: i32 = 0;
-// The current Rust timer daemon uses about 512 bytes at the measured
-// `esp_wifi_init` worst point, so a 1024-byte request still keeps healthy
-// slack while reclaiming DRAM for the WiFi blob's large internal tasks.
+// The compatibility daemon has its own stack budget; create_task adds the
+// larger HAL exception-frame allowance. Callback depth also consumes this stack.
 const TIMER_DAEMON_STACK_BYTES: u16 = 768;
 // Match the generated `sdkconfig.h` on this branch:
 // `CONFIG_ESP_TIMER_TASK_STACK_SIZE = 2048`.
@@ -157,10 +154,19 @@ unsafe extern "C" fn timer_daemon_task(_param: *mut c_void) {
     }
 }
 
-/// Create the timer daemon task. Called from `xPortStartScheduler`.
-pub(crate) unsafe fn create_timer_daemon() {
+/// Create the timer daemon and its command queue before scheduler activation.
+pub(crate) unsafe fn create_timer_daemon() -> i32 {
+    unsafe { xTimerCreateTimerTask() }
+}
+
+/// Release the command queue after failed preparation, before tasks can run.
+pub(crate) unsafe fn rollback_startup() {
     unsafe {
-        xTimerCreateTimerTask();
+        if !TIMER_QUEUE_HANDLE.is_null() {
+            queue::vQueueDelete(TIMER_QUEUE_HANDLE);
+            TIMER_QUEUE_HANDLE = core::ptr::null_mut();
+        }
+        TIMER_DAEMON_HANDLE = core::ptr::null_mut();
     }
 }
 
@@ -183,14 +189,6 @@ pub(crate) unsafe fn start_ets_timer_task() -> i32 {
         )
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tick processing (called from xTaskIncrementTick in ISR context)
-// ---------------------------------------------------------------------------
-
-/// Timer expiry is handled in task context by `Tmr Svc`, mirroring SDK
-/// `prvTimerTask(...)` rather than firing callbacks from the tick ISR.
-pub(crate) unsafe fn process_timers(_tick: u64) {}
 
 /// `xTimerCreateTimerTask` — ensure the timer command queue exists, then
 /// create the `Tmr Svc` daemon task.

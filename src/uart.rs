@@ -10,6 +10,14 @@ use embedded_hal::serial::{Read, Write};
 use esp8266::{UART0, UART1};
 use void::Void;
 
+/// Wait one maximum-length frame after FIFO empty. The peripheral bus is
+/// 80 MHz and the supported CPU frequencies are at most 160 MHz, so 24 CPU
+/// clocks per baud divider cover 12 wire bits at either supported CPU speed.
+fn finish_frame(_divider: u32) {
+    #[cfg(target_arch = "xtensa")]
+    xtensa_lx::timer::delay(_divider * 24);
+}
+
 /// Extension trait for `UART0` for easily creating `UART0Serial` instances.
 pub trait UART0Ext {
     fn serial(self, tdx: Gpio1<UART>, rxd: Gpio3<UART>) -> UART0Serial;
@@ -48,12 +56,38 @@ pub struct UART0Serial {
 }
 
 impl UART0Serial {
+    /// Enable an RX interrupt as soon as one byte reaches the FIFO.
+    /// Install a static UART handler and unmask its CPU source separately.
+    pub fn listen_rx(&mut self) {
+        self.uart
+            .uart_conf1()
+            .modify(|_, w| unsafe { w.rxfifo_full_thrhd().bits(1) });
+        self.clear_rx_interrupt();
+        self.uart
+            .uart_int_ena()
+            .modify(|_, w| w.rxfifo_full_int_ena().set_bit());
+    }
+
+    pub fn unlisten_rx(&mut self) {
+        self.uart
+            .uart_int_ena()
+            .modify(|_, w| w.rxfifo_full_int_ena().clear_bit());
+        self.clear_rx_interrupt();
+    }
+
+    /// Acknowledge RX after draining the FIFO in the interrupt handler.
+    pub fn clear_rx_interrupt(&mut self) {
+        self.uart
+            .uart_int_clr()
+            .write(|w| w.rxfifo_full_int_clr().set_bit());
+    }
+
     /// Free up the UART device and return the pins used.
     ///
     /// This operation blocks while there are still bytes in the transmit buffer.
-    pub fn decompose(mut self) -> nb::Result<(UART0, Gpio1<UART>, Gpio3<UART>), Void> {
-        self.flush()?;
-        Ok((self.uart, self.txd, self.rxd))
+    pub fn decompose(mut self) -> (UART0, Gpio1<UART>, Gpio3<UART>) {
+        nb::block!(self.flush()).unwrap();
+        (self.uart, self.txd, self.rxd)
     }
 }
 
@@ -88,6 +122,8 @@ impl Write<u8> for UART0Serial {
         if self.uart.uart_status().read().txfifo_cnt().bits() > 0 {
             Err(nb::Error::WouldBlock)
         } else {
+            // FIFO empty can leave one final frame in the shift register.
+            finish_frame(self.uart.uart_clkdiv().read().uart_clkdiv().bits());
             Ok(())
         }
     }
@@ -112,9 +148,9 @@ impl UART1Serial {
     /// Free up the UART device and return the pins used.
     ///
     /// This operation blocks while there are still bytes in the transmit buffer.
-    pub fn decompose(mut self) -> nb::Result<(UART1, Gpio2<UART>), Void> {
-        self.flush()?;
-        Ok((self.uart, self.txd))
+    pub fn decompose(mut self) -> (UART1, Gpio2<UART>) {
+        nb::block!(self.flush()).unwrap();
+        (self.uart, self.txd)
     }
 }
 
@@ -136,6 +172,8 @@ impl Write<u8> for UART1Serial {
         if self.uart.uart_status().read().txfifo_cnt().bits() > 0 {
             Err(nb::Error::WouldBlock)
         } else {
+            // FIFO empty can leave one final frame in the shift register.
+            finish_frame(self.uart.uart_clkdiv().read().uart_clkdiv().bits());
             Ok(())
         }
     }
@@ -153,26 +191,3 @@ impl core::fmt::Write for UART1Serial {
 impl embedded_hal::blocking::serial::write::Default<u8> for UART0Serial {}
 
 impl embedded_hal::blocking::serial::write::Default<u8> for UART1Serial {}
-
-#[cfg(all(feature = "rt", feature = "interrupt"))]
-mod interrupt {
-    use super::*;
-
-    int_handler!(UART => UartInterruptHandler(UART0Serial));
-
-    impl UART0Serial {
-        #[must_use = "the interrupt handler must be kept in scope for the interrupt to be handled"]
-        pub fn attach_interrupt<F: FnMut(&mut UART0Serial)>(
-            self,
-            mut f: F,
-        ) -> Pin<UartInterruptHandler<impl FnMut(&mut UART0Serial)>> {
-            UartInterruptHandler::new(self, move |serial: &mut UART0Serial| {
-                f(serial);
-                serial
-                    .uart
-                    .uart_int_clr()
-                    .write(|w| unsafe { w.bits(0xff) });
-            })
-        }
-    }
-}

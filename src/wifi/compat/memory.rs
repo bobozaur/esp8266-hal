@@ -1,705 +1,217 @@
-//! Heap allocator for WiFi blob memory needs.
+//! SDK allocation ABI over the application's permanent DRAM allocator.
 //!
-//! Uses `esp-alloc` (the same allocator crate used on ESP32) backed by the
-//! DRAM region between `_heap_start` and `_heap_end` from the linker script.
-//!
-//! We export `pvPortMalloc` / `vPortFree` / `pvPortCalloc` / `pvPortZalloc`
-//! and `_heap_caps_*` as C-compatible symbols for the WiFi blob and SDK code.
+//! C free/realloc omit allocation layouts, so SDK allocations carry a compact
+//! header. Rust-owned queues use the same provider without this C ABI header.
 
-use core::alloc::{GlobalAlloc, Layout};
+// These exported names are fixed by the native SDK ABI, including host tests.
+#![allow(non_snake_case)]
+
+use core::alloc::Layout;
 use core::ffi::c_void;
 use core::ptr;
 
-use esp_alloc::EspHeap;
+use crate::wifi_core::WifiAllocator;
 
-// ---------------------------------------------------------------------------
-// Global heap
-// ---------------------------------------------------------------------------
+static mut ALLOCATOR: Option<&'static dyn WifiAllocator> = None;
 
-/// Top of DRAM minus a temporary reservation for the boot stack.
-///
-/// The ESP8266 DRAM ends at 0x4000_0000. The main task (embassy executor)
-/// starts on the CPU boot stack which grows downward from the top of DRAM.
-/// Until execution has switched onto the heap-backed `uiT` task stack, the
-/// allocator must not hand out that top-of-DRAM region or it will collide
-/// with the live boot stack.
-///
-/// 3 KiB reservation: WiFi init still succeeds (needs ~21 KB heap), and the
-/// remaining gap between the top heap allocation and the boot-stack low-water
-/// SP (~0x3fffe_e00) is ~1.5 KiB — enough to prevent stack/heap overlap
-/// before the first task switch. Once `uiT` is running this region can be
-/// reclaimed safely.
-const DRAM_TOP: usize = 0x4000_0000;
-const BOOT_STACK_RESERVE_BYTES: usize = 3072;
-const DRAM_LIMIT: usize = DRAM_TOP - BOOT_STACK_RESERVE_BYTES;
-const LOW_HEAP_START: usize = 0;
-
-struct SplitHeap;
-
-#[global_allocator]
-static HEAP: SplitHeap = SplitHeap;
-static HEAP_HI: EspHeap = EspHeap::empty();
-static HEAP_LO: EspHeap = EspHeap::empty();
-
-static mut HEAP_INITIALIZED: bool = false;
-static mut HEAP_HI_START: usize = 0;
-static mut HEAP_HI_END: usize = 0;
-static mut HEAP_LO_START: usize = 0;
-static mut HEAP_LO_END: usize = 0;
-static mut BOOT_STACK_REGION_RECLAIMED: bool = false;
-
-/// Initialize the heap from linker-provided symbols if not already done.
-unsafe fn ensure_init() {
-    unsafe {
-        if HEAP_INITIALIZED {
-            return;
-        }
-        HEAP_INITIALIZED = true;
-
-        extern "C" {
-            static _data_start: u8;
-            static _heap_start: u8;
-        }
-
-        let hi_start = &_heap_start as *const u8 as usize;
-        let hi_end = DRAM_LIMIT;
-        let lo_start = LOW_HEAP_START;
-        let lo_end = if lo_start == 0 {
-            0
-        } else {
-            &_data_start as *const u8 as usize
-        };
-
-        HEAP_HI_START = hi_start;
-        HEAP_HI_END = hi_end;
-        HEAP_LO_START = lo_start;
-        HEAP_LO_END = lo_end;
-
-        if hi_end > hi_start {
-            HEAP_HI.init(hi_start as *mut u8, hi_end - hi_start);
-        }
-        if lo_end > lo_start {
-            HEAP_LO.init(lo_start as *mut u8, lo_end - lo_start);
-        }
-    }
+/// Installed exactly once before any SDK tasks or interrupts can allocate.
+pub(crate) unsafe fn install(allocator: &'static dyn WifiAllocator) {
+    unsafe { ALLOCATOR = Some(allocator) };
 }
 
-/// Explicitly initialize the heap. Called early in boot so that both Rust
-/// `alloc` and C `malloc` work immediately.
-pub fn init() {
-    critical_section::with(|_| unsafe { ensure_init() });
-}
-
-pub fn reclaim_boot_stack_reservation() {
-    critical_section::with(|_| unsafe {
-        ensure_init();
-
-        if BOOT_STACK_REGION_RECLAIMED {
-            return;
-        }
-
-        HEAP_LO.init(DRAM_LIMIT as *mut u8, BOOT_STACK_RESERVE_BYTES);
-        HEAP_LO_START = DRAM_LIMIT;
-        HEAP_LO_END = DRAM_TOP;
-        BOOT_STACK_REGION_RECLAIMED = true;
-    });
-}
-
-fn ptr_in_region(ptr: *mut u8, start: usize, end: usize) -> bool {
-    let addr = ptr as usize;
-    addr >= start && addr < end
+pub(crate) fn allocator() -> &'static dyn WifiAllocator {
+    // SAFETY: the provider is permanent and never changes after installation.
+    unsafe { ALLOCATOR.expect("runtime allocator is not initialized") }
 }
 
 unsafe fn alloc_raw(layout: Layout) -> *mut u8 {
-    unsafe {
-        critical_section::with(|_| ensure_init());
-
-        if BOOT_STACK_REGION_RECLAIMED {
-            let ptr = HEAP_LO.alloc(layout);
-            if !ptr.is_null() {
-                return ptr;
-            }
-
-            return HEAP_HI.alloc(layout);
-        }
-
-        let ptr = HEAP_HI.alloc(layout);
-        if !ptr.is_null() {
-            return ptr;
-        }
-
-        HEAP_LO.alloc(layout)
-    }
+    // Before runtime setup, SDK allocation fails without touching a heap.
+    unsafe { ALLOCATOR.map_or(ptr::null_mut(), |allocator| allocator.alloc(layout)) }
 }
 
-unsafe fn dealloc_raw(ptr: *mut u8, layout: Layout) {
-    unsafe {
-        critical_section::with(|_| ensure_init());
-
-        if ptr_in_region(ptr, HEAP_HI_START, HEAP_HI_END) {
-            HEAP_HI.dealloc(ptr, layout);
-        } else if ptr_in_region(ptr, HEAP_LO_START, HEAP_LO_END) {
-            HEAP_LO.dealloc(ptr, layout);
-        }
-    }
+unsafe fn dealloc_raw(pointer: *mut u8, layout: Layout) {
+    // SAFETY: all live SDK allocations came from the installed provider.
+    unsafe { allocator().dealloc(pointer, layout) };
 }
 
 fn total_free() -> usize {
-    HEAP_HI.free() + HEAP_LO.free()
+    // SAFETY: installation precedes scheduler activation; the provider is Sync.
+    unsafe { ALLOCATOR.map_or(0, |allocator| allocator.free_dram_bytes()) }
 }
 
-#[cfg(feature = "wifi-enterprise")]
-mod eap_workspace {
-    use super::*;
+// The pinned ESP8266 SDK (vendor/VERSION: core 231e0e2, pp 25e5ef2)
+// ignores allocation failures in its radio attach and config loading. Reserve
+// eight persistent first-attach allocations and one temporary config buffer
+// before entering it; handoff preserves the normal
+// C header and allocator ownership. This is not a separate heap or free list.
+#[derive(Clone, Copy)]
+pub(crate) enum InitAllocation {
+    Hardware,
+    TxDescriptors,
+    RxDescriptors,
+    PacketDescriptors,
+    PpQueue,
+    PpQueueStorage,
+    PpStack,
+    MiscNvs,
+    WifiNvs,
+}
 
-    static mut EAP_RSA_WORKSPACE_ACTIVE_COUNT: u32 = 0;
-    const EAP_RSA_WORKSPACE_SLOTS: usize = 3;
-    const EAP_RSA_WORKSPACE_SESSION_SLOTS: usize = 2;
-    const EAP_RSA_WORKSPACE_PRIMARY_USABLE_BYTES: usize = 1144;
-    const EAP_RSA_WORKSPACE_SECONDARY_USABLE_BYTES: usize = 1072;
-    const EAP_RSA_WORKSPACE_SMALL_USABLE_BYTES: usize =
-        EAP_RSA_WORKSPACE_LATE_BLOCK_USABLE_BYTES + 3 * EAP_RSA_WORKSPACE_MEDIUM_BLOCK_USABLE_BYTES;
-    const EAP_RSA_WORKSPACE_BLOCKS_PER_SLOT: usize = 7;
-    const EAP_RSA_WORKSPACE_BLOCK0_USABLE_BYTES: usize = 508;
-    const EAP_RSA_WORKSPACE_BLOCK1_USABLE_BYTES: usize = 316;
-    const EAP_RSA_WORKSPACE_BLOCK2_USABLE_BYTES: usize = 176;
-    const EAP_RSA_WORKSPACE_PRIMARY_TAIL_USABLE_BYTES: usize = 72;
-    const EAP_RSA_WORKSPACE_LATE_BLOCK_USABLE_BYTES: usize = 176;
-    const EAP_RSA_WORKSPACE_SMALL_BLOCK_USABLE_BYTES: usize = 32;
-    const EAP_RSA_WORKSPACE_MEDIUM_BLOCK_USABLE_BYTES: usize = 72;
-    const EAP_RSA_WORKSPACE_EXTRA_USABLE_BYTES: usize = 32;
-    const EAP_RSA_WORKSPACE_EXTRA_SLOTS: usize = 4;
-    const EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USABLE_BYTES: usize = 32;
-    const EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS: usize = 4;
-    static mut EAP_RSA_WORKSPACE_PTRS: [*mut c_void; EAP_RSA_WORKSPACE_SLOTS] =
-        [ptr::null_mut(); EAP_RSA_WORKSPACE_SLOTS];
-    static mut EAP_RSA_WORKSPACE_USABLE: [usize; EAP_RSA_WORKSPACE_SLOTS] =
-        [0; EAP_RSA_WORKSPACE_SLOTS];
-    static mut EAP_RSA_WORKSPACE_USAGE: [u8; EAP_RSA_WORKSPACE_SLOTS] =
-        [0; EAP_RSA_WORKSPACE_SLOTS];
-    static mut EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_PTRS: [*mut c_void;
-        EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS] =
-        [ptr::null_mut(); EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS];
-    static mut EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USAGE: u8 = 0;
-    static mut EAP_RSA_WORKSPACE_EXTRA_CELLS: [u32; EAP_RSA_WORKSPACE_EXTRA_SLOTS
-        * EAP_RSA_WORKSPACE_EXTRA_USABLE_BYTES
-        / 4] = [0; EAP_RSA_WORKSPACE_EXTRA_SLOTS * EAP_RSA_WORKSPACE_EXTRA_USABLE_BYTES / 4];
-    static mut EAP_RSA_WORKSPACE_EXTRA_USAGE: u8 = 0;
+/// Dimensions copied by wifi_menuconfig_init into g_wifi_menuconfig.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InitBufferLayout {
+    pub ampdu_buffers: usize,
+    pub ampdu_buffer_len: usize,
+    pub max_packet_len: usize,
+    pub rx_buffer_len: usize,
+    pub rx_buffers: usize,
+    pub rx_packets: usize,
+    pub tx_buffers: usize,
+    pub continuous_rx_buffers: usize,
+}
 
-    pub(crate) fn reserve_eap_rsa_workspace() {
-        critical_section::with(|_| unsafe {
-            ensure_init();
-            let target_slots = if EAP_RSA_WORKSPACE_ACTIVE_COUNT == 0 {
-                EAP_RSA_WORKSPACE_SESSION_SLOTS
-            } else {
-                EAP_RSA_WORKSPACE_SLOTS
-            };
-            EAP_RSA_WORKSPACE_ACTIVE_COUNT = EAP_RSA_WORKSPACE_ACTIVE_COUNT.saturating_add(1);
-            ensure_eap_rsa_workspace_reserved(target_slots);
-        });
-    }
-
-    pub(crate) fn boost_eap_rsa_workspace() {
-        critical_section::with(|_| unsafe {
-            ensure_init();
-            if EAP_RSA_WORKSPACE_ACTIVE_COUNT == 0 {
-                return;
-            }
-
-            ensure_eap_rsa_workspace_reserved(EAP_RSA_WORKSPACE_SLOTS);
-        });
-    }
-
-    pub(crate) fn release_eap_rsa_workspace() {
-        critical_section::with(|_| unsafe {
-            EAP_RSA_WORKSPACE_ACTIVE_COUNT = EAP_RSA_WORKSPACE_ACTIVE_COUNT.saturating_sub(1);
-            release_eap_rsa_workspace_if_idle();
-        });
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn esp8266_hal_eap_rsa_reserve() {
-        reserve_eap_rsa_workspace();
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn esp8266_hal_eap_rsa_boost() {
-        boost_eap_rsa_workspace();
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn esp8266_hal_eap_rsa_release() {
-        release_eap_rsa_workspace();
-    }
-
-    unsafe fn eap_workspace_any_in_use() -> bool {
-        unsafe {
-            if EAP_RSA_WORKSPACE_EXTRA_USAGE != 0 || EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USAGE != 0 {
-                return true;
-            }
-            for index in 0..EAP_RSA_WORKSPACE_SLOTS {
-                if EAP_RSA_WORKSPACE_USAGE[index] != 0 {
-                    return true;
-                }
-            }
-            false
+impl InitBufferLayout {
+    pub(crate) fn allocation_sizes(
+        self,
+        first_attach: bool,
+        pp_queue_bytes: usize,
+        pp_stack_bytes: usize,
+    ) -> Option<[usize; INIT_ALLOCATION_COUNT]> {
+        // wifi_nvs_deinit resets its flag, unlike the permanent radio attach.
+        let mut sizes = [0; INIT_ALLOCATION_COUNT];
+        sizes[InitAllocation::WifiNvs as usize] = 1024;
+        if first_attach {
+            // wdev.c:1151 combines RX data, AMPDU storage and 12-byte DMA
+            // descriptors. esf_buf.c:720/734/743 allocate its three indexes.
+            let descriptors = self
+                .rx_buffers
+                .checked_add(self.ampdu_buffers)?
+                .checked_add(self.tx_buffers)?
+                .checked_mul(12)?;
+            sizes[InitAllocation::Hardware as usize] = self
+                .ampdu_buffers
+                .checked_mul(self.ampdu_buffer_len)?
+                .checked_add(self.tx_buffers.checked_mul(4)?)?
+                .checked_add(self.max_packet_len)?
+                .checked_add(self.rx_buffers.checked_mul(self.rx_buffer_len)?)?
+                .checked_add(descriptors)?;
+            sizes[InitAllocation::TxDescriptors as usize] =
+                self.tx_buffers.checked_add(8)?.checked_mul(28)?;
+            sizes[InitAllocation::RxDescriptors as usize] =
+                self.rx_packets.checked_add(1)?.checked_mul(8)?;
+            sizes[InitAllocation::PacketDescriptors as usize] = self
+                .tx_buffers
+                .checked_add(self.rx_packets)?
+                .checked_add(9)?
+                .checked_mul(68)?;
+            sizes[InitAllocation::PpQueue as usize] = pp_queue_bytes;
+            sizes[InitAllocation::PpQueueStorage as usize] = 75 * 8;
+            sizes[InitAllocation::PpStack as usize] = pp_stack_bytes;
+            // misc_nvs_init ignores this allocation failure; STA later
+            // dereferences g_misc_nvs. Unlike WiFi NVS, this object persists.
+            sizes[InitAllocation::MiscNvs as usize] = 36;
         }
+        Some(sizes)
     }
+}
 
-    unsafe fn ensure_eap_rsa_workspace_reserved(target_slots: usize) {
-        unsafe {
-            for index in 0..target_slots.min(EAP_RSA_WORKSPACE_SLOTS) {
-                if !EAP_RSA_WORKSPACE_PTRS[index].is_null() {
-                    continue;
-                }
+const INIT_ALLOCATION_COUNT: usize = 9;
+static INIT_RESERVATIONS_ACTIVE: portable_atomic::AtomicBool =
+    portable_atomic::AtomicBool::new(false);
+static mut INIT_RESERVATIONS: [(*mut c_void, usize); INIT_ALLOCATION_COUNT] =
+    [(ptr::null_mut(), 0); INIT_ALLOCATION_COUNT];
 
-                let usable = eap_workspace_slot_usable(index);
-                let total = usable + HEADER_SIZE;
-                let layout = Layout::from_size_align_unchecked(total, 4);
-                let raw = alloc_raw(layout);
-                if raw.is_null() {
-                    return;
-                }
-
-                let header = raw as *mut u32;
-                header.write(total as u32);
-                header.add(1).write(FREED_MAGIC);
-                EAP_RSA_WORKSPACE_PTRS[index] = raw.add(HEADER_SIZE) as *mut c_void;
-                EAP_RSA_WORKSPACE_USABLE[index] = usable;
-                EAP_RSA_WORKSPACE_USAGE[index] = 0;
+/// Called under the WiFi singleton guard, before any native initialization.
+pub(crate) unsafe fn reserve_init_allocations(sizes: [usize; INIT_ALLOCATION_COUNT]) -> bool {
+    unsafe {
+        debug_assert!(!INIT_RESERVATIONS_ACTIVE.load(portable_atomic::Ordering::Relaxed));
+        for (index, size) in sizes.into_iter().enumerate() {
+            if size == 0 {
+                continue;
             }
-
-            if target_slots < EAP_RSA_WORKSPACE_SLOTS {
-                return;
+            let pointer = zalloc(size);
+            if pointer.is_null() {
+                release_init_allocations();
+                return false;
             }
-
-            for index in 0..EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS {
-                if !EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_PTRS[index].is_null() {
-                    continue;
-                }
-
-                let usable = EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USABLE_BYTES;
-                let total = usable + HEADER_SIZE;
-                let layout = Layout::from_size_align_unchecked(total, 4);
-                let raw = alloc_raw(layout);
-                if raw.is_null() {
-                    return;
-                }
-
-                let header = raw as *mut u32;
-                header.write(total as u32);
-                header.add(1).write(FREED_MAGIC);
-                EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_PTRS[index] = raw.add(HEADER_SIZE) as *mut c_void;
-            }
+            INIT_RESERVATIONS[index] = (pointer, size);
         }
+        INIT_RESERVATIONS_ACTIVE.store(true, portable_atomic::Ordering::Release);
+        true
     }
+}
 
-    fn eap_workspace_slot_usable(index: usize) -> usize {
-        if index + 1 == EAP_RSA_WORKSPACE_SLOTS {
-            EAP_RSA_WORKSPACE_SMALL_USABLE_BYTES
-        } else if index == 1 {
-            EAP_RSA_WORKSPACE_SECONDARY_USABLE_BYTES
-        } else {
-            EAP_RSA_WORKSPACE_PRIMARY_USABLE_BYTES
+/// An allocation becomes SDK-owned exactly once, at its audited call boundary.
+pub(crate) fn take_init_allocation(kind: InitAllocation, size: usize) -> Option<*mut c_void> {
+    if !INIT_RESERVATIONS_ACTIVE.load(portable_atomic::Ordering::Acquire) {
+        return None;
+    }
+    critical_section::with(|_| unsafe {
+        let slot = &mut INIT_RESERVATIONS[kind as usize];
+        if slot.0.is_null() || slot.1 != size {
+            return None;
         }
-    }
+        let pointer = slot.0;
+        *slot = (ptr::null_mut(), 0);
+        Some(pointer)
+    })
+}
 
-    fn eap_workspace_block_mask(block: usize) -> u8 {
-        if block < 8 {
-            1u8 << block
-        } else {
-            0
-        }
-    }
-
-    fn eap_workspace_extra_mask(index: usize) -> u8 {
-        if index < 8 {
-            1u8 << index
-        } else {
-            0
-        }
-    }
-
-    fn eap_workspace_dynamic_extra_mask(index: usize) -> u8 {
-        if index < 8 {
-            1u8 << index
-        } else {
-            0
-        }
-    }
-
-    unsafe fn eap_workspace_extra_ptr(index: usize) -> *mut c_void {
-        if index >= EAP_RSA_WORKSPACE_EXTRA_SLOTS {
-            return ptr::null_mut();
-        }
-
-        unsafe {
-            let base = core::ptr::addr_of_mut!(EAP_RSA_WORKSPACE_EXTRA_CELLS) as *mut u32;
-            base.add(index * EAP_RSA_WORKSPACE_EXTRA_USABLE_BYTES / 4) as *mut c_void
-        }
-    }
-
-    unsafe fn eap_workspace_dynamic_extra_ptr(index: usize) -> *mut c_void {
-        if index >= EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS {
-            return ptr::null_mut();
-        }
-
-        unsafe { EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_PTRS[index] }
-    }
-
-    unsafe fn eap_workspace_block_ptr(index: usize, block: usize) -> *mut c_void {
-        unsafe {
-            let base = EAP_RSA_WORKSPACE_PTRS[index];
-            if base.is_null() || block >= EAP_RSA_WORKSPACE_BLOCKS_PER_SLOT {
-                return ptr::null_mut();
-            }
-
-            (base as usize + eap_workspace_block_offset(index, block)) as *mut c_void
-        }
-    }
-
-    fn eap_workspace_block_offset(index: usize, block: usize) -> usize {
-        let mut offset = 0usize;
-        for part in 0..block {
-            offset = offset.saturating_add(eap_workspace_block_usable(index, part));
-        }
-        offset
-    }
-
-    fn eap_workspace_is_small_slot(index: usize) -> bool {
-        index + 1 == EAP_RSA_WORKSPACE_SLOTS
-    }
-
-    fn eap_workspace_block_usable(index: usize, block: usize) -> usize {
-        unsafe {
-            if eap_workspace_is_small_slot(index) {
-                let (offset, block_size): (usize, usize) = match block {
-                    0 => (0, EAP_RSA_WORKSPACE_LATE_BLOCK_USABLE_BYTES),
-                    1 => (
-                        EAP_RSA_WORKSPACE_LATE_BLOCK_USABLE_BYTES,
-                        EAP_RSA_WORKSPACE_MEDIUM_BLOCK_USABLE_BYTES,
-                    ),
-                    2 => (
-                        EAP_RSA_WORKSPACE_LATE_BLOCK_USABLE_BYTES
-                            + EAP_RSA_WORKSPACE_MEDIUM_BLOCK_USABLE_BYTES,
-                        EAP_RSA_WORKSPACE_MEDIUM_BLOCK_USABLE_BYTES,
-                    ),
-                    3 => (
-                        EAP_RSA_WORKSPACE_LATE_BLOCK_USABLE_BYTES
-                            + 2 * EAP_RSA_WORKSPACE_MEDIUM_BLOCK_USABLE_BYTES,
-                        EAP_RSA_WORKSPACE_MEDIUM_BLOCK_USABLE_BYTES,
-                    ),
-                    _ => return 0,
-                };
-                if EAP_RSA_WORKSPACE_USABLE[index] >= offset.saturating_add(block_size) {
-                    return block_size;
-                }
-                return 0;
-            }
-
-            match block {
-                0 => EAP_RSA_WORKSPACE_USABLE[index].min(EAP_RSA_WORKSPACE_BLOCK0_USABLE_BYTES),
-                1 => EAP_RSA_WORKSPACE_USABLE[index].min(EAP_RSA_WORKSPACE_BLOCK1_USABLE_BYTES),
-                2 => EAP_RSA_WORKSPACE_USABLE[index].min(EAP_RSA_WORKSPACE_BLOCK2_USABLE_BYTES),
-                3 if index == 0 => EAP_RSA_WORKSPACE_USABLE[index]
-                    .saturating_sub(EAP_RSA_WORKSPACE_BLOCK0_USABLE_BYTES)
-                    .saturating_sub(EAP_RSA_WORKSPACE_BLOCK1_USABLE_BYTES)
-                    .saturating_sub(EAP_RSA_WORKSPACE_BLOCK2_USABLE_BYTES)
-                    .min(EAP_RSA_WORKSPACE_PRIMARY_TAIL_USABLE_BYTES),
-                3 => EAP_RSA_WORKSPACE_USABLE[index]
-                    .saturating_sub(EAP_RSA_WORKSPACE_BLOCK0_USABLE_BYTES)
-                    .saturating_sub(EAP_RSA_WORKSPACE_BLOCK1_USABLE_BYTES)
-                    .saturating_sub(EAP_RSA_WORKSPACE_BLOCK2_USABLE_BYTES),
-                4 if index == 0 => EAP_RSA_WORKSPACE_USABLE[index]
-                    .saturating_sub(EAP_RSA_WORKSPACE_BLOCK0_USABLE_BYTES)
-                    .saturating_sub(EAP_RSA_WORKSPACE_BLOCK1_USABLE_BYTES)
-                    .saturating_sub(EAP_RSA_WORKSPACE_BLOCK2_USABLE_BYTES)
-                    .saturating_sub(EAP_RSA_WORKSPACE_PRIMARY_TAIL_USABLE_BYTES),
-                _ => 0,
-            }
-        }
-    }
-
-    unsafe fn find_eap_workspace_block(size: usize) -> Option<(usize, usize)> {
-        unsafe {
-            let prefer_small = size <= EAP_RSA_WORKSPACE_SMALL_BLOCK_USABLE_BYTES;
-            let passes = if prefer_small { 2 } else { 1 };
-
-            for pass in 0..passes {
-                let small_only = prefer_small && pass == 0;
-                let mut best: Option<(usize, usize, usize)> = None;
-
-                for rank in 0..EAP_RSA_WORKSPACE_SLOTS {
-                    let index = if prefer_small && rank == 0 {
-                        EAP_RSA_WORKSPACE_SLOTS - 1
-                    } else if prefer_small {
-                        rank - 1
-                    } else {
-                        rank
-                    };
-
-                    if EAP_RSA_WORKSPACE_PTRS[index].is_null()
-                        || size > EAP_RSA_WORKSPACE_USABLE[index]
-                    {
-                        continue;
-                    }
-                    for block in 0..EAP_RSA_WORKSPACE_BLOCKS_PER_SLOT {
-                        let mask = eap_workspace_block_mask(block);
-                        let block_size = eap_workspace_block_usable(index, block);
-                        if small_only && block_size > EAP_RSA_WORKSPACE_SMALL_BLOCK_USABLE_BYTES {
-                            continue;
-                        }
-                        if block_size < size || EAP_RSA_WORKSPACE_USAGE[index] & mask != 0 {
-                            continue;
-                        }
-
-                        if best.map_or(true, |(_, _, best_size)| block_size < best_size) {
-                            best = Some((index, block, block_size));
-                        }
-                    }
-                }
-
-                if let Some((index, block, _)) = best {
-                    return Some((index, block));
-                }
-            }
-
-            None
-        }
-    }
-
-    unsafe fn release_eap_rsa_workspace_if_idle() {
-        unsafe {
-            if EAP_RSA_WORKSPACE_ACTIVE_COUNT != 0 || eap_workspace_any_in_use() {
-                return;
-            }
-
-            for index in 0..EAP_RSA_WORKSPACE_SLOTS {
-                let ptr = EAP_RSA_WORKSPACE_PTRS[index];
-                if ptr.is_null() {
-                    continue;
-                }
-
-                let raw = (ptr as usize - HEADER_SIZE) as *mut u8;
-                let total = EAP_RSA_WORKSPACE_USABLE[index] + HEADER_SIZE;
-                let layout = Layout::from_size_align_unchecked(total, 4);
-                EAP_RSA_WORKSPACE_PTRS[index] = ptr::null_mut();
-                EAP_RSA_WORKSPACE_USABLE[index] = 0;
-                EAP_RSA_WORKSPACE_USAGE[index] = 0;
-                dealloc_raw(raw, layout);
-            }
-
-            for index in 0..EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS {
-                let ptr = EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_PTRS[index];
-                if ptr.is_null() {
-                    continue;
-                }
-
-                let raw = (ptr as usize - HEADER_SIZE) as *mut u8;
-                let total = EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USABLE_BYTES + HEADER_SIZE;
-                let layout = Layout::from_size_align_unchecked(total, 4);
-                EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_PTRS[index] = ptr::null_mut();
-                dealloc_raw(raw, layout);
-            }
-            EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USAGE = 0;
-        }
-    }
-
-    pub(super) fn take_eap_rsa_workspace(size: usize) -> *mut c_void {
-        unsafe {
-            if EAP_RSA_WORKSPACE_ACTIVE_COUNT == 0 {
-                return ptr::null_mut();
-            }
-
-            if size <= EAP_RSA_WORKSPACE_EXTRA_USABLE_BYTES {
-                for extra in 0..EAP_RSA_WORKSPACE_EXTRA_SLOTS {
-                    let mask = eap_workspace_extra_mask(extra);
-                    if EAP_RSA_WORKSPACE_EXTRA_USAGE & mask == 0 {
-                        EAP_RSA_WORKSPACE_EXTRA_USAGE |= mask;
-                        return eap_workspace_extra_ptr(extra);
-                    }
-                }
-            }
-
-            if size <= EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USABLE_BYTES {
-                for extra in 0..EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS {
-                    let mask = eap_workspace_dynamic_extra_mask(extra);
-                    if EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_PTRS[extra].is_null()
-                        || EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USAGE & mask != 0
-                    {
-                        continue;
-                    }
-
-                    EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USAGE |= mask;
-                    return eap_workspace_dynamic_extra_ptr(extra);
-                }
-            }
-
-            let Some((index, block)) = find_eap_workspace_block(size) else {
-                return ptr::null_mut();
-            };
-
-            EAP_RSA_WORKSPACE_USAGE[index] |= eap_workspace_block_mask(block);
-            eap_workspace_block_ptr(index, block)
-        }
-    }
-
-    pub(super) fn eap_rsa_workspace_usable(ptr: *mut c_void) -> Option<usize> {
-        unsafe {
-            for extra in 0..EAP_RSA_WORKSPACE_EXTRA_SLOTS {
-                let mask = eap_workspace_extra_mask(extra);
-                if EAP_RSA_WORKSPACE_EXTRA_USAGE & mask != 0
-                    && ptr == eap_workspace_extra_ptr(extra)
-                {
-                    return Some(EAP_RSA_WORKSPACE_EXTRA_USABLE_BYTES);
-                }
-            }
-
-            for extra in 0..EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS {
-                let mask = eap_workspace_dynamic_extra_mask(extra);
-                if EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USAGE & mask != 0
-                    && ptr == eap_workspace_dynamic_extra_ptr(extra)
-                {
-                    return Some(EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USABLE_BYTES);
-                }
-            }
-
-            for index in 0..EAP_RSA_WORKSPACE_SLOTS {
-                for block in 0..EAP_RSA_WORKSPACE_BLOCKS_PER_SLOT {
-                    let mask = eap_workspace_block_mask(block);
-                    if ptr == eap_workspace_block_ptr(index, block)
-                        && EAP_RSA_WORKSPACE_USAGE[index] & mask != 0
-                    {
-                        return Some(eap_workspace_block_usable(index, block));
-                    }
-                }
-            }
-            None
-        }
-    }
-
-    pub(super) unsafe fn grow_eap_rsa_workspace(ptr: *mut c_void, new_size: usize) -> *mut c_void {
-        unsafe {
-            for extra in 0..EAP_RSA_WORKSPACE_EXTRA_SLOTS {
-                let mask = eap_workspace_extra_mask(extra);
-                if EAP_RSA_WORKSPACE_EXTRA_USAGE & mask != 0
-                    && ptr == eap_workspace_extra_ptr(extra)
-                    && new_size <= EAP_RSA_WORKSPACE_EXTRA_USABLE_BYTES
-                {
-                    return ptr;
-                }
-            }
-
-            for extra in 0..EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS {
-                let mask = eap_workspace_dynamic_extra_mask(extra);
-                if EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USAGE & mask != 0
-                    && ptr == eap_workspace_dynamic_extra_ptr(extra)
-                    && new_size <= EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USABLE_BYTES
-                {
-                    return ptr;
-                }
-            }
-
-            for index in 0..EAP_RSA_WORKSPACE_SLOTS {
-                if EAP_RSA_WORKSPACE_PTRS[index].is_null()
-                    || new_size > EAP_RSA_WORKSPACE_USABLE[index]
-                {
-                    continue;
-                }
-
-                for block in 0..EAP_RSA_WORKSPACE_BLOCKS_PER_SLOT {
-                    let mask = eap_workspace_block_mask(block);
-                    if ptr == eap_workspace_block_ptr(index, block)
-                        && EAP_RSA_WORKSPACE_USAGE[index] & mask != 0
-                        && new_size <= eap_workspace_block_usable(index, block)
-                    {
-                        return ptr;
-                    }
-                }
-            }
-
-            ptr::null_mut()
-        }
-    }
-
-    pub(super) unsafe fn free_eap_rsa_workspace(ptr: *mut c_void) -> bool {
-        unsafe {
-            for extra in 0..EAP_RSA_WORKSPACE_EXTRA_SLOTS {
-                let mask = eap_workspace_extra_mask(extra);
-                if EAP_RSA_WORKSPACE_EXTRA_USAGE & mask != 0
-                    && ptr == eap_workspace_extra_ptr(extra)
-                {
-                    EAP_RSA_WORKSPACE_EXTRA_USAGE &= !mask;
-                    release_eap_rsa_workspace_if_idle();
-                    return true;
-                }
-            }
-
-            for extra in 0..EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_SLOTS {
-                let mask = eap_workspace_dynamic_extra_mask(extra);
-                if EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USAGE & mask != 0
-                    && ptr == eap_workspace_dynamic_extra_ptr(extra)
-                {
-                    EAP_RSA_WORKSPACE_DYNAMIC_EXTRA_USAGE &= !mask;
-                    release_eap_rsa_workspace_if_idle();
-                    return true;
-                }
-            }
-
-            for index in 0..EAP_RSA_WORKSPACE_SLOTS {
-                for block in 0..EAP_RSA_WORKSPACE_BLOCKS_PER_SLOT {
-                    let mask = eap_workspace_block_mask(block);
-                    if ptr == eap_workspace_block_ptr(index, block)
-                        && EAP_RSA_WORKSPACE_USAGE[index] & mask != 0
-                    {
-                        EAP_RSA_WORKSPACE_USAGE[index] &= !mask;
-                        release_eap_rsa_workspace_if_idle();
-                        return true;
-                    }
-                }
-            }
-
-            false
+/// Only unconsumed reservations remain HAL-owned, even after failed cleanup.
+#[allow(clippy::needless_range_loop)] // Avoid borrowing the whole mutable registry across free.
+pub(crate) unsafe fn release_init_allocations() {
+    unsafe {
+        INIT_RESERVATIONS_ACTIVE.store(false, portable_atomic::Ordering::Release);
+        for index in 0..INIT_ALLOCATION_COUNT {
+            let pointer = INIT_RESERVATIONS[index].0;
+            INIT_RESERVATIONS[index] = (ptr::null_mut(), 0);
+            free(pointer);
         }
     }
 }
 
-#[cfg(feature = "wifi-enterprise")]
-use eap_workspace::{
-    eap_rsa_workspace_usable, free_eap_rsa_workspace, grow_eap_rsa_workspace,
-    take_eap_rsa_workspace,
-};
-#[cfg(feature = "wifi-enterprise")]
-pub(crate) use eap_workspace::{release_eap_rsa_workspace, reserve_eap_rsa_workspace};
-
-unsafe impl GlobalAlloc for SplitHeap {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { alloc_raw(layout) }
+// File/line identities are part of this narrow adaptation to the pinned blobs.
+// Matching them as well as size/caps prevents unrelated init-time allocations
+// from consuming a reserved buffer of coincidentally equal size.
+unsafe fn init_allocation_site(
+    size: usize,
+    caps: u32,
+    file: *const u8,
+    line: usize,
+    zeroed: bool,
+) -> Option<*mut c_void> {
+    if !INIT_RESERVATIONS_ACTIVE.load(portable_atomic::Ordering::Acquire) {
+        return None;
     }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { dealloc_raw(ptr, layout) }
+    let (kind, expected_file): (InitAllocation, &[u8]) = match (zeroed, caps, line) {
+        (true, 4, 1151) => (InitAllocation::Hardware, b"wdev.c\0"),
+        (true, 4, 720) => (InitAllocation::TxDescriptors, b"esf_buf.c\0"),
+        (true, 4, 734) => (InitAllocation::RxDescriptors, b"esf_buf.c\0"),
+        (true, 4, 743) => (InitAllocation::PacketDescriptors, b"esf_buf.c\0"),
+        (false, 2, 46) => (InitAllocation::MiscNvs, b"misc_nvs.c\0"),
+        (false, 4, 537) => (InitAllocation::WifiNvs, b"ieee80211_nvs.c\0"),
+        _ => return None,
+    };
+    if file.is_null() {
+        return None;
     }
+    for (index, expected) in expected_file.iter().enumerate() {
+        // SAFETY: native heap ABI supplies a readable NUL-terminated filename.
+        if unsafe { file.add(index).read() } != *expected {
+            return None;
+        }
+    }
+    take_init_allocation(kind, size)
 }
 
 // ---------------------------------------------------------------------------
 // Size-tracking wrapper
 //
 // GlobalAlloc::dealloc requires a Layout, but C code calls free(ptr) without
-// a size. We store the allocation size in a 4-byte header before the pointer.
+// a size. We store the allocation size in a four-byte header before the pointer.
 // ---------------------------------------------------------------------------
 
-const HEADER_WORDS: usize = 2;
-const HEADER_SIZE: usize = HEADER_WORDS * core::mem::size_of::<u32>();
-const ALLOC_MAGIC: u32 = 0x8266_a110;
-const FREED_MAGIC: u32 = 0xdead_f833;
-
-fn raw_in_heap_regions(raw: *mut u8) -> bool {
-    unsafe {
-        ptr_in_region(raw, HEAP_HI_START, HEAP_HI_END)
-            || ptr_in_region(raw, HEAP_LO_START, HEAP_LO_END)
-    }
-}
+const HEADER_SIZE: usize = core::mem::size_of::<u32>();
 
 fn c_malloc(size: usize) -> *mut c_void {
     if size == 0 {
@@ -708,28 +220,21 @@ fn c_malloc(size: usize) -> *mut c_void {
     let Some(total) = size.checked_add(HEADER_SIZE) else {
         return ptr::null_mut();
     };
+    let Ok(total_word) = u32::try_from(total) else {
+        return ptr::null_mut();
+    };
     critical_section::with(|_| unsafe {
-        ensure_init();
         let layout = match Layout::from_size_align(total, 4) {
             Ok(l) => l,
             Err(_) => return ptr::null_mut(),
         };
         let raw = alloc_raw(layout);
         if raw.is_null() {
-            #[cfg(feature = "wifi-enterprise")]
-            {
-                let reserved = take_eap_rsa_workspace(size);
-                if !reserved.is_null() {
-                    return reserved;
-                }
-            }
             return ptr::null_mut();
         }
         let header = raw as *mut u32;
-        header.write(total as u32);
-        header.add(1).write(ALLOC_MAGIC);
-        let user = (raw as usize + HEADER_SIZE) as *mut c_void;
-        user
+        header.write(total_word);
+        raw.add(HEADER_SIZE).cast()
     })
 }
 
@@ -738,25 +243,8 @@ fn c_free(ptr: *mut c_void) {
         return;
     }
     critical_section::with(|_| unsafe {
-        #[cfg(feature = "wifi-enterprise")]
-        if free_eap_rsa_workspace(ptr) {
-            return;
-        }
-
-        let raw = (ptr as usize).saturating_sub(HEADER_SIZE) as *mut u8;
-        ensure_init();
-        if !raw_in_heap_regions(raw) {
-            return;
-        }
-
-        let header = raw as *mut u32;
-        let total = header.read() as usize;
-        let magic = header.add(1).read();
-        if magic != ALLOC_MAGIC || total < HEADER_SIZE {
-            return;
-        }
-
-        header.add(1).write(FREED_MAGIC);
+        let raw = ptr.cast::<u8>().sub(HEADER_SIZE);
+        let total = raw.cast::<u32>().read() as usize;
         let layout = Layout::from_size_align_unchecked(total, 4);
         dealloc_raw(raw, layout);
     })
@@ -770,27 +258,11 @@ fn c_realloc(ptr: *mut c_void, new_size: usize) -> *mut c_void {
         c_free(ptr);
         return ptr::null_mut();
     }
-    #[cfg(feature = "wifi-enterprise")]
-    let workspace_usable = eap_rsa_workspace_usable(ptr);
-    #[cfg(not(feature = "wifi-enterprise"))]
-    let workspace_usable: Option<usize> = None;
-    let old_usable = if let Some(size) = workspace_usable {
-        size
-    } else {
-        let old_total = unsafe { *((ptr as usize - HEADER_SIZE) as *const u32) } as usize;
-        old_total.saturating_sub(HEADER_SIZE)
-    };
+    let old_total = unsafe { ptr.cast::<u8>().sub(HEADER_SIZE).cast::<u32>().read() };
+    let old_usable = old_total as usize - HEADER_SIZE;
     if new_size <= old_usable {
         return ptr;
     }
-    #[cfg(feature = "wifi-enterprise")]
-    if workspace_usable.is_some() {
-        let grown = unsafe { grow_eap_rsa_workspace(ptr, new_size) };
-        if !grown.is_null() {
-            return grown;
-        }
-    }
-
     let new_ptr = c_malloc(new_size);
     if !new_ptr.is_null() {
         unsafe {
@@ -839,27 +311,23 @@ pub unsafe fn zalloc(size: usize) -> *mut c_void {
 // FreeRTOS-compatible symbols
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn pvPortMalloc(size: u32) -> *mut c_void {
     c_malloc(size as usize)
 }
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn vPortFree(ptr: *mut c_void) {
     c_free(ptr)
 }
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn pvPortRealloc(ptr: *mut c_void, size: u32) -> *mut c_void {
     c_realloc(ptr, size as usize)
 }
-#[no_mangle]
-pub unsafe extern "C" fn esp8266_hal_realloc(ptr: *mut c_void, size: u32) -> *mut c_void {
-    c_realloc(ptr, size as usize)
-}
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn pvPortCalloc(count: u32, size: u32) -> *mut c_void {
     unsafe { calloc(count as usize, size as usize) }
 }
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn pvPortZalloc(size: u32) -> *mut c_void {
     unsafe { zalloc(size as usize) }
 }
@@ -868,22 +336,22 @@ pub unsafe extern "C" fn pvPortZalloc(size: u32) -> *mut c_void {
 // heap_caps_* symbols (SDK C code)
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn _heap_caps_malloc(
     size: usize,
-    _caps: u32,
-    _file: *const u8,
-    _line: usize,
+    caps: u32,
+    file: *const u8,
+    line: usize,
 ) -> *mut c_void {
-    c_malloc(size)
+    unsafe { init_allocation_site(size, caps, file, line, false) }.unwrap_or_else(|| c_malloc(size))
 }
 
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn _heap_caps_free(ptr: *mut c_void, _file: *const u8, _line: usize) {
     c_free(ptr)
 }
 
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn _heap_caps_calloc(
     count: usize,
     size: usize,
@@ -894,17 +362,18 @@ pub unsafe extern "C" fn _heap_caps_calloc(
     unsafe { calloc(count, size) }
 }
 
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn _heap_caps_zalloc(
     size: usize,
-    _caps: u32,
-    _file: *const u8,
-    _line: usize,
+    caps: u32,
+    file: *const u8,
+    line: usize,
 ) -> *mut c_void {
-    unsafe { zalloc(size) }
+    unsafe { init_allocation_site(size, caps, file, line, true) }
+        .unwrap_or_else(|| unsafe { zalloc(size) })
 }
 
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn _heap_caps_realloc(
     ptr: *mut c_void,
     size: usize,
@@ -915,20 +384,175 @@ pub unsafe extern "C" fn _heap_caps_realloc(
     c_realloc(ptr, size)
 }
 
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn heap_caps_init() {}
 
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn heap_caps_get_dram_free_size() -> u32 {
     total_free() as u32
 }
 
-#[no_mangle]
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn esp_get_free_heap_size() -> u32 {
     total_free() as u32
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn esp_get_minimum_free_heap_size() -> u32 {
-    total_free() as u32
+#[cfg(all(test, not(target_arch = "xtensa")))]
+mod tests {
+    extern crate std;
+
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::alloc::System;
+
+    use super::*;
+
+    struct TestAllocator {
+        fail: AtomicBool,
+        live: AtomicUsize,
+        budget: AtomicUsize,
+    }
+
+    unsafe impl GlobalAlloc for TestAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if self.fail.load(Ordering::Relaxed) {
+                return ptr::null_mut();
+            }
+            let budget = self.budget.load(Ordering::Relaxed);
+            if budget == 0 {
+                return ptr::null_mut();
+            }
+            if budget != usize::MAX {
+                self.budget.fetch_sub(1, Ordering::Relaxed);
+            }
+            // SAFETY: forward the requested layout to the host allocator.
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                self.live.fetch_add(1, Ordering::Relaxed);
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            self.live.fetch_sub(1, Ordering::Relaxed);
+            // SAFETY: the bridge must return the original pointer and layout.
+            unsafe { System.dealloc(pointer, layout) };
+        }
+    }
+
+    // SAFETY: this models the provider's byte-addressable RAM and synchronized
+    // allocation contract on the host; target DRAM placement is hardware-tested.
+    unsafe impl WifiAllocator for TestAllocator {
+        fn free_dram_bytes(&self) -> usize {
+            1234
+        }
+    }
+
+    static PROVIDER: TestAllocator = TestAllocator {
+        fail: AtomicBool::new(false),
+        live: AtomicUsize::new(0),
+        budget: AtomicUsize::new(usize::MAX),
+    };
+
+    #[test]
+    fn native_buffer_dimensions_match_pinned_sdk_layout_and_reinit_lifetime() {
+        let mut layout = InitBufferLayout {
+            ampdu_buffers: 5,
+            ampdu_buffer_len: 256,
+            max_packet_len: 1076,
+            rx_buffer_len: 524,
+            rx_buffers: 14,
+            rx_packets: 4,
+            tx_buffers: 4,
+            continuous_rx_buffers: 14,
+        };
+        assert_eq!(
+            layout.allocation_sizes(true, 168, 2992),
+            Some([9984, 336, 40, 1156, 168, 600, 2992, 36, 1024])
+        );
+        assert_eq!(
+            layout.allocation_sizes(false, 168, 2992),
+            Some([0, 0, 0, 0, 0, 0, 0, 0, 1024])
+        );
+        layout.rx_buffer_len = usize::MAX;
+        assert!(layout.allocation_sizes(true, 168, 2992).is_none());
+    }
+
+    #[test]
+    fn c_abi_preserves_allocation_on_realloc_failure_and_releases_its_layout() {
+        // One test owns installation; no other host path uses this SDK registry.
+        unsafe { install(&PROVIDER) };
+        assert!(c_malloc(0).is_null());
+        assert!(c_malloc(usize::MAX).is_null());
+        assert!(unsafe { calloc(usize::MAX, 2) }.is_null());
+        assert_eq!(total_free(), 1234);
+
+        let pointer = unsafe { calloc(4, 16) }.cast::<u8>();
+        assert!(!pointer.is_null());
+        assert_eq!(pointer as usize % 4, 0);
+        unsafe {
+            assert!(core::slice::from_raw_parts(pointer, 64)
+                .iter()
+                .all(|byte| *byte == 0));
+            pointer.write_bytes(0x5a, 64);
+        }
+        PROVIDER.fail.store(true, Ordering::Relaxed);
+        assert!(c_realloc(pointer.cast(), 128).is_null());
+        unsafe {
+            assert!(core::slice::from_raw_parts(pointer, 64)
+                .iter()
+                .all(|byte| *byte == 0x5a));
+        }
+        assert_eq!(PROVIDER.live.load(Ordering::Relaxed), 1);
+
+        PROVIDER.fail.store(false, Ordering::Relaxed);
+        let grown = c_realloc(pointer.cast(), 128).cast::<u8>();
+        assert!(!grown.is_null());
+        unsafe {
+            assert!(core::slice::from_raw_parts(grown, 64)
+                .iter()
+                .all(|byte| *byte == 0x5a));
+        }
+        assert!(c_realloc(grown.cast(), 0).is_null());
+        assert_eq!(PROVIDER.live.load(Ordering::Relaxed), 0);
+        c_free(ptr::null_mut());
+
+        // A failed reservation at every allocation boundary returns every
+        // earlier allocation, before native code can observe any pointer.
+        let sizes = [64, 32, 16, 128, 168, 600, 2992, 36, 1024];
+        for failure_at in 0..INIT_ALLOCATION_COUNT {
+            PROVIDER.budget.store(failure_at, Ordering::Relaxed);
+            assert!(!unsafe { reserve_init_allocations(sizes) });
+            assert_eq!(PROVIDER.live.load(Ordering::Relaxed), 0);
+        }
+        PROVIDER.budget.store(usize::MAX, Ordering::Relaxed);
+        assert!(unsafe { reserve_init_allocations(sizes) });
+        assert_eq!(PROVIDER.live.load(Ordering::Relaxed), INIT_ALLOCATION_COUNT);
+        // Wrong file/caps/size cannot steal a reservation.
+        assert!(
+            unsafe { init_allocation_site(64, 4, c"other.c".as_ptr().cast(), 1151, true) }
+                .is_none()
+        );
+        assert!(
+            unsafe { init_allocation_site(64, 2, c"wdev.c".as_ptr().cast(), 1151, true) }.is_none()
+        );
+        assert!(take_init_allocation(InitAllocation::Hardware, 63).is_none());
+        let handed_off = unsafe { _heap_caps_zalloc(64, 4, c"wdev.c".as_ptr().cast(), 1151) };
+        assert!(!handed_off.is_null());
+        assert!(take_init_allocation(InitAllocation::Hardware, 64).is_none());
+        assert_eq!(PROVIDER.live.load(Ordering::Relaxed), INIT_ALLOCATION_COUNT);
+        // Native ownership survives releasing the unconsumed reservations.
+        unsafe { release_init_allocations() };
+        assert_eq!(PROVIDER.live.load(Ordering::Relaxed), 1);
+        c_free(handed_off);
+        assert_eq!(PROVIDER.live.load(Ordering::Relaxed), 0);
+        // Reinitialization reserves only the temporary NVS buffer.
+        assert!(unsafe { reserve_init_allocations([0, 0, 0, 0, 0, 0, 0, 0, 1024]) });
+        let temporary =
+            unsafe { _heap_caps_malloc(1024, 4, c"ieee80211_nvs.c".as_ptr().cast(), 537) };
+        unsafe { release_init_allocations() };
+        assert_eq!(PROVIDER.live.load(Ordering::Relaxed), 1);
+        c_free(temporary);
+        assert_eq!(PROVIDER.live.load(Ordering::Relaxed), 0);
+    }
 }

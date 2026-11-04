@@ -1,1254 +1,707 @@
-use core::marker::PhantomData;
-
-#[cfg(feature = "wifi-esp-now")]
-use super::interface::EspNowSession;
-#[cfg(feature = "wifi-promiscuous")]
-use super::interface::PromiscuousSession;
-#[cfg(feature = "wifi-smartconfig")]
-use super::interface::SmartConfigSession;
-#[cfg(feature = "wifi-wps")]
-use super::interface::WpsSession;
 use super::{
-    interface::{ApHandle, ApLink, MixedLink, StaHandle, StaLink},
-    AccessPointConfig, AccessPointRecord, ApMode, ClientConfig, Configured, DriverError, HasAp,
-    HasSta, InitConfig, InitError, Initialized, MixedConfig, MixedMode, RawMode, ScanOptions,
-    StaMode, Started, Uninitialized, WifiBackend, WifiResources,
+    allocator::RuntimeAllocator,
+    interface::{Interface, Interfaces},
+    resources::{InterfaceId, Resources},
+    target::Sdk,
+    AccessPointRecord, ApStationInfo, Configuration, Deadline, DriverError, InitConfig, InitError,
+    LinkState, RawMode, ScanOptions,
 };
+use allocator_api2::boxed::Box;
+use core::task::Poll;
 
-pub struct WifiDriver<
-    'd,
-    S,
-    B,
-    const EVENTS: usize,
-    const RX: usize,
-    const ESP_NOW_PEERS: usize = 0,
-    const ESP_NOW_RX: usize = 0,
-    const PROMISCUOUS_RX: usize = 0,
-    const AP_RX_SLOTS: usize = 0,
-    const AP_RX_BYTES: usize = 0,
-> {
-    backend: B,
-    resources: &'d WifiResources<
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >,
-    _state: PhantomData<S>,
+/// Owns the stable callback storage and the ESP8266 radio instance.
+/// Runtime infrastructure remains initialized after this object is dropped.
+pub struct Wifi {
+    resources: Option<Box<Resources, RuntimeAllocator>>,
+    sdk: Sdk,
+    station_mac: [u8; 6],
+    ap_mac: [u8; 6],
 }
 
-impl<
-        'd,
-        B,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Uninitialized,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn with_backend(
-        resources: &'d WifiResources<
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        backend: B,
-    ) -> Self {
-        Self {
-            backend,
-            resources,
-            _state: PhantomData,
-        }
+impl Wifi {
+    fn allocate_resources(
+        config: &InitConfig,
+        allocator: RuntimeAllocator,
+    ) -> Result<Box<Resources, RuntimeAllocator>, InitError> {
+        Box::try_new_in(Resources::try_new(&config.queues, allocator)?, allocator)
+            .map_err(|_| InitError::OutOfMemory)
     }
-}
-
-impl<
-        'd,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Uninitialized,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn initialize(
-        mut self,
+    #[cfg(target_arch = "xtensa")]
+    pub fn new(
+        runtime: &'static crate::wifi::Runtime,
         config: InitConfig,
-    ) -> Result<
-        WifiDriver<
-            'd,
-            Initialized,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        InitError,
-    > {
-        self.backend.initialize(&config)?;
-        Ok(WifiDriver {
-            backend: self.backend,
-            resources: self.resources,
-            _state: PhantomData,
-        })
+    ) -> Result<Self, InitError> {
+        let resources = Self::allocate_resources(&config, runtime.allocator())?;
+        let mut wifi = Self {
+            sdk: Sdk::new(&resources),
+            resources: Some(resources),
+            station_mac: [0; 6],
+            ap_mac: [0; 6],
+        };
+        wifi.sdk.initialize(&config)?;
+        wifi.station_mac = wifi.sdk.sta_mac_address().map_err(|e| match e {
+            DriverError::Sdk(code) => InitError::Sdk(code),
+            _ => InitError::BackendUnavailable,
+        })?;
+        wifi.ap_mac = wifi.sdk.ap_mac_address().map_err(|e| match e {
+            DriverError::Sdk(code) => InitError::Sdk(code),
+            _ => InitError::BackendUnavailable,
+        })?;
+        Ok(wifi)
+    }
+    pub fn split(&mut self) -> (Controller<'_>, Interfaces<'_>) {
+        let resources = self.resources.as_deref().expect("live Wifi owns resources");
+        (
+            Controller {
+                sdk: &mut self.sdk,
+                resources,
+            },
+            Interfaces {
+                station: Interface {
+                    resources,
+                    id: InterfaceId::Station,
+                    mac: self.station_mac,
+                },
+                access_point: Interface {
+                    resources,
+                    id: InterfaceId::AccessPoint,
+                    mac: self.ap_mac,
+                },
+            },
+        )
     }
 }
-
-impl<
-        'd,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Initialized,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn configure_sta(
-        mut self,
-        config: ClientConfig<'_>,
-    ) -> Result<
-        WifiDriver<
-            'd,
-            Configured<StaMode>,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        self.backend.configure_sta(&config)?;
-        Ok(WifiDriver {
-            backend: self.backend,
-            resources: self.resources,
-            _state: PhantomData,
-        })
-    }
-
-    pub fn enable_sta(
-        mut self,
-    ) -> Result<
-        WifiDriver<
-            'd,
-            Configured<StaMode>,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        self.backend.set_mode(RawMode::Sta)?;
-        Ok(WifiDriver {
-            backend: self.backend,
-            resources: self.resources,
-            _state: PhantomData,
-        })
-    }
-
-    pub fn configure_ap(
-        mut self,
-        config: AccessPointConfig,
-    ) -> Result<
-        WifiDriver<
-            'd,
-            Configured<ApMode>,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        self.backend.configure_ap(&config)?;
-        Ok(WifiDriver {
-            backend: self.backend,
-            resources: self.resources,
-            _state: PhantomData,
-        })
-    }
-
-    pub fn configure_mixed(
-        mut self,
-        config: MixedConfig<'_>,
-    ) -> Result<
-        WifiDriver<
-            'd,
-            Configured<MixedMode>,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        self.backend
-            .configure_mixed(config.client(), config.access_point())?;
-        Ok(WifiDriver {
-            backend: self.backend,
-            resources: self.resources,
-            _state: PhantomData,
-        })
-    }
-}
-
-impl<
-        'd,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Configured<StaMode>,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn start(
-        mut self,
-    ) -> Result<
-        WifiDriver<
-            'd,
-            Started<StaMode>,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        self.backend.start()?;
-        Ok(WifiDriver {
-            backend: self.backend,
-            resources: self.resources,
-            _state: PhantomData,
-        })
-    }
-}
-
-impl<
-        'd,
-        M: HasSta,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Started<M>,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn sta(
-        &mut self,
-    ) -> StaHandle<
-        '_,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    > {
-        StaHandle {
-            backend: &mut self.backend,
-            resources: self.resources,
+impl Drop for Wifi {
+    fn drop(&mut self) {
+        let resources = self.resources.as_deref().expect("live Wifi owns resources");
+        let safe_to_shutdown = resources.close_admission().is_ok();
+        if safe_to_shutdown {
+            resources.drain_sta_rx();
+            resources.drain_ap_rx();
+        }
+        if !safe_to_shutdown || !self.sdk.shutdown() {
+            // A forgotten packet/session or failed native teardown must never
+            // turn late callbacks into accesses to released application memory.
+            core::mem::forget(self.resources.take());
         }
     }
-
-    pub fn resources(
-        &self,
-    ) -> &WifiResources<
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    > {
-        self.resources
-    }
-
-    /// Performs a blocking station scan.
-    ///
-    /// The ESP8266 backend rejects scans while associated; disconnect first so
-    /// its blocking-scan event-handler workaround cannot hide a link change.
-    pub fn scan_blocking<const N: usize>(
-        &mut self,
-        options: &ScanOptions,
-    ) -> Result<heapless::Vec<AccessPointRecord, N>, DriverError> {
-        self.backend.scan(options)
-    }
-
-    /// Performs a blocking station scan into caller-owned storage.
-    ///
-    /// The ESP8266 backend rejects scans while associated; disconnect first so
-    /// its blocking-scan event-handler workaround cannot hide a link change.
-    pub fn scan_blocking_into<const N: usize>(
-        &mut self,
-        options: &ScanOptions,
-        records: &mut heapless::Vec<AccessPointRecord, N>,
-    ) -> Result<(), DriverError> {
-        self.backend.scan_into(options, records)
-    }
-
-    pub fn sta_link(
-        mut self,
-    ) -> Result<
-        StaLink<
-            'd,
-            M,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        if RX == 0 {
-            return Err(DriverError::PacketOverflow);
-        }
-        self.backend.attach_sta_rx()?;
-        Ok(StaLink {
-            backend: Some(self.backend),
-            resources: self.resources,
-            rx_attached: true,
-            _mode: PhantomData,
-        })
-    }
-
-    #[cfg(feature = "wifi-wps")]
-    pub fn wps(
-        &mut self,
-    ) -> Result<
-        WpsSession<
-            '_,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        WpsSession::new(&mut self.backend, self.resources)
-    }
-
-    #[cfg(feature = "wifi-smartconfig")]
-    pub fn smart_config(
-        &mut self,
-    ) -> Result<
-        SmartConfigSession<
-            '_,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        SmartConfigSession::new(&mut self.backend, self.resources)
-    }
 }
 
-impl<
-        'd,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Started<MixedMode>,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn mixed_link(
-        mut self,
-    ) -> Result<
-        MixedLink<
-            'd,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        if RX == 0 || AP_RX_SLOTS == 0 || AP_RX_BYTES == 0 {
-            return Err(DriverError::PacketOverflow);
+/// Radio configuration and operation control, independent of packet interfaces.
+pub struct Controller<'a> {
+    pub(crate) sdk: &'a mut Sdk,
+    pub(crate) resources: &'a Resources,
+}
+impl Controller<'_> {
+    fn require_stopped(&self) -> Result<(), DriverError> {
+        if self.sdk.started || self.sdk.session_claimed {
+            Err(DriverError::Busy)
+        } else {
+            Ok(())
         }
-
-        self.backend.attach_sta_rx()?;
-        if let Err(error) = self.backend.attach_ap_rx() {
-            self.backend.detach_sta_rx();
+    }
+    pub fn set_configuration(&mut self, config: &Configuration<'_>) -> Result<(), DriverError> {
+        self.require_stopped()?;
+        self.resources.state.with(|s| s.station_configured = false);
+        let result = match config {
+            Configuration::Station(station) => self.sdk.configure_sta(station),
+            Configuration::AccessPoint(ap) => self.sdk.configure_ap(ap),
+            Configuration::Mixed(mixed) => self
+                .sdk
+                .configure_mixed(mixed.client(), mixed.access_point()),
+        };
+        if result.is_ok() {
+            self.resources
+                .state
+                .with(|s| s.station_configured = !matches!(config, Configuration::AccessPoint(_)));
+        } else {
+            self.sdk.mode = None;
+        }
+        result
+    }
+    /// Selects credential-free station mode for scanning and provisioning.
+    pub fn enable_station(&mut self) -> Result<(), DriverError> {
+        self.require_stopped()?;
+        self.resources.state.with(|s| s.station_configured = false);
+        self.sdk.set_mode(RawMode::Sta)
+    }
+    fn begin_start(&mut self) -> Result<(), DriverError> {
+        if self.sdk.started || self.sdk.mode.is_none() {
+            return Err(DriverError::InvalidState);
+        }
+        self.resources.state.with(|s| {
+            s.stopping = false;
+            s.sta_started = false;
+            s.ap_started = false;
+        });
+        self.sdk.start()?;
+        let result = (|| {
+            if self.sdk.mode.is_some_and(RawMode::has_station)
+                && self.resources.station_rx_capacity > 0
+            {
+                self.sdk.attach_sta_rx()?;
+            }
+            if self.sdk.mode.is_some_and(RawMode::has_ap) && self.resources.ap_rx_capacity > 0 {
+                self.sdk.attach_ap_rx()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = self.sdk.stop();
+        }
+        result
+    }
+    fn started(&self) -> bool {
+        self.resources.state.with(|s| match self.sdk.mode {
+            Some(RawMode::Sta) => s.sta_started,
+            Some(RawMode::Ap) => s.ap_started,
+            Some(RawMode::ApSta) => s.sta_started && s.ap_started,
+            None => false,
+        })
+    }
+    /// Waits for SDK start events. Timeout leaves the radio operation active.
+    pub fn start_blocking(&mut self, timeout_ms: u32) -> Result<(), DriverError> {
+        self.begin_start()?;
+        let deadline = Deadline::new(self.sdk.now_ms(), timeout_ms);
+        while !self.started() {
+            if deadline.is_expired(self.sdk.now_ms()) {
+                return Err(DriverError::Timeout);
+            }
+            self.sdk.spin_once()
+        }
+        Ok(())
+    }
+    pub async fn start_async(&mut self) -> Result<(), DriverError> {
+        self.begin_start()?;
+        core::future::poll_fn(|cx| {
+            self.resources.register_control_waker(cx.waker());
+            if self.started() {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+    pub fn stop(&mut self) -> Result<(), DriverError> {
+        self.resources.close_admission()?;
+        self.resources.drain_sta_rx();
+        self.resources.drain_ap_rx();
+        let result = self.sdk.stop();
+        if result.is_ok() {
+            self.sdk.session_claimed = false;
+            #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
+            self.resources.release_events();
+        }
+        result
+    }
+    fn begin_connect(&mut self, provisioning: bool) -> Result<(), DriverError> {
+        if self.sdk.session_claimed && !provisioning {
+            return Err(DriverError::Busy);
+        }
+        if !self.sdk.started
+            || !self.resources.state.with(|s| s.station_configured)
+            || !self.sdk.mode.is_some_and(RawMode::has_station)
+        {
+            return Err(DriverError::InvalidState);
+        }
+        self.resources.state.with(|s| {
+            if s.connected || s.connecting || s.disconnecting || s.scan_pending {
+                return Err(DriverError::Busy);
+            }
+            s.connecting = true;
+            s.connect_result = None;
+            s.reason = None;
+            Ok(())
+        })?;
+        if let Err(error) = self.sdk.connect() {
+            self.resources.state.with(|s| {
+                s.connecting = false;
+                s.connect_result = Some(Err(error.clone()));
+            });
             return Err(error);
         }
-
-        Ok(MixedLink {
-            backend: core::cell::RefCell::new(Some(self.backend)),
-            resources: self.resources,
-            sta_rx_attached: true,
-            ap_rx_attached: true,
-        })
+        Ok(())
     }
-}
-
-impl<
-        'd,
-        M: HasAp,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Started<M>,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn ap(&mut self) -> ApHandle<'_, B> {
-        ApHandle {
-            backend: &mut self.backend,
-        }
+    fn connect_result(&self) -> Option<Result<(), DriverError>> {
+        self.resources.state.with(|s| s.connect_result.clone())
     }
-
-    pub fn ap_link(
-        mut self,
-    ) -> Result<
-        ApLink<
-            'd,
-            M,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        if AP_RX_SLOTS == 0 || AP_RX_BYTES == 0 {
-            return Err(DriverError::PacketOverflow);
-        }
-        self.backend.attach_ap_rx()?;
-        Ok(ApLink {
-            backend: Some(self.backend),
-            resources: self.resources,
-            rx_attached: true,
-            _mode: PhantomData,
-        })
+    /// Waits for association or terminal SDK failure. Timeout leaves SDK work active.
+    pub fn connect_blocking(&mut self, timeout_ms: u32) -> Result<(), DriverError> {
+        self.connect_blocking_impl(timeout_ms, false)
     }
-}
-
-impl<
-        'd,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Configured<ApMode>,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn start(
-        mut self,
-    ) -> Result<
-        WifiDriver<
-            'd,
-            Started<ApMode>,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        self.backend.start()?;
-        Ok(WifiDriver {
-            backend: self.backend,
-            resources: self.resources,
-            _state: PhantomData,
-        })
-    }
-}
-
-impl<
-        'd,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Configured<MixedMode>,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn start(
-        mut self,
-    ) -> Result<
-        WifiDriver<
-            'd,
-            Started<MixedMode>,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        self.backend.start()?;
-        Ok(WifiDriver {
-            backend: self.backend,
-            resources: self.resources,
-            _state: PhantomData,
-        })
-    }
-}
-
-impl<
-        'd,
-        M,
-        B: WifiBackend,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    WifiDriver<
-        'd,
-        Started<M>,
-        B,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub(crate) fn from_started_parts(
-        resources: &'d WifiResources<
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        backend: B,
-    ) -> Self {
-        Self {
-            backend,
-            resources,
-            _state: PhantomData,
-        }
-    }
-
-    #[cfg(feature = "wifi-esp-now")]
-    pub fn esp_now(
+    pub(super) fn connect_blocking_impl(
         &mut self,
-    ) -> Result<
-        EspNowSession<
-            '_,
-            M,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        if self.resources.esp_now_peer_capacity() == 0 && self.resources.esp_now_rx_capacity() == 0
-        {
-            return Err(DriverError::PacketOverflow);
+        timeout_ms: u32,
+        provisioning: bool,
+    ) -> Result<(), DriverError> {
+        self.begin_connect(provisioning)?;
+        let deadline = Deadline::new(self.sdk.now_ms(), timeout_ms);
+        loop {
+            if let Some(result) = self.connect_result() {
+                return result;
+            }
+            if deadline.is_expired(self.sdk.now_ms()) {
+                return Err(DriverError::Timeout);
+            }
+            self.sdk.spin_once()
         }
-
-        Ok(EspNowSession::new(&mut self.backend, self.resources))
     }
-
-    #[cfg(feature = "wifi-promiscuous")]
-    pub fn promiscuous(
+    /// Dropping this future stops waiting; explicit disconnect aborts SDK work.
+    pub async fn connect_async(&mut self) -> Result<(), DriverError> {
+        self.connect_async_impl(false).await
+    }
+    pub(super) async fn connect_async_impl(
         &mut self,
-    ) -> Result<
-        PromiscuousSession<
-            '_,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        if self.resources.promiscuous_rx_capacity() == 0 {
+        provisioning: bool,
+    ) -> Result<(), DriverError> {
+        self.begin_connect(provisioning)?;
+        core::future::poll_fn(|cx| {
+            self.resources.register_control_waker(cx.waker());
+            match self.connect_result() {
+                Some(result) => Poll::Ready(result),
+                None => Poll::Pending,
+            }
+        })
+        .await
+    }
+    /// Requests disconnection; completion is reported by the actual SDK event.
+    pub fn disconnect(&mut self) -> Result<(), DriverError> {
+        let needed = self
+            .resources
+            .state
+            .with(|s| s.connected || s.connecting || s.disconnecting);
+        if !needed {
+            return Ok(());
+        }
+        self.resources.close_station()?;
+        self.resources.drain_sta_rx();
+        self.resources.state.with(|s| s.disconnecting = true);
+        if let Err(error) = self.sdk.disconnect() {
+            self.resources.state.with(|s| s.disconnecting = false);
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn disconnected(&self) -> bool {
+        self.resources
+            .state
+            .with(|s| !s.connected && !s.connecting && !s.disconnecting)
+    }
+    pub fn disconnect_blocking(&mut self, timeout_ms: u32) -> Result<(), DriverError> {
+        self.disconnect()?;
+        let deadline = Deadline::new(self.sdk.now_ms(), timeout_ms);
+        while !self.disconnected() {
+            if deadline.is_expired(self.sdk.now_ms()) {
+                return Err(DriverError::Timeout);
+            }
+            self.sdk.spin_once()
+        }
+        Ok(())
+    }
+    pub async fn disconnect_async(&mut self) -> Result<(), DriverError> {
+        self.disconnect()?;
+        core::future::poll_fn(|cx| {
+            self.resources.register_control_waker(cx.waker());
+            if self.disconnected() {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+    pub fn link_state(&self) -> LinkState {
+        self.resources.link_state()
+    }
+    pub fn last_disconnect_reason(&self) -> Option<u8> {
+        self.resources.last_disconnect_reason()
+    }
+    pub fn connected_stations(
+        &mut self,
+        stations: &mut [ApStationInfo],
+    ) -> Result<usize, DriverError> {
+        if !self.sdk.started || !self.sdk.mode.is_some_and(RawMode::has_ap) {
+            return Err(DriverError::InvalidState);
+        }
+        self.sdk.connected_ap_stations(stations)
+    }
+    pub fn deauth_all(&mut self) -> Result<(), DriverError> {
+        if !self.sdk.started || !self.sdk.mode.is_some_and(RawMode::has_ap) {
+            return Err(DriverError::InvalidState);
+        }
+        self.sdk.deauth_all_ap_stations()
+    }
+    fn begin_scan(&mut self, options: &ScanOptions) -> Result<(), DriverError> {
+        if self.sdk.session_claimed {
+            return Err(DriverError::Busy);
+        }
+        if !self.sdk.started || !self.sdk.mode.is_some_and(RawMode::has_station) {
+            return Err(DriverError::InvalidState);
+        }
+        let (connected, connecting, pending, done) = self.resources.state.with(|s| {
+            (
+                s.connected,
+                s.connecting || s.disconnecting,
+                s.scan_pending,
+                s.scan_done.is_some(),
+            )
+        });
+        if connected || connecting {
+            return Err(DriverError::Busy);
+        }
+        if pending {
+            if !done {
+                return Err(DriverError::Busy);
+            }
+            self.sdk.discard_scan();
+        }
+        self.resources.state.with(|s| {
+            s.scan_pending = true;
+            s.scan_done = None;
+        });
+        if let Err(error) = self.sdk.begin_scan(options) {
+            self.resources.state.with(|s| s.scan_pending = false);
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn scan_done(&self) -> Option<Result<(), DriverError>> {
+        self.resources.state.with(|s| s.scan_done.clone())
+    }
+    fn finish_scan(&mut self, records: &mut [AccessPointRecord]) -> Result<usize, DriverError> {
+        let result = self.scan_done().ok_or(DriverError::Busy)?;
+        let result = match result {
+            Ok(()) => self.sdk.collect_scan(records),
+            Err(error) => {
+                self.sdk.discard_scan();
+                Err(error)
+            }
+        };
+        self.resources.state.with(|s| {
+            s.scan_pending = false;
+            s.scan_done = None;
+        });
+        result
+    }
+    /// Scans while disconnected. The SDK owns results until this call collects them.
+    pub fn scan_blocking(
+        &mut self,
+        options: &ScanOptions,
+        records: &mut [AccessPointRecord],
+        timeout_ms: u32,
+    ) -> Result<usize, DriverError> {
+        if records.is_empty() {
             return Err(DriverError::PacketOverflow);
         }
-
-        Ok(PromiscuousSession::new(&mut self.backend, self.resources))
+        self.begin_scan(options)?;
+        let deadline = Deadline::new(self.sdk.now_ms(), timeout_ms);
+        while self.scan_done().is_none() {
+            if deadline.is_expired(self.sdk.now_ms()) {
+                return Err(DriverError::Timeout);
+            }
+            self.sdk.spin_once()
+        }
+        self.finish_scan(records)
     }
-
-    pub fn stop(
-        mut self,
-    ) -> Result<
-        WifiDriver<
-            'd,
-            Initialized,
-            B,
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-        DriverError,
-    > {
-        self.backend.stop()?;
-        Ok(WifiDriver {
-            backend: self.backend,
-            resources: self.resources,
-            _state: PhantomData,
+    /// Dropping the waiter leaves the scan tracked; cancel explicitly to abort.
+    pub async fn scan_async(
+        &mut self,
+        options: &ScanOptions,
+        records: &mut [AccessPointRecord],
+    ) -> Result<usize, DriverError> {
+        if records.is_empty() {
+            return Err(DriverError::PacketOverflow);
+        }
+        self.begin_scan(options)?;
+        core::future::poll_fn(|cx| {
+            self.resources.register_control_waker(cx.waker());
+            if self.scan_done().is_some() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
         })
+        .await;
+        self.finish_scan(records)
+    }
+    /// Requests cancellation. Result storage is retained until the SDK's done event.
+    pub fn cancel_scan(&mut self) -> Result<(), DriverError> {
+        if !self.resources.state.with(|s| s.scan_pending) {
+            return Ok(());
+        }
+        if self.scan_done().is_none() {
+            self.sdk.cancel_scan()?;
+        }
+        Ok(())
+    }
+    fn finish_cancel_scan(&mut self) {
+        if self.resources.state.with(|s| s.scan_pending) {
+            self.sdk.discard_scan();
+            self.resources.state.with(|s| {
+                s.scan_pending = false;
+                s.scan_done = None;
+            });
+        }
+    }
+    pub fn cancel_scan_blocking(&mut self, timeout_ms: u32) -> Result<(), DriverError> {
+        self.cancel_scan()?;
+        let deadline = Deadline::new(self.sdk.now_ms(), timeout_ms);
+        while self.resources.state.with(|s| s.scan_pending) && self.scan_done().is_none() {
+            if deadline.is_expired(self.sdk.now_ms()) {
+                return Err(DriverError::Timeout);
+            }
+            self.sdk.spin_once()
+        }
+        self.finish_cancel_scan();
+        Ok(())
+    }
+    pub async fn cancel_scan_async(&mut self) -> Result<(), DriverError> {
+        self.cancel_scan()?;
+        core::future::poll_fn(|cx| {
+            self.resources.register_control_waker(cx.waker());
+            if !self.resources.state.with(|s| s.scan_pending) || self.scan_done().is_some() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        self.finish_cancel_scan();
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     extern crate std;
-
-    use super::*;
-    use std::{cell::RefCell, rc::Rc, vec::Vec};
-
-    use crate::wifi_core::{
-        AccessPointConfig, Channel, ClientConfig, InitConfig, MixedConfig, RawMode, RawRxRecord,
-        Ssid, StationCredential, WifiApBackend, WifiFeatureBackend, WifiLifecycleBackend,
-        WifiPacketBackend, WifiResources, WifiRuntimeBackend, WifiScanBackend, WifiStaBackend,
+    use super::super::{
+        allocator::test_allocator, ClientConfig, QueueConfig, Ssid, StationCredential, WifiEvent,
     };
-
-    #[derive(Default)]
-    struct FakeBackend {
-        started: bool,
-    }
-
-    impl WifiRuntimeBackend for FakeBackend {
-        fn now_ms(&self) -> u64 {
-            0
-        }
-
-        fn spin_once(&mut self) {}
-    }
-
-    impl WifiLifecycleBackend for FakeBackend {
-        fn initialize(&mut self, _config: &InitConfig) -> Result<(), crate::wifi_core::InitError> {
-            Ok(())
-        }
-
-        fn set_mode(
-            &mut self,
-            _mode: crate::wifi_core::RawMode,
-        ) -> Result<(), crate::wifi_core::DriverError> {
-            Ok(())
-        }
-
-        fn start(&mut self) -> Result<(), crate::wifi_core::DriverError> {
-            self.started = true;
-            Ok(())
-        }
-
-        fn stop(&mut self) -> Result<(), crate::wifi_core::DriverError> {
-            self.started = false;
-            Ok(())
+    use super::*;
+    use core::{
+        future::Future,
+        task::{Context, Poll},
+    };
+    use std::{
+        boxed::Box as HostBox,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        task::Wake,
+    };
+    struct CountWake(AtomicUsize);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
-
-    impl WifiStaBackend for FakeBackend {
-        fn configure_sta(
-            &mut self,
-            _config: &ClientConfig<'_>,
-        ) -> Result<(), crate::wifi_core::DriverError> {
-            Ok(())
-        }
-
-        fn connect(&mut self) -> Result<(), crate::wifi_core::ConnectError> {
-            Ok(())
-        }
-
-        fn disconnect(&mut self) -> Result<(), crate::wifi_core::DisconnectError> {
-            Ok(())
-        }
+    fn waker() -> core::task::Waker {
+        Arc::new(CountWake(AtomicUsize::new(0))).into()
     }
-
-    impl WifiApBackend for FakeBackend {}
-    impl WifiPacketBackend for FakeBackend {}
-    impl WifiScanBackend for FakeBackend {}
-    impl WifiFeatureBackend for FakeBackend {}
-
+    pub(super) fn station() -> Configuration<'static> {
+        Configuration::Station(ClientConfig::new(
+            Ssid::try_from("network").unwrap(),
+            StationCredential::open(),
+        ))
+    }
     #[test]
-    fn lifecycle_moves_between_explicit_driver_states() {
-        let resources = WifiResources::<8, 4>::new();
-        let driver = WifiDriver::with_backend(&resources, FakeBackend::default());
-        let driver = driver.initialize(InitConfig::default()).unwrap();
-        let driver = driver
-            .configure_sta(ClientConfig::new(
-                Ssid::try_from("core-net").unwrap(),
-                StationCredential::open(),
-            ))
-            .unwrap();
-        let driver = driver.start().unwrap();
-        let _driver = driver.stop().unwrap();
+    fn scan_mode_needs_no_ssid_and_cannot_connect() {
+        let r = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&r);
+        let mut c = Controller {
+            sdk: &mut sdk,
+            resources: &r,
+        };
+        c.enable_station().unwrap();
+        c.start_blocking(1000).unwrap();
+        assert_eq!(c.begin_connect(false), Err(DriverError::InvalidState));
+        assert!(c.begin_scan(&ScanOptions::all()).is_ok());
     }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum Op {
-        Initialize,
-        ConfigureSta,
-        ConfigureAp,
-        ConfigureMixed,
-        SetMode(RawMode),
-        Start,
-        AttachStaRx,
-        DetachStaRx,
-        AttachApRx,
-        DetachApRx,
-    }
-
-    #[derive(Clone)]
-    struct TrackingBackend {
-        ops: Rc<RefCell<Vec<Op>>>,
-    }
-
-    impl TrackingBackend {
-        fn new(ops: Rc<RefCell<Vec<Op>>>) -> Self {
-            Self { ops }
-        }
-
-        fn push(&self, op: Op) {
-            self.ops.borrow_mut().push(op);
-        }
-    }
-
-    impl WifiRuntimeBackend for TrackingBackend {
-        fn now_ms(&self) -> u64 {
-            0
-        }
-
-        fn spin_once(&mut self) {}
-    }
-
-    impl WifiLifecycleBackend for TrackingBackend {
-        fn initialize(&mut self, _config: &InitConfig) -> Result<(), crate::wifi_core::InitError> {
-            self.push(Op::Initialize);
-            Ok(())
-        }
-
-        fn set_mode(
-            &mut self,
-            mode: crate::wifi_core::RawMode,
-        ) -> Result<(), crate::wifi_core::DriverError> {
-            self.push(Op::SetMode(mode));
-            Ok(())
-        }
-
-        fn start(&mut self) -> Result<(), crate::wifi_core::DriverError> {
-            self.push(Op::Start);
-            Ok(())
-        }
-
-        fn stop(&mut self) -> Result<(), crate::wifi_core::DriverError> {
-            Ok(())
-        }
-    }
-
-    impl WifiStaBackend for TrackingBackend {
-        fn configure_sta(
-            &mut self,
-            _config: &ClientConfig<'_>,
-        ) -> Result<(), crate::wifi_core::DriverError> {
-            self.push(Op::ConfigureSta);
-            Ok(())
-        }
-
-        fn connect(&mut self) -> Result<(), crate::wifi_core::ConnectError> {
-            Ok(())
-        }
-
-        fn disconnect(&mut self) -> Result<(), crate::wifi_core::DisconnectError> {
-            Ok(())
-        }
-    }
-
-    impl WifiApBackend for TrackingBackend {
-        fn configure_ap(
-            &mut self,
-            _config: &AccessPointConfig,
-        ) -> Result<(), crate::wifi_core::DriverError> {
-            self.push(Op::ConfigureAp);
-            Ok(())
-        }
-
-        fn configure_mixed(
-            &mut self,
-            _client: &ClientConfig<'_>,
-            _access_point: &AccessPointConfig,
-        ) -> Result<(), crate::wifi_core::DriverError> {
-            self.push(Op::ConfigureMixed);
-            Ok(())
-        }
-    }
-
-    impl WifiPacketBackend for TrackingBackend {
-        fn attach_sta_rx(&mut self) -> Result<(), crate::wifi_core::DriverError> {
-            self.push(Op::AttachStaRx);
-            Ok(())
-        }
-
-        fn detach_sta_rx(&mut self) {
-            self.push(Op::DetachStaRx);
-        }
-
-        fn attach_ap_rx(&mut self) -> Result<(), crate::wifi_core::DriverError> {
-            self.push(Op::AttachApRx);
-            Ok(())
-        }
-
-        fn detach_ap_rx(&mut self) {
-            self.push(Op::DetachApRx);
-        }
-    }
-
-    impl WifiScanBackend for TrackingBackend {}
-    impl WifiFeatureBackend for TrackingBackend {}
-
     #[test]
-    fn sta_start_does_not_reissue_mode_after_configuration() {
-        let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4>::new();
-        let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
-        let driver = driver.initialize(InitConfig::default()).unwrap();
-        let driver = driver
-            .configure_sta(ClientConfig::new(
-                Ssid::try_from("core-net").unwrap(),
-                StationCredential::open(),
-            ))
+    fn connect_waiter_reports_failure_and_drop_does_not_abort_attempt() {
+        let r = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&r);
+        let mut c = Controller {
+            sdk: &mut sdk,
+            resources: &r,
+        };
+        c.set_configuration(&station()).unwrap();
+        c.start_blocking(1000).unwrap();
+        let w = waker();
+        let mut cx = Context::from_waker(&w);
+        let mut future = HostBox::pin(c.connect_async());
+        assert_eq!(future.as_mut().poll(&mut cx), Poll::Pending);
+        drop(future);
+        assert!(r.state.with(|s| s.connecting));
+        assert_eq!(c.begin_connect(false), Err(DriverError::Busy));
+        r.publish_event(WifiEvent::StaDisconnected { reason: Some(202) })
             .unwrap();
-
-        let _driver = driver.start().unwrap();
-
         assert_eq!(
-            &*ops.borrow(),
-            &[Op::Initialize, Op::ConfigureSta, Op::Start]
+            c.connect_result(),
+            Some(Err(DriverError::Disconnected { reason: Some(202) }))
+        );
+        let mut future = HostBox::pin(c.connect_async());
+        assert_eq!(future.as_mut().poll(&mut cx), Poll::Pending);
+        r.publish_event(WifiEvent::StaDisconnected { reason: Some(201) })
+            .unwrap();
+        assert_eq!(
+            future.as_mut().poll(&mut cx),
+            Poll::Ready(Err(DriverError::Disconnected { reason: Some(201) }))
         );
     }
-
     #[test]
-    fn ap_start_does_not_reissue_mode_after_configuration() {
-        let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4>::new();
-        let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
-        let driver = driver.initialize(InitConfig::default()).unwrap();
-        let driver = driver
-            .configure_ap(AccessPointConfig::open(
-                Ssid::try_from("core-ap").unwrap(),
-                Channel::try_from(6).unwrap(),
-            ))
+    fn blocking_timeout_and_disconnect_wait_preserve_actual_completion() {
+        let r = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&r);
+        let mut c = Controller {
+            sdk: &mut sdk,
+            resources: &r,
+        };
+        c.set_configuration(&station()).unwrap();
+        c.start_blocking(1000).unwrap();
+        assert_eq!(c.connect_blocking(0), Err(DriverError::Timeout));
+        assert!(r.state.with(|s| s.connecting));
+        assert_eq!(c.disconnect_blocking(0), Err(DriverError::Timeout));
+        assert!(r.state.with(|s| s.disconnecting));
+        r.publish_event(WifiEvent::StaDisconnected { reason: Some(8) })
             .unwrap();
-
-        let _driver = driver.start().unwrap();
-
-        assert_eq!(
-            &*ops.borrow(),
-            &[Op::Initialize, Op::ConfigureAp, Op::Start]
-        );
+        assert!(c.disconnected());
+        let count = c.sdk.commands;
+        r.publish_event(WifiEvent::StaDisconnected { reason: Some(201) })
+            .unwrap();
+        assert_eq!(c.sdk.commands, count);
     }
-
     #[test]
-    fn mixed_start_does_not_reissue_mode_after_configuration() {
-        let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4>::new();
-        let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
-        let driver = driver.initialize(InitConfig::default()).unwrap();
-        let driver = driver
-            .configure_mixed(MixedConfig::new(
-                ClientConfig::new(
-                    Ssid::try_from("core-net").unwrap(),
-                    StationCredential::open(),
-                ),
-                AccessPointConfig::open(
-                    Ssid::try_from("core-ap").unwrap(),
-                    Channel::try_from(6).unwrap(),
-                ),
-            ))
-            .unwrap();
-
-        let _driver = driver.start().unwrap();
-
-        assert_eq!(
-            &*ops.borrow(),
-            &[Op::Initialize, Op::ConfigureMixed, Op::Start]
-        );
+    fn native_error_and_partial_configuration_failure_keep_precise_state() {
+        let r = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&r);
+        let mut c = Controller {
+            sdk: &mut sdk,
+            resources: &r,
+        };
+        c.set_configuration(&station()).unwrap();
+        c.sdk.fail_next = Some(DriverError::Sdk(123));
+        assert_eq!(c.set_configuration(&station()), Err(DriverError::Sdk(123)));
+        assert!(c.sdk.mode.is_none());
+        assert!(!r.state.with(|s| s.station_configured));
+        assert_eq!(c.start_blocking(1000), Err(DriverError::InvalidState));
     }
-
     #[test]
-    fn sta_link_attaches_rx_on_typestate_transfer() {
-        let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4>::new();
-        let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
-        let driver = driver.initialize(InitConfig::default()).unwrap();
-        let driver = driver
-            .configure_sta(ClientConfig::new(
-                Ssid::try_from("core-net").unwrap(),
-                StationCredential::open(),
-            ))
-            .unwrap()
-            .start()
-            .unwrap();
-
-        let _link = driver.sta_link().unwrap();
-
+    fn blocking_scan_timeout_can_be_cancelled_without_executor() {
+        let r = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&r);
+        let mut c = Controller {
+            sdk: &mut sdk,
+            resources: &r,
+        };
+        c.set_configuration(&station()).unwrap();
+        c.start_blocking(1000).unwrap();
+        let mut records = [AccessPointRecord::default()];
         assert_eq!(
-            &*ops.borrow(),
-            &[Op::Initialize, Op::ConfigureSta, Op::Start, Op::AttachStaRx]
+            c.scan_blocking(&ScanOptions::all(), &mut records, 0),
+            Err(DriverError::Timeout)
         );
+        c.cancel_scan().unwrap();
+        r.publish_event(WifiEvent::ScanDone { status: 1 }).unwrap();
+        c.cancel_scan_blocking(0).unwrap();
+        assert_eq!(c.begin_connect(false), Ok(()));
     }
-
     #[test]
-    fn link_into_driver_detaches_rx_before_returning_started_driver() {
-        let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4>::new();
-        let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
-        let driver = driver.initialize(InitConfig::default()).unwrap();
-        let driver = driver
-            .configure_sta(ClientConfig::new(
-                Ssid::try_from("core-net").unwrap(),
-                StationCredential::open(),
-            ))
-            .unwrap()
-            .start()
-            .unwrap();
-
-        static FRAME: [u8; 8] = [0; 8];
-        let link = driver.sta_link().unwrap();
-        resources
-            .enqueue_rx(unsafe {
-                RawRxRecord::from_raw(
-                    FRAME.as_ptr().cast_mut().cast(),
-                    FRAME.len() as u16,
-                    core::ptr::null_mut(),
-                    None,
-                )
-            })
-            .unwrap();
-        assert_eq!(resources.queued_rx(), 1);
-        let _driver = link.into_driver().unwrap();
-        assert_eq!(resources.queued_rx(), 0);
-
-        assert_eq!(
-            &*ops.borrow(),
-            &[
-                Op::Initialize,
-                Op::ConfigureSta,
-                Op::Start,
-                Op::AttachStaRx,
-                Op::DetachStaRx,
-            ]
-        );
+    fn dropped_scan_keeps_result_ownership_until_completion_and_cleanup() {
+        let r = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&r);
+        let mut c = Controller {
+            sdk: &mut sdk,
+            resources: &r,
+        };
+        c.enable_station().unwrap();
+        c.start_blocking(1000).unwrap();
+        let w = waker();
+        let mut cx = Context::from_waker(&w);
+        let mut records = [AccessPointRecord::default()];
+        let options = ScanOptions::all();
+        let mut future = HostBox::pin(c.scan_async(&options, &mut records));
+        assert_eq!(future.as_mut().poll(&mut cx), Poll::Pending);
+        drop(future);
+        assert_eq!(c.begin_scan(&options), Err(DriverError::Busy));
+        r.publish_event(WifiEvent::ScanDone { status: 0 }).unwrap();
+        let before = c.sdk.commands;
+        c.begin_scan(&options).unwrap();
+        assert_eq!(c.sdk.commands, before + 2);
+        c.cancel_scan().unwrap();
+        assert!(r.state.with(|s| s.scan_pending));
+        r.publish_event(WifiEvent::ScanDone { status: 1 }).unwrap();
+        let mut cancel = HostBox::pin(c.cancel_scan_async());
+        assert_eq!(cancel.as_mut().poll(&mut cx), Poll::Ready(Ok(())));
+        drop(cancel);
+        assert!(!r.state.with(|s| s.scan_pending));
     }
+}
 
+#[cfg(test)]
+mod ownership_tests {
+    extern crate std;
+    use super::super::allocator::TrackingAllocator;
+    use super::*;
+    use core::sync::atomic::Ordering;
     #[test]
-    fn mixed_link_attaches_and_detaches_both_packet_paths() {
-        let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4, 0, 0, 0, 2, 1514>::new();
-        let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()))
-            .initialize(InitConfig::default())
-            .unwrap()
-            .configure_mixed(MixedConfig::new(
-                ClientConfig::new(
-                    Ssid::try_from("core-net").unwrap(),
-                    StationCredential::open(),
-                ),
-                AccessPointConfig::open(
-                    Ssid::try_from("core-ap").unwrap(),
-                    Channel::try_from(6).unwrap(),
-                ),
-            ))
-            .unwrap()
-            .start()
-            .unwrap();
-
-        let mut mixed = driver.mixed_link().unwrap();
-        {
-            let (sta, ap) = mixed.split();
-            assert_eq!(sta.max_frame_size(), 1514);
-            assert_eq!(ap.max_frame_size(), 1514);
+    fn every_partial_allocation_failure_rolls_back_queues_and_header() {
+        let mut config = InitConfig::default();
+        config.queues = super::super::QueueConfig {
+            access_point_rx: 2,
+            esp_now_peers: 2,
+            esp_now_rx: 2,
+            promiscuous_rx: 2,
+            ..super::super::QueueConfig::default()
+        };
+        let mut succeeded = false;
+        for budget in 0..16 {
+            let (provider, allocator) = TrackingAllocator::new(budget);
+            let result = Wifi::allocate_resources(&config, allocator);
+            succeeded |= result.is_ok();
+            drop(result);
+            assert_eq!(
+                provider.live.load(Ordering::SeqCst),
+                0,
+                "failure budget {budget}"
+            );
         }
-        let _driver = mixed.into_driver().unwrap();
-
-        assert_eq!(
-            &*ops.borrow(),
-            &[
-                Op::Initialize,
-                Op::ConfigureMixed,
-                Op::Start,
-                Op::AttachStaRx,
-                Op::AttachApRx,
-                Op::DetachApRx,
-                Op::DetachStaRx,
-            ]
-        );
+        assert!(succeeded);
     }
-
     #[test]
-    fn dropped_sta_link_detaches_rx_callback() {
-        let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4>::new();
-        let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
-        let driver = driver.initialize(InitConfig::default()).unwrap();
-        let driver = driver
-            .configure_sta(ClientConfig::new(
-                Ssid::try_from("core-net").unwrap(),
-                StationCredential::open(),
-            ))
-            .unwrap()
-            .start()
-            .unwrap();
-
-        {
-            let _link = driver.sta_link().unwrap();
-        }
-
-        assert_eq!(
-            &*ops.borrow(),
-            &[
-                Op::Initialize,
-                Op::ConfigureSta,
-                Op::Start,
-                Op::AttachStaRx,
-                Op::DetachStaRx,
-            ]
-        );
+    fn forgetting_owner_retains_callback_storage() {
+        let (provider, allocator) = TrackingAllocator::new(32);
+        let resources = Wifi::allocate_resources(&InitConfig::default(), allocator).unwrap();
+        let ptr = &*resources as *const Resources;
+        let wifi = Wifi {
+            sdk: Sdk::new(&resources),
+            resources: Some(resources),
+            station_mac: [0; 6],
+            ap_mac: [0; 6],
+        };
+        let before = provider.live.load(Ordering::SeqCst);
+        core::mem::forget(wifi);
+        assert_eq!(provider.live.load(Ordering::SeqCst), before);
+        assert_eq!(unsafe { &*ptr }.frame_bytes, 1514);
     }
-
     #[test]
-    fn dropped_ap_link_detaches_rx_callback() {
-        let ops = Rc::new(RefCell::new(Vec::new()));
-        let resources = WifiResources::<8, 4, 0, 0, 0, 2, 1514>::new();
-        let driver = WifiDriver::with_backend(&resources, TrackingBackend::new(ops.clone()));
-        let driver = driver.initialize(InitConfig::default()).unwrap();
-        let driver = driver
-            .configure_ap(AccessPointConfig::open(
-                Ssid::try_from("core-ap").unwrap(),
-                Channel::try_from(6).unwrap(),
-            ))
-            .unwrap()
-            .start()
-            .unwrap();
-
-        {
-            let _link = driver.ap_link().unwrap();
-        }
-
-        assert_eq!(
-            &*ops.borrow(),
-            &[
-                Op::Initialize,
-                Op::ConfigureAp,
-                Op::Start,
-                Op::AttachApRx,
-                Op::DetachApRx,
-            ]
-        );
+    fn failed_teardown_retains_callback_storage() {
+        let (provider, allocator) = TrackingAllocator::new(32);
+        let resources = Wifi::allocate_resources(&InitConfig::default(), allocator).unwrap();
+        let ptr = &*resources as *const Resources;
+        let mut sdk = Sdk::new(&resources);
+        sdk.fail_next = Some(DriverError::Sdk(9));
+        let wifi = Wifi {
+            sdk,
+            resources: Some(resources),
+            station_mac: [0; 6],
+            ap_mac: [0; 6],
+        };
+        let before = provider.live.load(Ordering::SeqCst);
+        drop(wifi);
+        assert_eq!(provider.live.load(Ordering::SeqCst), before);
+        assert_eq!(unsafe { &*ptr }.frame_bytes, 1514);
     }
 }

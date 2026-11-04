@@ -3,20 +3,8 @@
 //! Replaces `arch-spin`'s busy-loop executor with a task-blocking executor
 //! that yields the CPU when no embassy tasks are ready.
 //!
-//! # Design
-//!
-//! The core problem with `arch-spin` is that its `loop { poll() }` never
-//! yields. On ESP8266, the WiFi blob's FreeRTOS tasks must preempt and run.
-//! The spin loop also breaks embassy's waker mechanism: `wake()` enqueues
-//! the task, but the executor's `dequeue_all()` timing window under
-//! preemption means the enqueue is invisible to the current poll cycle.
-//!
-//! In the ESP8266 RTOS SDK, ordinary tasks block through FreeRTOS objects
-//! such as queues, event groups, and `vTaskDelay()`, while CPU sleep lives in
-//! the idle hook (`esp_internal_idle_hook()` / `esp_vApplicationWaitiHook()`).
-//! Our async `uiT` main task therefore should not execute raw `waiti`
-//! directly. Instead it keeps a simple atomic pending flag and blocks
-//! indefinitely through the compat scheduler until the pender wakes it.
+//! Run after explicit [`Runtime`](super::runtime::Runtime) initialization. The
+//! executor blocks its compat task when idle and wakes through the pender.
 
 use core::marker::PhantomData;
 
@@ -96,7 +84,11 @@ impl Executor {
     /// loop.
     ///
     /// This function never returns.
-    pub fn run(&'static mut self, init: impl FnOnce(Spawner)) -> ! {
+    pub fn run(
+        &'static mut self,
+        _runtime: &'static super::runtime::Runtime,
+        init: impl FnOnce(Spawner),
+    ) -> ! {
         let task_idx = unsafe { crate::wifi::compat::task::current_task_index() };
         EXECUTOR_TASK.store(task_idx, Ordering::Release);
         init(self.inner.spawner());

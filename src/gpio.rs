@@ -193,7 +193,7 @@ macro_rules! impl_input_output {
 
             impl<MODE> StatefulOutputPin for $pxi<Output<MODE>> {
                fn is_set_high(&self) -> Result<bool, Self::Error> {
-                   let input = unsafe { (*GPIO::ptr()).$in().read().gpio_in_data().bits() };
+                   let input = unsafe { (*GPIO::ptr()).gpio_out().read().gpio_out_data().bits() };
                     Ok((input >> $i) & 1 == 1)
                }
                fn is_set_low(&self) -> Result<bool, Self::Error> {
@@ -205,26 +205,31 @@ macro_rules! impl_input_output {
 
             impl<MODE> $pxi<MODE> {
                 unsafe fn configure_gpio(&mut self, mode: u8, enable: bool, pullup: bool, open_drain: bool) {
-                    let gpio = &*GPIO::ptr();
-                    let iomux = &*IO_MUX::ptr();
-                    iomux.$iomux().modify(|_, w| {
-                        w.function_select_low_bits().bits(mode & 0b11)
-                        .function_select_high_bit().bit(mode >> 2 == 1)
-                        .pullup().bit(pullup)
+                    // Pin-specific registers are independent; exclusion keeps
+                    // read/modify/write sequences intact against app IRQ code.
+                    critical_section::with(|_| {
+                        let gpio = &*GPIO::ptr();
+                        let iomux = &*IO_MUX::ptr();
+                        iomux.$iomux().modify(|_, w| {
+                            w.function_select_low_bits().bits(mode & 0b11)
+                                .function_select_high_bit().bit(mode >> 2 == 1)
+                                .pullup().bit(pullup)
+                        });
+                        if enable {
+                            gpio.$en().write(|w| w.bits(0x1 << $i));
+                        } else {
+                            gpio.$dis().write(|w| w.bits(0x1 << $i));
+                        }
+                        gpio.$pin().modify(|_, w| w.$driver().bit(open_drain));
                     });
-
-                    if enable {
-                        gpio.$en().write(|w| w.bits(0x1 << $i));
-                    } else {
-                        gpio.$dis().write(|w| w.bits(0x1 << $i));
-                    }
-
-                    gpio.$pin().modify(|_, w| w.$driver().bit(open_drain));
                 }
 
                 /// Change the pin into a specific mode without doing any of the pin configuration
                 ///
-                /// This should only be used if you know the pin is already configured correctly
+                /// # Safety
+                /// The pin's hardware configuration must already match T, and
+                /// changing its ownership must not conflict with an active
+                /// peripheral using that pin.
                 pub unsafe fn unsafe_info<T>(self) -> $pxi<T> {
                     $pxi { _mode: PhantomData }
                 }
@@ -298,7 +303,7 @@ impl<MODE> InputPin for Gpio16<Input<MODE>> {
     }
 }
 
-impl<PushPull> OutputPin for Gpio16<Output<PushPull>> {
+impl OutputPin for Gpio16<Output<PushPull>> {
     type Error = Infallible;
 
     fn set_high(&mut self) -> Result<(), Self::Error> {
@@ -320,7 +325,7 @@ impl<PushPull> OutputPin for Gpio16<Output<PushPull>> {
     }
 }
 
-impl<PushPull> StatefulOutputPin for Gpio16<Output<PushPull>> {
+impl StatefulOutputPin for Gpio16<Output<PushPull>> {
     fn is_set_high(&self) -> Result<bool, Self::Error> {
         let input = unsafe { (*RTC::ptr()).rtc_gpio_out().read().bits() };
         Ok(input & 0x1 != 0)
@@ -331,39 +336,42 @@ impl<PushPull> StatefulOutputPin for Gpio16<Output<PushPull>> {
     }
 }
 
-impl<PushPull> toggleable::Default for Gpio16<Output<PushPull>> {}
+impl toggleable::Default for Gpio16<Output<PushPull>> {}
+
+// XPD_DCDC mux function 1 selects RTC GPIO; bit 3 controls its pull-down.
+fn rtc_gpio_config(previous: u32, pulldown: bool) -> u32 {
+    (previous & !(0x43 | (1 << 3))) | 1 | (u32::from(pulldown) << 3)
+}
 
 impl<MODE> Gpio16<MODE> {
     unsafe fn configure_gpio(&mut self, output: bool, pulldown: bool) {
-        let rtc = &(*RTC::ptr());
+        critical_section::with(|_| {
+            let rtc = &(*RTC::ptr());
 
-        // mux configuration for XPD_DCDC and rtc_gpio0 connection
-        rtc.pad_xpd_dcdc_conf().modify(|r, w| {
-            if pulldown {
-                w.bits(r.bits() & 0xffffffbc)
-            } else {
-                w.bits((r.bits() & 0xffffffbc) | 0x1)
-            }
-        });
+            // mux configuration for XPD_DCDC and rtc_gpio0 connection
+            rtc.pad_xpd_dcdc_conf()
+                .modify(|r, w| w.bits(rtc_gpio_config(r.bits(), pulldown)));
 
-        // mux configuration for out enable
-        rtc.rtc_gpio_conf().modify(|r, w| w.bits(r.bits() & !0x1));
+            // mux configuration for out enable
+            rtc.rtc_gpio_conf().modify(|r, w| w.bits(r.bits() & !0x1));
 
-        // output enable/disable
-        rtc.rtc_gpio_enable().modify(|r, w| {
-            if output {
-                w.bits(r.bits() | 0x1)
-            } else {
-                w.bits(r.bits() & !0x1)
-            }
+            // output enable/disable
+            rtc.rtc_gpio_enable().modify(|r, w| {
+                if output {
+                    w.bits(r.bits() | 0x1)
+                } else {
+                    w.bits(r.bits() & !0x1)
+                }
+            });
         });
     }
 
     /// Change the pin into a specific mode without doing any of the pin
     /// configuration
     ///
-    /// This should only be used if you know the pin is already configured
-    /// correctly
+    /// # Safety
+    /// The pin's hardware configuration must already match T, and changing its
+    /// ownership must not conflict with an active peripheral using that pin.
     pub unsafe fn unsafe_info<T>(self) -> Gpio16<T> {
         Gpio16 { _mode: PhantomData }
     }
@@ -374,7 +382,7 @@ impl<MODE> Gpio16<MODE> {
         Gpio16 { _mode: PhantomData }
     }
 
-    pub fn into_floating_input(mut self) -> Gpio16<Input<PullDown>> {
+    pub fn into_floating_input(mut self) -> Gpio16<Input<Floating>> {
         unsafe { self.configure_gpio(false, false) };
 
         Gpio16 { _mode: PhantomData }
@@ -455,4 +463,22 @@ impl_into_mode! {
         Gpio3: (3, io_mux_u0rxd, 0b001, false),
         Gpio2: (2, io_mux_gpio2, 0b001, false),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rtc_gpio_config;
+    #[test]
+    fn gpio16_mode_transitions_preserve_other_pad_settings() {
+        for previous in [0, u32::MAX, 0x1234_5678] {
+            let floating = rtc_gpio_config(previous, false);
+            let pulled = rtc_gpio_config(previous, true);
+            assert_eq!(floating & 0x4b, 1);
+            assert_eq!(pulled & 0x4b, 9);
+            assert_eq!(floating & !0x4b, previous & !0x4b);
+            assert_eq!(pulled & !0x4b, previous & !0x4b);
+            assert_eq!(rtc_gpio_config(pulled, false), floating);
+            assert_eq!(rtc_gpio_config(floating, true), pulled);
+        }
+    }
 }

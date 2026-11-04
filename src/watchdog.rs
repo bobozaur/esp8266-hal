@@ -1,4 +1,4 @@
-use crate::time::{Milliseconds, Seconds};
+use crate::time::Duration;
 use embedded_hal::watchdog::{Watchdog as WatchdogTrait, WatchdogDisable, WatchdogEnable};
 use esp8266::WDT;
 
@@ -35,140 +35,49 @@ pub enum StageTimeout {
     Stage2684Sec = 15,
 }
 
-impl From<StageTimeout> for Milliseconds {
-    fn from(timeout: StageTimeout) -> Milliseconds {
-        match timeout {
-            StageTimeout::StageDisabled => Milliseconds(0),
-            StageTimeout::Stage084Sec => Milliseconds(840),
-            StageTimeout::Stage168Sec => Milliseconds(1_680),
-            StageTimeout::Stage336Sec => Milliseconds(3_360),
-            StageTimeout::Stage671Sec => Milliseconds(6_710),
-            StageTimeout::Stage1342Sec => Milliseconds(13_420),
-            StageTimeout::Stage2684Sec => Milliseconds(26_840),
-        }
+impl From<StageTimeout> for Duration {
+    fn from(timeout: StageTimeout) -> Duration {
+        Duration::from_millis(match timeout {
+            StageTimeout::StageDisabled => 0,
+            StageTimeout::Stage084Sec => 840,
+            StageTimeout::Stage168Sec => 1_680,
+            StageTimeout::Stage336Sec => 3_360,
+            StageTimeout::Stage671Sec => 6_710,
+            StageTimeout::Stage1342Sec => 13_420,
+            StageTimeout::Stage2684Sec => 26_840,
+        })
     }
 }
 
-impl From<Milliseconds> for StageTimeout {
-    fn from(ms: Milliseconds) -> StageTimeout {
-        StageTimeout::from_upper_bound(ms)
+const STAGES: [StageTimeout; 6] = [
+    StageTimeout::Stage084Sec,
+    StageTimeout::Stage168Sec,
+    StageTimeout::Stage336Sec,
+    StageTimeout::Stage671Sec,
+    StageTimeout::Stage1342Sec,
+    StageTimeout::Stage2684Sec,
+];
+
+fn upper_stage(duration: Duration) -> StageTimeout {
+    if duration.is_zero() {
+        return StageTimeout::StageDisabled;
     }
+    STAGES
+        .into_iter()
+        .find(|&stage| Duration::from(stage) >= duration)
+        .unwrap_or(StageTimeout::Stage2684Sec)
 }
 
-impl StageTimeout {
-    /// get the highest timeout that is less or equal to the provided time
-    fn from_lower_bound(ms: Milliseconds) -> StageTimeout {
-        if ms == StageTimeout::StageDisabled.into() {
-            StageTimeout::StageDisabled
-        } else if ms <= StageTimeout::Stage168Sec.into() {
-            StageTimeout::Stage084Sec
-        } else if ms <= StageTimeout::Stage336Sec.into() {
-            StageTimeout::Stage168Sec
-        } else if ms <= StageTimeout::Stage671Sec.into() {
-            StageTimeout::Stage336Sec
-        } else if ms <= StageTimeout::Stage1342Sec.into() {
-            StageTimeout::Stage671Sec
-        } else if ms <= StageTimeout::Stage2684Sec.into() {
-            StageTimeout::Stage1342Sec
-        } else {
-            StageTimeout::Stage2684Sec
-        }
+fn stages_for_duration(duration: Duration) -> (StageTimeout, StageTimeout) {
+    if duration.is_zero() {
+        return (StageTimeout::StageDisabled, StageTimeout::StageDisabled);
     }
-
-    /// get the lowest timeout that is more or equal to the provided time
-    fn from_upper_bound(ms: Milliseconds) -> StageTimeout {
-        if ms == StageTimeout::StageDisabled.into() {
-            StageTimeout::StageDisabled
-        } else if ms <= StageTimeout::Stage084Sec.into() {
-            StageTimeout::Stage084Sec
-        } else if ms <= StageTimeout::Stage168Sec.into() {
-            StageTimeout::Stage168Sec
-        } else if ms <= StageTimeout::Stage336Sec.into() {
-            StageTimeout::Stage336Sec
-        } else if ms <= StageTimeout::Stage671Sec.into() {
-            StageTimeout::Stage671Sec
-        } else if ms <= StageTimeout::Stage1342Sec.into() {
-            StageTimeout::Stage1342Sec
-        } else {
-            StageTimeout::Stage2684Sec
-        }
-    }
-}
-
-impl From<StageTimeout> for (StageTimeout, StageTimeout) {
-    fn from(stage0: StageTimeout) -> (StageTimeout, StageTimeout) {
-        (stage0, StageTimeout::StageDisabled)
-    }
-}
-
-impl From<Milliseconds> for (StageTimeout, StageTimeout) {
-    fn from(ms: Milliseconds) -> (StageTimeout, StageTimeout) {
-        let stage0 = StageTimeout::from_lower_bound(ms);
-        let stage1_ms = Milliseconds(ms.0.saturating_sub(Milliseconds::from(stage0).0));
-        let stage1 = StageTimeout::from_upper_bound(stage1_ms);
-
-        (stage0, stage1)
-    }
-}
-
-impl From<Seconds> for (StageTimeout, StageTimeout) {
-    fn from(s: Seconds) -> (StageTimeout, StageTimeout) {
-        Self::from(Milliseconds::from(s))
-    }
-}
-
-#[test]
-fn test_time_into_timeout() {
-    use crate::time::U32Ext;
-
-    assert_eq!(
-        (StageTimeout::StageDisabled, StageTimeout::StageDisabled),
-        0.ms().into()
-    );
-    assert_eq!(
-        (StageTimeout::Stage084Sec, StageTimeout::StageDisabled),
-        500.ms().into()
-    );
-    assert_eq!(
-        (StageTimeout::Stage084Sec, StageTimeout::Stage084Sec),
-        1500.ms().into()
-    );
-    assert_eq!(
-        (StageTimeout::Stage168Sec, StageTimeout::Stage084Sec),
-        2500.ms().into()
-    );
-    assert_eq!(
-        (StageTimeout::Stage2684Sec, StageTimeout::Stage084Sec),
-        27000.ms().into()
-    );
-    assert_eq!(
-        (StageTimeout::Stage2684Sec, StageTimeout::Stage2684Sec),
-        50000.ms().into()
-    );
-    assert_eq!(
-        (StageTimeout::Stage2684Sec, StageTimeout::Stage2684Sec),
-        100000.ms().into()
-    );
-}
-
-#[test]
-fn test_time_into_timeout_is_higher() {
-    use crate::time::U32Ext;
-
-    for period in (1..53680).step_by(100) {
-        let (stage0, stage1) = period.ms().into();
-
-        let sum_ms = Milliseconds::from(stage0).0 + Milliseconds::from(stage1).0;
-
-        assert!(
-            sum_ms >= period,
-            "converted period {} is not more than input time {}. stages: {:?}, {:?}",
-            sum_ms,
-            period,
-            stage0,
-            stage1
-        );
-    }
+    let first = STAGES
+        .into_iter()
+        .rev()
+        .find(|&stage| Duration::from(stage) <= duration)
+        .unwrap_or(StageTimeout::Stage084Sec);
+    (first, upper_stage(duration.saturating_sub(first.into())))
 }
 
 pub struct Watchdog {
@@ -184,28 +93,24 @@ impl WatchdogTrait for Watchdog {
 }
 
 impl WatchdogEnable for Watchdog {
-    type Time = (StageTimeout, StageTimeout);
+    type Time = Duration;
 
-    /// Start the watchdog timer
-    ///
-    /// You can provide the time period either as a value in [`Milliseconds`] or [`Seconds`], a single `StageTimeOut` or a pair of `StageTimeout`
-    ///
-    /// If the period is provided as a time unit, the actual period will be an approximation of the provided period that is
-    /// at least as long as the provided period or the maximum period of 53680 milliseconds.
-    ///
-    /// Note that the default clock frequency of 80Mhz is assumed when converting from time units.
-    ///
-    /// [`Milliseconds`]: ../time/struct.Milliseconds.html
-    /// [`Seconds`]: ../time/struct.Seconds.html
-    fn start<T>(&mut self, period: T)
-    where
-        T: Into<Self::Time>,
-    {
-        let (period0, period1) = period.into();
-        if period0 == StageTimeout::StageDisabled {
+    /// Start with a period rounded up to hardware stages, capped at 53.68s.
+    /// Zero disables the watchdog. The peripheral clock is fixed at 80 MHz.
+    fn start<T: Into<Duration>>(&mut self, period: T) {
+        let (first, second) = stages_for_duration(period.into());
+        self.start_stages(first, second);
+    }
+}
+
+impl Watchdog {
+    /// Configure the two hardware stages directly. A disabled first stage
+    /// disables the watchdog; a disabled second stage uses only the first.
+    pub fn start_stages(&mut self, first: StageTimeout, second: StageTimeout) {
+        if first == StageTimeout::StageDisabled {
+            self.disable();
             return;
         }
-
         self.watchdog.wdt_ctl().write(|w| {
             w.unknown_3()
                 .set_bit()
@@ -213,24 +118,18 @@ impl WatchdogEnable for Watchdog {
                 .set_bit()
                 .unknown_5()
                 .set_bit()
+                .stage_1_disable()
+                .bit(second == StageTimeout::StageDisabled)
         });
-
         self.watchdog
             .wdt_op()
-            .write(|w| unsafe { w.bits(period0 as u8 as u32) });
-
-        if period1 == StageTimeout::StageDisabled {
-            self.watchdog
-                .wdt_ctl()
-                .modify(|_, w| w.stage_1_disable().set_bit());
-        } else {
+            .write(|w| unsafe { w.bits(first as u32) });
+        if second != StageTimeout::StageDisabled {
             self.watchdog
                 .wdt_op_nd()
-                .write(|w| unsafe { w.bits(period1 as u8 as u32) });
+                .write(|w| unsafe { w.bits(second as u32) });
         }
-
         self.feed();
-
         self.watchdog.wdt_ctl().modify(|_, w| w.enable().set_bit());
     }
 }
@@ -240,5 +139,30 @@ impl WatchdogDisable for Watchdog {
         self.watchdog
             .wdt_ctl()
             .modify(|_, w| w.enable().clear_bit());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn duration_uses_bounded_stages_without_overflow() {
+        for millis in [
+            0, 1, 500, 840, 1_500, 1_680, 2_500, 3_360, 6_710, 13_420, 26_840, 27_000, 50_000,
+            53_680, 100_000,
+        ] {
+            let duration = Duration::from_millis(millis);
+            let (first, second) = stages_for_duration(duration);
+            let actual = Duration::from(first) + Duration::from(second);
+            assert!(actual >= duration.min(Duration::from_millis(53_680)));
+        }
+        assert_eq!(
+            stages_for_duration(Duration::from_secs(u64::MAX)),
+            (StageTimeout::Stage2684Sec, StageTimeout::Stage2684Sec)
+        );
+        assert_eq!(
+            stages_for_duration(Duration::ZERO),
+            (StageTimeout::StageDisabled, StageTimeout::StageDisabled)
+        );
     }
 }

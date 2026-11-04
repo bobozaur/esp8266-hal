@@ -1,9 +1,8 @@
 /*
  * Custom link.x for esp8266-hal — overrides xtensa-lx-rt's default.
  *
- * The only change vs upstream: .text and .rodata sections also collect
- * .text2.*, .literal2.*, and .rodata2.* which come from the ESP8266 RTOS SDK
- * WiFi blob libraries (libnet80211.a, libpp.a, etc.).
+ * Collect SDK .text2.*, .literal2.*, and .rodata2.* inputs, place cache-off
+ * routines in IRAM, and select the Wi-Fi native symbols and vectors when enabled.
  *
  * Without this, those sections become orphans with misaligned addresses,
  * causing the ESP8266 ROM bootloader to hang during segment loading.
@@ -66,14 +65,32 @@ SECTIONS {
     *(.rodata.s_aes_*)
     *(.rodata.SB*)
     *(.rodata.SP*)
-    *(.rodata.FSb*)
     *(.rodata.K)
     *(.rodata.S)
     *(.rodata.P)
     *(.rodata.small_prime)
-    *(.rodata.ciphersuite_definitions)
     *(.rodata.ciphersuite_preference)
     *(.rodata.mbedtls_cipher_definitions)
+
+    /* These pinned mbedTLS metadata consumers use aligned word loads. Keep
+       their pointed-to byte strings in DRAM. Digest-info tables stay in DRAM:
+       mbedtls_md_get_size uses a byte load even though its field is an int.
+       Ciphersuite definitions also stay in DRAM: their flags field is a byte. */
+    *(.rodata.oid_sig_alg .rodata.oid_x509_ext .rodata.oid_pk_alg)
+    *(.rodata.oid_ecp_grp .rodata.oid_cipher_alg .rodata.oid_md_alg)
+    *(.rodata.oid_md_hmac .rodata.oid_pkcs12_pbe_alg)
+    *(.rodata.aes_info .rodata.xts_aes_info .rodata.gcm_aes_info)
+    *(.rodata.ccm_aes_info)
+    *(.rodata.mbedtls_rsa_info .rodata.mbedtls_eckey_info)
+    *(.rodata.mbedtls_eckeydh_info .rodata.mbedtls_ecdsa_info)
+    *(.rodata.aes_128_ecb_info .rodata.aes_192_ecb_info .rodata.aes_256_ecb_info)
+    *(.rodata.aes_128_cbc_info .rodata.aes_192_cbc_info .rodata.aes_256_cbc_info)
+    *(.rodata.aes_128_cfb128_info .rodata.aes_192_cfb128_info .rodata.aes_256_cfb128_info)
+    *(.rodata.aes_128_ofb_info .rodata.aes_192_ofb_info .rodata.aes_256_ofb_info)
+    *(.rodata.aes_128_ctr_info .rodata.aes_192_ctr_info .rodata.aes_256_ctr_info)
+    *(.rodata.aes_128_gcm_info .rodata.aes_192_gcm_info .rodata.aes_256_gcm_info)
+    *(.rodata.aes_128_ccm_info .rodata.aes_192_ccm_info .rodata.aes_256_ccm_info)
+    *(.rodata.aes_128_xts_info .rodata.aes_256_xts_info)
     _text_end = ABSOLUTE(.);
     _etext = .;
   } > ROTEXT

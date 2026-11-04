@@ -15,7 +15,11 @@ use crate::ram;
 //   spi_register.h:42   SPI_CTRL(0) = REG_SPI_BASE(0) + 0x8
 const CACHE_FLASH_CTRL_REG: u32 = 0x3FF0_000C;
 const CACHE_READ_EN_BIT: u32 = 1 << 8;
-const SPI_EXT2_ADDR: u32 = 0x6000_02F0; // REG_SPI_BASE(0) + 0xF0
+// SPI_EXT2(0) is base + 0xf8; 0xf0 is EXT0 programming timing, not busy.
+const SPI_EXT2_ADDR: *const u32 = esp8266::SPI0::PTR
+    .cast::<u8>()
+    .wrapping_add(0xf8)
+    .cast::<u32>();
 const SPI_CTRL_ADDR: u32 = 0x6000_0208; // SPI_CTRL(0)
 const SPI_ENABLE_AHB: u32 = 1 << 17;
 
@@ -25,7 +29,7 @@ const SPI_ENABLE_AHB: u32 = 1 << 17;
 pub unsafe extern "C" fn Cache_Read_Disable_2() {
     unsafe {
         let reg = CACHE_FLASH_CTRL_REG as *mut u32;
-        let spi_ext2 = SPI_EXT2_ADDR as *const u32;
+        let spi_ext2 = SPI_EXT2_ADDR;
         let spi_ctrl = SPI_CTRL_ADDR as *mut u32;
 
         // Clear cache-read-enable bit

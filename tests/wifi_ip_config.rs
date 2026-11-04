@@ -1,4 +1,7 @@
-use esp8266_hal::wifi_core::{Ipv4Addr, StaticIpv4Config, StaticIpv4Error};
+#[path = "../examples/support/ip.rs"]
+mod ip;
+use core::net::Ipv4Addr;
+use ip::{StaticIpv4Config, StaticIpv4Error};
 
 #[test]
 fn static_ipv4_accepts_gateway_on_same_subnet() {

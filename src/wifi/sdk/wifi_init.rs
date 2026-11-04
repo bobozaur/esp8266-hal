@@ -4,6 +4,7 @@
 //! `esp_wifi_deinit`, and `esp_wifi_internal_tx` which are called by
 //! both Rust code and the WiFi blob.
 
+use super::super::compat::{memory, queue, task};
 use core::ffi::c_void;
 use esp8266_wifi_sys as sys;
 use portable_atomic::{AtomicU32, Ordering};
@@ -22,20 +23,61 @@ struct TxFallbackBuffer {
 }
 
 static TX_FALLBACK_IN_USE: AtomicU32 = AtomicU32::new(0);
+static STATE: crate::wifi::sdk_state::SdkState = crate::wifi::sdk_state::SdkState::new();
+
+// Native deinit retains its one-time attach flag and radio allocations. A
+// later init must preserve every dimension used to size those allocations.
+static mut FIRST_BUFFER_LAYOUT: Option<memory::InitBufferLayout> = None;
+
+fn buffer_layout(config: &sys::wifi_init_config_t) -> memory::InitBufferLayout {
+    memory::InitBufferLayout {
+        ampdu_buffers: config.rx_ampdu_buf_num as usize,
+        ampdu_buffer_len: config.rx_ampdu_buf_len as usize,
+        max_packet_len: config.rx_max_single_pkt_len as usize,
+        rx_buffer_len: config.rx_buf_len as usize,
+        rx_buffers: config.rx_buf_num as usize,
+        rx_packets: config.rx_pkt_num as usize,
+        tx_buffers: config.tx_buf_num as usize,
+        continuous_rx_buffers: config.left_continuous_rx_buf_num as usize,
+    }
+}
+
+pub(crate) fn buffer_configuration_matches(config: &sys::wifi_init_config_t) -> bool {
+    let requested = buffer_layout(config);
+    critical_section::with(|_| unsafe {
+        FIRST_BUFFER_LAYOUT.map_or(true, |original| original == requested)
+    })
+}
+
+pub(crate) fn is_initialized() -> bool {
+    STATE.is_initialized()
+}
+pub(crate) fn requires_quarantine() -> bool {
+    STATE.requires_quarantine()
+}
+
+unsafe fn cleanup_native() -> i32 {
+    let result = unsafe { esp_wifi_deinit_internal() };
+    let complete = result == sys::ESP_OK || result == sys::ESP_ERR_WIFI_NOT_INIT;
+    STATE.cleanup(complete);
+    if complete {
+        unsafe { super::phy_init::release_workspace() };
+        sys::ESP_OK
+    } else {
+        result
+    }
+}
 static mut TX_FALLBACK_BUF: TxFallbackBuffer = TxFallbackBuffer {
     bytes: [0; TX_FALLBACK_BYTES],
 };
 
 /// Default PPT task stack size (from SDK config).
 #[no_mangle]
-pub static _g_esp_wifi_ppt_task_stk_size: usize = 2816;
+pub static _g_esp_wifi_ppt_task_stk_size: usize = task::PP_TASK_STACK_BYTES as usize;
 
 /// Whether to connect to open routers when a password is set.
 #[no_mangle]
 pub static _g_esp_wifi_connect_open_router_when_pwd_is_set: bool = false;
-
-/// RX pbuf memory type (0 = DRAM, 1 = IRAM).
-static mut RX_PBUF_MEM_TYPE: u8 = 0;
 
 // ---------------------------------------------------------------------------
 // Blob function imports
@@ -43,6 +85,7 @@ static mut RX_PBUF_MEM_TYPE: u8 = 0;
 
 extern "C" {
     fn mac_init() -> i32;
+    fn esp_wifi_set_rx_pbuf_mem_type(mem_type: u32);
     fn esp_wifi_init_internal(config: *const sys::wifi_init_config_t) -> i32;
     fn esp_wifi_deinit_internal() -> i32;
     fn esp_supplicant_init() -> i32;
@@ -111,39 +154,79 @@ pub static WIFI_EVENT: EventBase = EventBase(b"WIFI_EVENT\0".as_ptr());
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn esp_wifi_set_rx_pbuf_mem_type(mem_type: u32) {
-    unsafe {
-        if mem_type < 2 {
-            RX_PBUF_MEM_TYPE = (mem_type & 1) as u8;
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_wifi_get_rx_pbuf_mem_type() -> u32 {
-    unsafe { RX_PBUF_MEM_TYPE as u32 }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn esp_wifi_deinit() -> i32 {
     unsafe {
-        esp_supplicant_deinit();
-        esp_wifi_deinit_internal()
+        let supplicant_ready = STATE.is_initialized();
+        STATE.begin();
+        if supplicant_ready {
+            esp_supplicant_deinit();
+        }
+        cleanup_native()
     }
 }
 
 /// Initialize the WiFi subsystem.
 ///
 /// Calls the blob's internal init, limits blob log output, initializes
-/// the WPA supplicant, and registers default TCPIP event handlers.
+/// the WPA supplicant, and leaves IP-stack policy to the application.
 #[no_mangle]
 pub unsafe extern "C" fn esp_wifi_init(config: *const sys::wifi_init_config_t) -> i32 {
     unsafe {
+        if STATE.requires_quarantine() {
+            return sys::ESP_ERR_INVALID_STATE;
+        }
+        let Some(config) = config.as_ref() else {
+            return sys::ESP_ERR_INVALID_ARG;
+        };
+        if !buffer_configuration_matches(config) {
+            return sys::ESP_ERR_INVALID_ARG;
+        }
+        let first_attach = critical_section::with(|_| {
+            let original = FIRST_BUFFER_LAYOUT;
+            original.is_none()
+        });
+        if first_attach && !task::has_free_task_slot() {
+            return sys::ESP_ERR_NO_MEM;
+        }
+        let layout = buffer_layout(config);
+        let Some(sizes) = layout.allocation_sizes(
+            first_attach,
+            queue::allocation_bytes(),
+            task::stack_allocation_bytes(task::PP_TASK_STACK_BYTES),
+        ) else {
+            return sys::ESP_ERR_INVALID_ARG;
+        };
+        if !memory::reserve_init_allocations(sizes) {
+            return sys::ESP_ERR_NO_MEM;
+        }
+        // Native PHY initialization is part of the permanent first attach;
+        // recreation must not reserve an unused calibration workspace.
+        if first_attach {
+            let prepared = super::phy_init::prepare_workspace();
+            if prepared != sys::ESP_OK {
+                memory::release_init_allocations();
+                return prepared;
+            }
+        }
+        // Native code sets its permanent first-attach flag before attaching.
+        // Even a subsequent supplicant error cannot unlock these dimensions.
+        if first_attach {
+            critical_section::with(|_| FIRST_BUFFER_LAYOUT = Some(layout));
+        }
+        STATE.begin();
         let _ = mac_init();
         esp_wifi_set_rx_pbuf_mem_type(1);
 
-        let result = esp_wifi_init_internal(config);
+        let native_result = esp_wifi_init_internal(config);
+        memory::release_init_allocations();
+        let phy_result = super::phy_init::initialization_result();
+        let result = if native_result != sys::ESP_OK {
+            native_result
+        } else {
+            phy_result
+        };
         if result != sys::ESP_OK {
+            let _ = cleanup_native();
             return result;
         }
 
@@ -153,14 +236,14 @@ pub unsafe extern "C" fn esp_wifi_init(config: *const sys::wifi_init_config_t) -
 
         let result = esp_supplicant_init();
         if result != sys::ESP_OK {
-            let _ = esp_wifi_deinit_internal();
+            let _ = cleanup_native();
             return result;
         }
 
-        // Do NOT call tcpip_adapter_set_default_wifi_handlers — we use embassy-net,
-        // not lwIP. The default handlers call tcpip_adapter_start/up/dhcpc which
-        // may interfere with the WiFi state machine without lwIP initialized.
-
+        // The application owns its IP stack; SDK default TCPIP handlers would
+        // start lwIP interfaces and DHCP behind that stack's back.
+        super::phy_init::release_workspace();
+        STATE.ready();
         sys::ESP_OK
     }
 }

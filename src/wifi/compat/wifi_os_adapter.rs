@@ -111,13 +111,15 @@ pub unsafe extern "C" fn __wifi_task_create(
     let stack_bytes = stack_bytes(&name_bytes, requested_stack_bytes as u16);
     let mut handle = core::ptr::null_mut();
     let result = unsafe {
-        task::xTaskCreate(
+        task::create_task(
             entry,
             name.cast(),
             stack_bytes,
             argument,
             priority,
             &mut handle,
+            name_bytes.starts_with(b"ppT\0")
+                && requested_stack_bytes == task::PP_TASK_STACK_BYTES as u32,
         )
     };
     if result == 1 {
@@ -185,7 +187,13 @@ pub unsafe extern "C" fn __wifi_task_top_sp() -> *mut c_void {
 
 #[no_mangle]
 pub unsafe extern "C" fn __wifi_queue_create(length: u32, item_size: u32) -> *mut c_void {
-    unsafe { queue::xQueueCreate(length, item_size) }
+    unsafe {
+        if length == 75 && item_size == 8 {
+            queue::create_pp_queue()
+        } else {
+            queue::xQueueCreate(length, item_size)
+        }
+    }
 }
 
 #[no_mangle]

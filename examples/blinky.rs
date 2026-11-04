@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "wifi")]
+mod support;
+
 use esp8266_hal::prelude::*;
 use esp8266_hal::target::Peripherals;
 use panic_halt as _;

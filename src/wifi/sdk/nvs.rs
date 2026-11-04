@@ -2,8 +2,7 @@
 //! stop/start cycle.
 //!
 //! The bare-metal driver has no flash-backed IDF NVS partition. The ESP8266
-//! blobs only require three records here: PHY calibration, the PHY DC table,
-//! and the EFUSE-derived backup MAC. Keeping those records in a fixed Rust
+//! live PHY path requires calibration and DC-table records. Keeping them in a fixed Rust
 //! store avoids pulling in the IDF NVS component and its filesystem/runtime
 //! dependencies.
 
@@ -13,7 +12,6 @@ use esp8266_wifi_sys as sys;
 
 const NVS_NOT_FOUND: i32 = 0x1102;
 const PHY_HANDLE: u32 = 1;
-const BACKUP_MAC_HANDLE: u32 = 2;
 
 struct Blob<const N: usize> {
     bytes: [u8; N],
@@ -66,7 +64,6 @@ impl<const N: usize> Blob<N> {
 }
 
 struct NvsStore {
-    backup_mac: Blob<16>,
     phy_calibration: Blob<128>,
     phy_dc_table: Blob<500>,
 }
@@ -74,7 +71,6 @@ struct NvsStore {
 impl NvsStore {
     const fn empty() -> Self {
         Self {
-            backup_mac: Blob::empty(),
             phy_calibration: Blob::empty(),
             phy_dc_table: Blob::empty(),
         }
@@ -127,8 +123,6 @@ pub unsafe extern "C" fn nvs_open(namespace: *const u8, _open_mode: u32, output:
 
     let handle = if unsafe { c_str_eq(namespace, b"phy") } {
         PHY_HANDLE
-    } else if unsafe { c_str_eq(namespace, b"backup_mac") } {
-        BACKUP_MAC_HANDLE
     } else {
         // The SDK treats an unknown optional namespace as an empty store.
         0
@@ -179,8 +173,6 @@ pub unsafe extern "C" fn nvs_get_blob(
             store.phy_calibration.read(output, length)
         } else if handle == PHY_HANDLE && c_str_eq(key, b"dc_table") {
             store.phy_dc_table.read(output, length)
-        } else if handle == BACKUP_MAC_HANDLE && c_str_eq(key, b"backup_mac_data") {
-            store.backup_mac.read(output, length)
         } else {
             NVS_NOT_FOUND
         }
@@ -203,8 +195,6 @@ pub unsafe extern "C" fn nvs_set_blob(
             store.phy_calibration.write(input, len)
         } else if handle == PHY_HANDLE && c_str_eq(key, b"dc_table") {
             store.phy_dc_table.write(input, len)
-        } else if handle == BACKUP_MAC_HANDLE && c_str_eq(key, b"backup_mac_data") {
-            store.backup_mac.write(input, len)
         } else {
             sys::ESP_ERR_INVALID_ARG
         }

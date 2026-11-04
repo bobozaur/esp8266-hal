@@ -2201,21 +2201,15 @@ static int ssl_write_encrypted_pms( mbedtls_ssl_context *ssl,
         return( MBEDTLS_ERR_SSL_PK_TYPE_MISMATCH );
     }
 
-    extern void esp8266_hal_eap_rsa_reserve(void);
-    extern void esp8266_hal_eap_rsa_release(void);
-
-    esp8266_hal_eap_rsa_reserve();
     if( ( ret = mbedtls_pk_encrypt( &ssl->session_negotiate->peer_cert->pk,
                             p, ssl->handshake->pmslen,
                             ssl->out_msg + offset + len_bytes, olen,
                             MBEDTLS_SSL_OUT_CONTENT_LEN - offset - len_bytes,
                             ssl->conf->f_rng, ssl->conf->p_rng ) ) != 0 )
     {
-        esp8266_hal_eap_rsa_release();
         MBEDTLS_SSL_DEBUG_RET( 1, "mbedtls_rsa_pkcs1_encrypt", ret );
         return( ret );
     }
-    esp8266_hal_eap_rsa_release();
 
 #if defined(MBEDTLS_SSL_PROTO_TLS1) || defined(MBEDTLS_SSL_PROTO_TLS1_1) || \
     defined(MBEDTLS_SSL_PROTO_TLS1_2)
@@ -3007,9 +3001,6 @@ exit:
 }
 #endif /* MBEDTLS_KEY_EXCHANGE__CERT_REQ_ALLOWED__ENABLED */
 
-extern void esp8266_hal_eap_rsa_reserve(void);
-extern void esp8266_hal_eap_rsa_release(void);
-
 static void esp8266_hal_free_peer_cert_after_ecdhe( mbedtls_ssl_context *ssl )
 {
 #if defined(MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED) || \
@@ -3572,7 +3563,6 @@ sign:
                 esp8266_hal_ssl_release_out_buf_for_cert_verify( ssl );
         }
 
-        esp8266_hal_eap_rsa_reserve();
         ret = mbedtls_pk_sign_restartable( mbedtls_ssl_own_key( ssl ),
                          md_alg, hash_start, hashlen,
                          esp8266_hal_sig_out, &n,
@@ -3610,7 +3600,6 @@ sign:
     }
     if( ret != 0 )
     {
-        esp8266_hal_eap_rsa_release();
         MBEDTLS_SSL_DEBUG_RET( 1, "mbedtls_pk_sign", ret );
 #if defined(MBEDTLS_SSL__ECP_RESTARTABLE)
         if( ret == MBEDTLS_ERR_ECP_IN_PROGRESS )
@@ -3618,7 +3607,6 @@ sign:
 #endif
         return( ret );
     }
-    esp8266_hal_eap_rsa_release();
 
     ssl->out_msg[4 + offset] = (unsigned char)( n >> 8 );
     ssl->out_msg[5 + offset] = (unsigned char)( n      );

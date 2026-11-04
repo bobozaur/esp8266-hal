@@ -1,16 +1,18 @@
-#[cfg(feature = "wifi-smartconfig")]
-use super::SmartConfigType;
-#[cfg(feature = "wifi-esp-now")]
-use super::{feature::EspNowInterface, EspNowPeerConfig};
-use super::{
-    AccessPointConfig, ApCredential, Channel, ClientConfig, InitConfig, RawMode, ScanOptions,
-    ScanType, StationPowerSave,
-};
 #[cfg(feature = "wifi-promiscuous")]
-use super::{PromiscuousControlFilter, PromiscuousFilter, PromiscuousPacketType};
-#[cfg(feature = "wifi-wps")]
+use super::PromiscuousFilter;
+#[cfg(all(feature = "wifi-smartconfig", target_arch = "xtensa"))]
+use super::SmartConfigType;
+#[cfg(all(feature = "wifi-esp-now", target_arch = "xtensa"))]
+use super::{feature::EspNowInterface, EspNowPeerConfig};
+#[cfg(target_arch = "xtensa")]
+use super::{AccessPointConfig, ApCredential, RawMode, ScanOptions, ScanType};
+use super::{Channel, ClientConfig, InitConfig, StationPowerSave};
+#[cfg(all(feature = "wifi-promiscuous", target_arch = "xtensa"))]
+use super::{PromiscuousControlFilter, PromiscuousPacketType};
+#[cfg(all(feature = "wifi-wps", target_arch = "xtensa"))]
 use super::{WpsConfig, WpsMode};
 
+#[cfg(target_arch = "xtensa")]
 extern "C" {
     fn esp_event_send(event: *mut esp8266_wifi_sys::system_event_t) -> esp8266_wifi_sys::esp_err_t;
 }
@@ -21,7 +23,16 @@ pub(super) fn raw_init_config(config: &InitConfig) -> esp8266_wifi_sys::wifi_ini
     // are intentionally exposed: the remaining switches are coupled to the
     // prebuilt Wi-Fi blobs and are not useful application-level knobs.
     esp8266_wifi_sys::wifi_init_config_t {
-        event_handler: Some(esp_event_send),
+        event_handler: {
+            #[cfg(target_arch = "xtensa")]
+            {
+                Some(esp_event_send)
+            }
+            #[cfg(not(target_arch = "xtensa"))]
+            {
+                None
+            }
+        },
         osi_funcs: core::ptr::null_mut(),
         qos_enable: 0,
         ampdu_rx_enable: 0,
@@ -89,6 +100,7 @@ pub(super) const fn raw_station_power_save(
 }
 
 #[inline(always)]
+#[cfg(target_arch = "xtensa")]
 pub(super) fn raw_ap_config(config: &AccessPointConfig) -> esp8266_wifi_sys::wifi_ap_config_t {
     let (password, auth_mode) = match config.credential() {
         ApCredential::Open => (&[][..], esp8266_wifi_sys::WIFI_AUTH_OPEN),
@@ -109,6 +121,7 @@ pub(super) fn raw_ap_config(config: &AccessPointConfig) -> esp8266_wifi_sys::wif
 }
 
 #[inline(always)]
+#[cfg(target_arch = "xtensa")]
 pub(super) const fn raw_mode(mode: RawMode) -> esp8266_wifi_sys::wifi_mode_t {
     match mode {
         RawMode::Sta => esp8266_wifi_sys::WIFI_MODE_STA,
@@ -117,6 +130,7 @@ pub(super) const fn raw_mode(mode: RawMode) -> esp8266_wifi_sys::wifi_mode_t {
     }
 }
 
+#[cfg(target_arch = "xtensa")]
 pub(super) struct RawScanConfigBuffers {
     ssid: [u8; 33],
     bssid: [u8; 6],
@@ -124,6 +138,7 @@ pub(super) struct RawScanConfigBuffers {
     has_bssid: bool,
 }
 
+#[cfg(target_arch = "xtensa")]
 impl RawScanConfigBuffers {
     pub(super) fn from_options(options: &ScanOptions) -> Self {
         let mut buffers = Self {
@@ -196,6 +211,7 @@ pub(super) fn map_promiscuous_filter(filter: PromiscuousFilter) -> u32 {
 }
 
 #[cfg(feature = "wifi-promiscuous")]
+#[cfg(target_arch = "xtensa")]
 pub(super) fn map_promiscuous_control_filter(filter: PromiscuousControlFilter) -> u32 {
     if filter.contains_all(PromiscuousControlFilter::all()) {
         return esp8266_wifi_sys::WIFI_PROMIS_CTRL_FILTER_MASK_ALL;
@@ -233,6 +249,7 @@ pub(super) fn map_promiscuous_control_filter(filter: PromiscuousControlFilter) -
 }
 
 #[cfg(feature = "wifi-promiscuous")]
+#[cfg(target_arch = "xtensa")]
 pub(super) fn map_promiscuous_packet_type(
     packet_type: esp8266_wifi_sys::wifi_promiscuous_pkt_type_t,
 ) -> PromiscuousPacketType {
@@ -245,6 +262,7 @@ pub(super) fn map_promiscuous_packet_type(
 }
 
 #[cfg(feature = "wifi-esp-now")]
+#[cfg(target_arch = "xtensa")]
 fn map_esp_now_interface(interface: EspNowInterface) -> esp8266_wifi_sys::wifi_interface_t {
     match interface {
         EspNowInterface::Station => esp8266_wifi_sys::WIFI_IF_STA,
@@ -253,6 +271,7 @@ fn map_esp_now_interface(interface: EspNowInterface) -> esp8266_wifi_sys::wifi_i
 }
 
 #[cfg(feature = "wifi-wps")]
+#[cfg(target_arch = "xtensa")]
 fn map_wps_mode(mode: WpsMode) -> esp8266_wifi_sys::wps_type_t {
     match mode {
         WpsMode::Pbc => esp8266_wifi_sys::WPS_TYPE_PBC,
@@ -261,6 +280,7 @@ fn map_wps_mode(mode: WpsMode) -> esp8266_wifi_sys::wps_type_t {
 }
 
 #[cfg(feature = "wifi-wps")]
+#[cfg(target_arch = "xtensa")]
 pub(super) fn raw_wps_config(config: &WpsConfig<'_>) -> esp8266_wifi_sys::esp_wps_config_t {
     let mut raw: esp8266_wifi_sys::esp_wps_config_t = unsafe { core::mem::zeroed() };
     raw.wps_type = map_wps_mode(config.mode());
@@ -284,6 +304,7 @@ pub(super) fn raw_wps_config(config: &WpsConfig<'_>) -> esp8266_wifi_sys::esp_wp
 }
 
 #[cfg(feature = "wifi-wps")]
+#[cfg(target_arch = "xtensa")]
 fn copy_wps_field(destination: &mut [core::ffi::c_char], source: &[u8]) {
     for (dst, src) in destination.iter_mut().zip(source) {
         *dst = *src as core::ffi::c_char;
@@ -291,6 +312,7 @@ fn copy_wps_field(destination: &mut [core::ffi::c_char], source: &[u8]) {
 }
 
 #[cfg(feature = "wifi-smartconfig")]
+#[cfg(target_arch = "xtensa")]
 pub(super) fn map_smartconfig_type(kind: SmartConfigType) -> esp8266_wifi_sys::smartconfig_type_t {
     match kind {
         SmartConfigType::EspTouch => esp8266_wifi_sys::SC_TYPE_ESPTOUCH,
@@ -301,6 +323,7 @@ pub(super) fn map_smartconfig_type(kind: SmartConfigType) -> esp8266_wifi_sys::s
 }
 
 #[cfg(feature = "wifi-smartconfig")]
+#[cfg(target_arch = "xtensa")]
 pub(super) fn map_smartconfig_type_from_raw(
     raw: esp8266_wifi_sys::smartconfig_type_t,
 ) -> SmartConfigType {
@@ -313,6 +336,7 @@ pub(super) fn map_smartconfig_type_from_raw(
 }
 
 #[cfg(feature = "wifi-smartconfig")]
+#[cfg(target_arch = "xtensa")]
 pub(super) fn nul_terminated_len(bytes: &[u8]) -> usize {
     bytes
         .iter()
@@ -321,6 +345,7 @@ pub(super) fn nul_terminated_len(bytes: &[u8]) -> usize {
 }
 
 #[cfg(feature = "wifi-esp-now")]
+#[cfg(target_arch = "xtensa")]
 pub(super) fn raw_esp_now_peer(peer: &EspNowPeerConfig) -> esp8266_wifi_sys::esp_now_peer_info_t {
     let mut raw: esp8266_wifi_sys::esp_now_peer_info_t = unsafe { core::mem::zeroed() };
     raw.peer_addr = *peer.peer_addr();
@@ -335,6 +360,7 @@ pub(super) fn raw_esp_now_peer(peer: &EspNowPeerConfig) -> esp8266_wifi_sys::esp
 
 #[cfg(test)]
 mod tests {
+    use super::super::StationCredential;
     use super::*;
 
     #[cfg(feature = "wifi-promiscuous")]
@@ -418,5 +444,66 @@ mod tests {
         assert_eq!(raw.left_continuous_rx_buf_num, 16);
         assert_eq!(raw.rx_max_single_pkt_len, 1_076);
         assert_eq!(raw.magic, esp8266_wifi_sys::WIFI_INIT_CONFIG_MAGIC);
+    }
+}
+
+/// SDK scan inputs remain stationary until scan completion/cancellation.
+#[cfg(target_arch = "xtensa")]
+pub(super) struct ScanStorage {
+    buffers: RawScanConfigBuffers,
+    raw: esp8266_wifi_sys::wifi_scan_config_t,
+}
+#[cfg(target_arch = "xtensa")]
+impl ScanStorage {
+    pub(super) fn new() -> Self {
+        Self {
+            buffers: RawScanConfigBuffers::from_options(&ScanOptions::all()),
+            raw: unsafe { core::mem::zeroed() },
+        }
+    }
+    pub(super) fn prepare(
+        &mut self,
+        options: &ScanOptions,
+    ) -> *const esp8266_wifi_sys::wifi_scan_config_t {
+        self.buffers = RawScanConfigBuffers::from_options(options);
+        self.raw = self.buffers.as_raw(options);
+        &self.raw
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "wifi-smartconfig"))]
+pub(super) struct SmartConfigStorage {
+    key: [i8; 17],
+    raw: esp8266_wifi_sys::smartconfig_start_config_t,
+}
+#[cfg(all(target_arch = "xtensa", feature = "wifi-smartconfig"))]
+impl SmartConfigStorage {
+    pub(super) fn new() -> Self {
+        Self {
+            key: [0; 17],
+            raw: esp8266_wifi_sys::smartconfig_start_config_t {
+                enable_log: true,
+                esp_touch_v2_enable_crypt: false,
+                esp_touch_v2_key: core::ptr::null_mut(),
+            },
+        }
+    }
+    pub(super) fn prepare(
+        &mut self,
+        config: &super::SmartConfigStartConfig,
+    ) -> *const esp8266_wifi_sys::smartconfig_start_config_t {
+        self.key = [0; 17];
+        if let Some(value) = config.esp_touch_v2_key_value() {
+            for (dst, src) in self.key.iter_mut().zip(value) {
+                *dst = src as i8;
+            }
+        }
+        self.raw.esp_touch_v2_enable_crypt = config.esp_touch_v2_key_value().is_some();
+        self.raw.esp_touch_v2_key = if self.raw.esp_touch_v2_enable_crypt {
+            self.key.as_mut_ptr()
+        } else {
+            core::ptr::null_mut()
+        };
+        &self.raw
     }
 }

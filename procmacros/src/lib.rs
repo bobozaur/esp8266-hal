@@ -195,29 +195,8 @@ pub fn interrupt(args: TokenStream, input: TokenStream) -> TokenStream {
         return error;
     }
 
-    let valid_signature = f.sig.constness.is_none()
-        && f.vis == Visibility::Inherited
-        && f.sig.abi.is_none()
-        && f.sig.inputs.is_empty()
-        && f.sig.generics.params.is_empty()
-        && f.sig.generics.where_clause.is_none()
-        && f.sig.variadic.is_none()
-        && match f.sig.output {
-            ReturnType::Default => true,
-            ReturnType::Type(_, ref ty) => match **ty {
-                Type::Tuple(ref tuple) => tuple.elems.is_empty(),
-                Type::Never(..) => true,
-                _ => false,
-            },
-        };
-
-    if !valid_signature {
-        return parse::Error::new(
-            f.span(),
-            "`#[interrupt]` handlers must have signature `[unsafe] fn() [-> !]`",
-        )
-        .to_compile_error()
-        .into();
+    if let Err(error) = validate_interrupt_signature(&f) {
+        return error.to_compile_error().into();
     }
 
     let (statics, stmts) = match extract_static_muts(f.block.stmts.iter().cloned()) {
@@ -273,7 +252,7 @@ pub fn interrupt(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let (ref cfgs, ref attrs) = extract_cfgs(f.attrs.clone());
 
-    let export_name = format!("__{}_interrupt", ident_s);
+    let export_name = interrupt_export_name(ident_s);
 
     quote!(
         #(#cfgs)*
@@ -383,6 +362,38 @@ fn check_attr_whitelist(attrs: &[Attribute], caller: WhiteListCaller) -> Result<
     Ok(())
 }
 
+fn validate_interrupt_signature(f: &ItemFn) -> syn::Result<()> {
+    let valid_signature = f.sig.asyncness.is_none()
+        && f.sig.constness.is_none()
+        && f.vis == Visibility::Inherited
+        && f.sig.abi.is_none()
+        && f.sig.inputs.is_empty()
+        && f.sig.generics.params.is_empty()
+        && f.sig.generics.where_clause.is_none()
+        && f.sig.variadic.is_none()
+        && match f.sig.output {
+            ReturnType::Default => true,
+            ReturnType::Type(_, ref ty) => match **ty {
+                Type::Tuple(ref tuple) => tuple.elems.is_empty(),
+                Type::Never(..) => true,
+                _ => false,
+            },
+        };
+
+    if !valid_signature {
+        return Err(parse::Error::new(
+            f.span(),
+            "`#[interrupt]` handlers must have signature `[unsafe] fn() [-> !]`",
+        ));
+    }
+
+    Ok(())
+}
+
+fn interrupt_export_name(interrupt: &Ident) -> String {
+    format!("__{}_interrupt", interrupt.to_string().to_ascii_lowercase())
+}
+
 /// Returns `true` if `attr.path` matches `name`
 fn eq(attr: &Attribute, name: &str) -> bool {
     attr.style == AttrStyle::Outer && attr.path().is_ident(name)
@@ -401,17 +412,8 @@ fn eq(attr: &Attribute, name: &str) -> bool {
 /// }
 /// ```
 ///
-/// # Async (WiFi / embassy) usage
-///
-/// Creates an embassy executor and spawns the user's async function as a task.
-/// The optional `Spawner` parameter lets you spawn additional tasks:
-///
-/// ```rust,ignore
-/// #[esp8266_hal::main]
-/// async fn main(spawner: embassy_executor::Spawner) {
-///     // your async application code
-/// }
-/// ```
+/// Initialize an application allocator/runtime explicitly in this synchronous
+/// entry before starting an optional async executor.
 #[proc_macro_attribute]
 pub fn main(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
@@ -428,27 +430,25 @@ pub fn main(args: TokenStream, input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
-    if f.sig.ident != "main" {
-        return parse::Error::new(
-            f.sig.ident.span(),
-            "`#[main]` must be applied to a function named `main`",
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    if f.sig.asyncness.is_some() {
-        main_async(f)
-    } else {
-        main_sync(f)
+    match expand_main(f) {
+        Ok(output) => output.into(),
+        Err(error) => error.to_compile_error().into(),
     }
 }
 
-/// Sync entry point — equivalent to `#[entry]` from xtensa-lx-rt.
-///
-/// Generates `#[export_name = "main"] pub unsafe extern "C" fn …() -> !`.
-fn main_sync(f: ItemFn) -> TokenStream {
-    // Must be `fn() -> !`
+fn expand_main(f: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    if f.sig.ident != "main" {
+        return Err(parse::Error::new(
+            f.sig.ident.span(),
+            "`#[main]` must be applied to a function named `main`",
+        ));
+    }
+    if let Some(asyncness) = f.sig.asyncness {
+        return Err(parse::Error::new(
+            asyncness.span(),
+            "async `#[main]` is not supported; use synchronous `#[main]`, initialize Runtime explicitly, then run the optional executor",
+        ));
+    }
     let valid_signature = f.sig.constness.is_none()
         && f.sig.abi.is_none()
         && f.sig.inputs.is_empty()
@@ -459,14 +459,11 @@ fn main_sync(f: ItemFn) -> TokenStream {
             ReturnType::Type(_, ref ty) => matches!(**ty, Type::Never(_)),
             _ => false,
         };
-
     if !valid_signature {
-        return parse::Error::new(
+        return Err(parse::Error::new(
             f.span(),
-            "sync `#[main]` function must have signature `[unsafe] fn() -> !`",
-        )
-        .to_compile_error()
-        .into();
+            "`#[main]` function must have signature `[unsafe] fn() -> !`",
+        ));
     }
 
     let attrs = &f.attrs;
@@ -478,35 +475,6 @@ fn main_sync(f: ItemFn) -> TokenStream {
         quote! { __esp8266_hal_user_main() }
     };
 
-    #[cfg(feature = "wifi")]
-    let output = quote! {
-        #(#attrs)*
-        #unsafety fn __esp8266_hal_user_main() -> ! {
-            #body
-        }
-
-        #[export_name = "main"]
-        pub extern "C" fn __esp8266_hal_main() -> ! {
-            // Keep sync WiFi examples runtime-neutral, but still enter
-            // through the SDK-style task/bootstrap context required by
-            // the WiFi blob and compat scheduler.
-            ::esp8266_hal::wifi::__init_runtime_heap();
-            ::esp8266_hal::wifi::__init_newlib_reent();
-
-            unsafe {
-                ::esp8266_hal::wifi::__run_sdk_main_task(
-                    __esp8266_hal_sync_main_task,
-                )
-            }
-        }
-
-        unsafe extern "C" fn __esp8266_hal_sync_main_task(_param: *mut ::core::ffi::c_void) {
-            ::esp8266_hal::wifi::__reclaim_boot_stack_reservation();
-            #user_main_call
-        }
-    };
-
-    #[cfg(not(feature = "wifi"))]
     let output = quote! {
         #(#attrs)*
         #unsafety fn __esp8266_hal_user_main() -> ! {
@@ -519,112 +487,64 @@ fn main_sync(f: ItemFn) -> TokenStream {
         }
     };
 
-    output.into()
+    Ok(output)
 }
 
-/// Async entry point — embassy executor + task setup.
-fn main_async(f: ItemFn) -> TokenStream {
-    #[cfg(not(feature = "wifi"))]
-    {
-        parse::Error::new(
-            f.sig.asyncness
-                .expect("main_async is only called for async functions")
-                .span(),
-            "async `#[main]` requires the `wifi` feature; enable an esp8266-hal Wi-Fi feature or use a synchronous `#[main]`",
-        )
-        .to_compile_error()
-        .into()
+#[cfg(test)]
+mod main_tests {
+    use super::expand_main;
+
+    #[test]
+    fn interrupt_export_matches_dispatcher_for_all_accepted_case_spellings() {
+        for name in ["uart", "UART", "Uart"] {
+            let ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+            assert_eq!(super::interrupt_export_name(&ident), "__uart_interrupt");
+        }
     }
 
-    #[cfg(feature = "wifi")]
-    {
-        main_async_wifi(f)
-    }
-}
-
-#[cfg(feature = "wifi")]
-fn main_async_wifi(f: ItemFn) -> TokenStream {
-    // Validate return type: must be () or -> !
-    match &f.sig.output {
-        ReturnType::Default => {} // () — fine
-        ReturnType::Type(_, ty) => match **ty {
-            Type::Never(..) => {} // -> ! — fine
-            _ => {
-                return parse::Error::new(
-                    f.sig.output.span(),
-                    "async `#[main]` function must return `()` or `-> !`",
-                )
-                .to_compile_error()
-                .into();
-            }
-        },
+    #[test]
+    fn interrupt_rejects_futures_and_incompatible_signatures() {
+        for declaration in [
+            "async fn uart() {}",
+            "const fn uart() {}",
+            "extern \"C\" fn uart() {}",
+            "fn uart<T>() {}",
+            "fn uart() where (): Copy {}",
+        ] {
+            let function = syn::parse_str(declaration).unwrap();
+            assert!(super::validate_interrupt_signature(&function).is_err());
+        }
+        let ordinary = syn::parse_quote! { unsafe fn uart() -> ! { loop {} } };
+        assert!(super::validate_interrupt_signature(&ordinary).is_ok());
     }
 
-    // Validate parameter count: 0 or 1
-    let has_spawner = match f.sig.inputs.len() {
-        0 => false,
-        1 => true,
-        _ => {
-            return parse::Error::new(
-                f.sig.inputs.span(),
-                "async `#[main]` function must take zero or one parameter (Spawner)",
-            )
-            .to_compile_error()
-            .into();
-        }
-    };
+    #[test]
+    fn entry_contains_only_the_application_call() {
+        let expanded = expand_main(syn::parse_quote! {
+            fn main() -> ! { loop {} }
+        })
+        .unwrap();
+        let file: syn::File = syn::parse2(expanded).unwrap();
+        assert_eq!(file.items.len(), 2);
+        let syn::Item::Fn(entry) = &file.items[1] else {
+            panic!("entry function")
+        };
+        assert_eq!(entry.block.stmts.len(), 1);
+        let syn::Stmt::Expr(syn::Expr::Call(call), None) = &entry.block.stmts[0] else {
+            panic!("entry must call the user function directly")
+        };
+        let syn::Expr::Path(path) = &*call.func else {
+            panic!("direct call")
+        };
+        assert!(path.path.is_ident("__esp8266_hal_user_main"));
+    }
 
-    let body = &f.block;
-    let attrs = &f.attrs;
-
-    // Build the task function and entry point. The task always takes a Spawner
-    // parameter (required by #[embassy_executor::task] when we pass it), and
-    // the entry point always passes the spawner from executor.run().
-    let (task_params, spawn_args) = if has_spawner {
-        let param = &f.sig.inputs[0];
-        (quote! { #param }, quote! { spawner })
-    } else {
-        (
-            quote! { _spawner: ::embassy_executor::Spawner },
-            quote! { spawner },
-        )
-    };
-
-    let output = quote! {
-        #[no_mangle]
-        pub extern "C" fn main() -> ! {
-            // Initialize the Rust heap (backed by esp-alloc).
-            ::esp8266_hal::wifi::__init_runtime_heap();
-
-            // Initialize newlib's _global_impure_ptr so C library functions
-            // (calloc, printf, etc.) used by WiFi blob don't crash.
-            ::esp8266_hal::wifi::__init_newlib_reent();
-
-            unsafe { ::esp8266_hal::wifi::__run_sdk_main_task(__esp8266_hal_executor_task) }
-        }
-
-        unsafe extern "C" fn __esp8266_hal_executor_task(_param: *mut ::core::ffi::c_void) {
-            ::esp8266_hal::wifi::__reclaim_boot_stack_reservation();
-            static __EXECUTOR: ::esp8266_hal::wifi::__StaticCell<
-                ::esp8266_hal::wifi::executor::Executor,
-            > = ::esp8266_hal::wifi::__StaticCell::new();
-            let executor = __EXECUTOR.init(::esp8266_hal::wifi::executor::Executor::new());
-            executor.run(|spawner| {
-                spawner.must_spawn(__esp8266_hal_bootstrap_task(spawner));
-            })
-        }
-
-        #[::embassy_executor::task]
-        async fn __esp8266_hal_bootstrap_task(spawner: ::embassy_executor::Spawner) {
-            spawner.must_spawn(__esp8266_hal_main_task(#spawn_args));
-        }
-
-        #(#attrs)*
-        #[::embassy_executor::task]
-        async fn __esp8266_hal_main_task(#task_params) {
-            #body
-        }
-    };
-
-    output.into()
+    #[test]
+    fn async_entry_requires_explicit_executor_setup() {
+        let error = expand_main(syn::parse_quote! {
+            async fn main() {}
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("initialize Runtime explicitly"));
+    }
 }

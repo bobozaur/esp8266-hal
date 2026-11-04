@@ -12,7 +12,7 @@ use core::{
 
 use esp8266_wifi_sys as sys;
 
-use crate::wifi::compat::{memory, port, task};
+use crate::wifi::compat::task;
 
 const CPU_FREQUENCY_HZ: u32 = 80_000_000;
 const PTHREAD_KEYS: usize = 3;
@@ -206,20 +206,6 @@ pub extern "C" fn xtbsp_clock_freq_hz() -> u32 {
     CPU_FREQUENCY_HZ
 }
 
-/// Timer compare interrupt entry used by the HAL's level-one dispatcher.
-#[no_mangle]
-#[link_section = ".rwtext"]
-pub unsafe extern "C" fn __ccompare_interrupt(frame: *mut c_void) {
-    unsafe { port::xPortSysTickHandle(frame) }
-}
-
-/// Software interrupt entry used for deferred compat task switches.
-#[no_mangle]
-#[link_section = ".rwtext"]
-pub unsafe extern "C" fn __soft_interrupt(frame: *mut c_void) {
-    unsafe { port::SoftIsrHdl(frame) }
-}
-
 #[inline(never)]
 fn busy_wait(iterations: u32) {
     for _ in 0..iterations {
@@ -228,57 +214,12 @@ fn busy_wait(iterations: u32) {
     }
 }
 
-/// Avoid the SDK ROM implementation's unbounded UART FIFO polling while the
-/// PHY temporarily changes clock configuration.
-#[no_mangle]
-pub extern "C" fn uart_tx_wait_idle(_uart: u8) {
-    busy_wait(80_000);
-}
-
 /// The IDF PM implementation polls RTC wake bits that are not configured by
 /// this bare-metal boot path. A bounded settling delay preserves its caller's
 /// timing contract without risking a permanent hang.
-#[no_mangle]
+#[export_name = "__esp8266_hal_pm_wait4wakeup"]
 pub extern "C" fn pm_wait4wakeup(_mode: i32) {
     busy_wait(800_000);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn _malloc_r(_reent: *mut c_void, size: usize) -> *mut c_void {
-    let Ok(size) = u32::try_from(size) else {
-        return ptr::null_mut();
-    };
-    unsafe { memory::pvPortMalloc(size) }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn _free_r(_reent: *mut c_void, pointer: *mut c_void) {
-    unsafe { memory::vPortFree(pointer) }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn _realloc_r(
-    _reent: *mut c_void,
-    pointer: *mut c_void,
-    size: usize,
-) -> *mut c_void {
-    let Ok(size) = u32::try_from(size) else {
-        return ptr::null_mut();
-    };
-    unsafe { memory::esp8266_hal_realloc(pointer, size) }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn _calloc_r(_reent: *mut c_void, count: usize, size: usize) -> *mut c_void {
-    let (Ok(count), Ok(size)) = (u32::try_from(count), u32::try_from(size)) else {
-        return ptr::null_mut();
-    };
-    unsafe { memory::pvPortCalloc(count, size) }
-}
-
-#[no_mangle]
-pub extern "C" fn _sbrk_r(_reent: *mut c_void, _increment: isize) -> *mut c_void {
-    usize::MAX as *mut c_void
 }
 
 #[no_mangle]

@@ -7,11 +7,11 @@ publish = false
 [workspace]
 
 [dependencies]
-esp8266-hal = { path = "../../..", default-features = false, features = ["interrupt", "rt", "wifi"] }
+esp8266-hal = { path = "../../..", default-features = false, features = ["wifi"] }
 panic-halt = "1"
-static_cell = "2"
+esp-alloc = "=0.4.0"
 
 [profile.release]
-codegen-units = 1
+codegen-units = 8
 lto = "thin"
 opt-level = "s"

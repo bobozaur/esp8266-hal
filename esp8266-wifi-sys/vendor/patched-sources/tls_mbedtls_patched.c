@@ -655,6 +655,9 @@ struct tls_connection * tls_connection_init(void *tls_ctx)
 
 void tls_connection_deinit(void *tls_ctx, struct tls_connection *conn)
 {
+	if (conn == NULL)
+		return;
+
 	/* Free ssl ctx and data */
 	tls_mbedtls_conn_delete((tls_context_t *) conn->tls);
 	os_free(conn->tls);
@@ -717,16 +720,8 @@ static int esp8266_hal_tls_release_in_buf_for_client_flight(mbedtls_ssl_context 
 	return 1;
 }
 
-static int esp8266_hal_tls_restore_in_buf_after_client_flight(mbedtls_ssl_context *ssl,
-							      int released)
+static int esp8266_hal_tls_restore_in_buf_after_client_flight(mbedtls_ssl_context *ssl)
 {
-	if (!released)
-		return 0;
-
-	{
-		extern void esp8266_hal_eap_rsa_release(void);
-		esp8266_hal_eap_rsa_release();
-	}
 	ssl->in_buf = mbedtls_calloc(1, MBEDTLS_SSL_IN_BUFFER_LEN);
 	if (ssl->in_buf == NULL)
 		return MBEDTLS_ERR_SSL_ALLOC_FAILED;
@@ -764,7 +759,7 @@ int esp8266_hal_tls_restore_deferred_input(struct tls_connection *conn)
 	if (!conn->tls_io_data.in_buf_restore_pending)
 		return 0;
 
-	ret = esp8266_hal_tls_restore_in_buf_after_client_flight(&conn->tls->ssl, 1);
+	ret = esp8266_hal_tls_restore_in_buf_after_client_flight(&conn->tls->ssl);
 	if (ret == 0)
 		conn->tls_io_data.in_buf_restore_pending = 0;
 
@@ -778,7 +773,6 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 {
 	tls_context_t *tls = conn->tls;
 	int ret = 0;
-	int esp8266_hal_eap_server_input_reserved = 0;
 
 	/* data freed by sender */
 	conn->tls_io_data.out_data = NULL;
@@ -788,9 +782,6 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 	conn->tls_io_data.in_ext_len = 0;
 	conn->tls_io_data.in_ext_pos = 0;
 	if (wpabuf_len(in_data)) {
-		extern void esp8266_hal_eap_rsa_reserve(void);
-		esp8266_hal_eap_rsa_reserve();
-		esp8266_hal_eap_server_input_reserved = 1;
 		conn->tls_io_data.in_ext_data = wpabuf_head_u8(in_data);
 		conn->tls_io_data.in_ext_len = wpabuf_len(in_data);
 		conn->tls_io_data.in_ext_pos = 0;
@@ -839,8 +830,6 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 		}
 
 		/* trigger state machine multiple times to reach till finish */
-		extern void esp8266_hal_eap_rsa_reserve(void);
-		extern void esp8266_hal_eap_rsa_release(void);
 		int esp8266_hal_client_flight_in_buf_released;
 		esp8266_hal_client_flight_in_buf_released =
 			esp8266_hal_tls_release_in_buf_for_client_flight(&tls->ssl);
@@ -851,14 +840,12 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 			if (ret != 0)
 				goto esp8266_hal_client_flight_done;
 		}
-		esp8266_hal_eap_rsa_reserve();
 		while (tls->ssl.state <= MBEDTLS_SSL_CLIENT_FINISHED) {
 			ret = mbedtls_ssl_handshake_step(&tls->ssl);
 			if (ret < 0) {
 				break;
 			}
 		}
-		esp8266_hal_eap_rsa_release();
 	esp8266_hal_client_flight_done:
 		(void)esp8266_hal_client_flight_in_buf_released;
 	}
@@ -880,10 +867,6 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 	}
 
 end:
-	if (esp8266_hal_eap_server_input_reserved) {
-		extern void esp8266_hal_eap_rsa_release(void);
-		esp8266_hal_eap_rsa_release();
-	}
 	conn->tls_io_data.in_ext_data = NULL;
 	conn->tls_io_data.in_ext_len = 0;
 	conn->tls_io_data.in_ext_pos = 0;

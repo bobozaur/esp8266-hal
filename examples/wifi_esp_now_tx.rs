@@ -1,4 +1,4 @@
-//! ESP-NOW broadcast TX smoke validation using the typestate WiFi core.
+//! ESP-NOW broadcast TX smoke validation using the Wi-Fi controller.
 
 #![no_std]
 #![no_main]
@@ -6,25 +6,20 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 
+mod support;
+use esp8266_hal::timer::TimerExt;
+use support::log_line;
+
 use esp8266_hal::wifi::{
-    Channel, Esp8266TargetBackend, EspNowPeerConfig, EspNowSendStatus, EspNowSession, InitConfig,
-    StaMode, WifiDriver, WifiResources,
+    Channel, EspNowPeerConfig, EspNowSendStatus, EspNowSession, InitConfig, Wifi,
 };
 use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
-type EspNowResources = WifiResources<8, 4, 1, 0, 0>;
-type EspNowBackend = Esp8266TargetBackend<'static, 8, 4, 1, 0, 0>;
-type EspNowTxSession<'a> = EspNowSession<'a, StaMode, EspNowBackend, 8, 4, 1, 0, 0>;
+type EspNowTxSession<'a> = EspNowSession<'a>;
 
-static WIFI_RESOURCES: StaticCell<EspNowResources> = StaticCell::new();
+static WIFI: StaticCell<Wifi> = StaticCell::new();
 const ESP_NOW_PMK: [u8; 16] = [0x24; 16];
-
-#[inline(always)]
-fn log_line(message: &[u8]) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_newline();
-}
 
 fn hex_value(byte: u8) -> Option<u8> {
     match byte {
@@ -94,17 +89,33 @@ fn add_configured_peer(session: &mut EspNowTxSession<'_>, channel: Channel) -> R
 }
 
 #[esp8266_hal::main]
-async fn main(_spawner: Spawner) {
+fn main() -> ! {
+    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let (_, timer2) = peripherals.TIMER.timers();
+    let runtime = support::init(timer2);
+    static EXECUTOR: StaticCell<esp8266_hal::wifi::executor::Executor> = StaticCell::new();
+    EXECUTOR
+        .init(esp8266_hal::wifi::executor::Executor::new())
+        .run(runtime, |spawner| {
+            spawner.must_spawn(app_main(spawner, runtime));
+        })
+}
+
+#[embassy_executor::task]
+async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtime) {
     log_line(b"wifi_esp_now_tx start");
 
-    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let driver = WifiDriver::new(resources)
-        .initialize(InitConfig::new(14, 4, 4).expect("init config"))
-        .expect("wifi init");
+    let mut init = InitConfig::new(14, 4, 4).expect("init config");
+    init.queues.esp_now_peers = 1;
+    let wifi = WIFI.init(Wifi::new(runtime, init).expect("wifi init"));
+    let (mut driver, _) = wifi.split();
     log_line(b"wifi init ok");
 
-    let mut driver = match driver.enable_sta().and_then(|driver| driver.start()) {
-        Ok(driver) => driver,
+    match driver
+        .enable_station()
+        .and_then(|()| driver.start_blocking(1_000))
+    {
+        Ok(()) => {}
         Err(_error) => {
             log_line(b"esp-now start err");
             loop {

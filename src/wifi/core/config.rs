@@ -1,6 +1,7 @@
 use heapless::Vec;
 
-use super::error::{ConfigError, StaticIpv4Error};
+use super::error::ConfigError;
+pub use core::net::Ipv4Addr;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ssid(Vec<u8, 32>);
@@ -210,88 +211,7 @@ impl TryFrom<u8> for Channel {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Ipv4Addr([u8; 4]);
-
-impl Ipv4Addr {
-    pub const UNSPECIFIED: Self = Self([0, 0, 0, 0]);
-
-    pub const fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
-        Self([a, b, c, d])
-    }
-
-    pub const fn octets(self) -> [u8; 4] {
-        self.0
-    }
-
-    pub const fn is_unspecified(self) -> bool {
-        self.0[0] == 0 && self.0[1] == 0 && self.0[2] == 0 && self.0[3] == 0
-    }
-
-    fn as_u32(self) -> u32 {
-        u32::from_be_bytes(self.0)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StaticIpv4Config {
-    address: Ipv4Addr,
-    prefix_len: u8,
-    gateway: Option<Ipv4Addr>,
-}
-
-impl StaticIpv4Config {
-    pub fn new(
-        address: Ipv4Addr,
-        prefix_len: u8,
-        gateway: Option<Ipv4Addr>,
-    ) -> Result<Self, StaticIpv4Error> {
-        if prefix_len > 32 {
-            return Err(StaticIpv4Error::InvalidPrefix);
-        }
-        if address.is_unspecified() {
-            return Err(StaticIpv4Error::UnspecifiedAddress);
-        }
-        if let Some(gateway) = gateway {
-            if gateway.is_unspecified() {
-                return Err(StaticIpv4Error::UnspecifiedGateway);
-            }
-            if !same_ipv4_subnet(address, gateway, prefix_len) {
-                return Err(StaticIpv4Error::GatewayOutsideSubnet);
-            }
-        }
-
-        Ok(Self {
-            address,
-            prefix_len,
-            gateway,
-        })
-    }
-
-    pub const fn address(self) -> Ipv4Addr {
-        self.address
-    }
-
-    pub const fn prefix_len(self) -> u8 {
-        self.prefix_len
-    }
-
-    pub const fn gateway(self) -> Option<Ipv4Addr> {
-        self.gateway
-    }
-}
-
-fn same_ipv4_subnet(left: Ipv4Addr, right: Ipv4Addr, prefix_len: u8) -> bool {
-    let mask = if prefix_len == 0 {
-        0
-    } else {
-        u32::MAX << (32 - u32::from(prefix_len))
-    };
-
-    left.as_u32() & mask == right.as_u32() & mask
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ApStationInfo {
     mac: [u8; 6],
     phy_11b: bool,
@@ -509,7 +429,7 @@ impl AuthenticationMethod {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccessPointRecord {
-    ssid: Ssid,
+    ssid: Vec<u8, 32>,
     bssid: [u8; 6],
     channel: Channel,
     rssi: i8,
@@ -536,7 +456,7 @@ impl AccessPointRecord {
             .map_err(|_| ConfigError::SsidTooLong)?;
 
         Ok(Self {
-            ssid: Ssid(ssid_bytes),
+            ssid: ssid_bytes,
             bssid,
             channel,
             rssi,
@@ -546,7 +466,7 @@ impl AccessPointRecord {
     }
 
     pub fn ssid(&self) -> &[u8] {
-        self.ssid.as_bytes()
+        &self.ssid
     }
 
     pub const fn bssid(&self) -> [u8; 6] {
@@ -699,25 +619,18 @@ const _: () = assert!(
 #[cfg(feature = "wifi-enterprise")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wpa2EnterpriseMaterialFormat {
-    /// PEM text. The target backend requires these slices to include a trailing
+    /// PEM text. The driver requires these slices to include a trailing
     /// NUL byte because the ESP8266 RTOS SDK passes them through C string code.
     Pem,
-    /// ASN.1 DER bytes. DER material is length-delimited and must not be
-    /// NUL-terminated for the HAL to accept it.
+    /// ASN.1 DER bytes. Material is length-delimited; no trailing NUL is required.
     Der,
 }
 
 /// Optional client certificate material forwarded to the SDK supplicant.
 ///
-/// The repo-local hardware matrix currently validates the username/password
-/// Enterprise path. Client certificate fields are preserved by the typed API and
-/// forwarded to the SDK when supplied, but they need a dedicated EAP-TLS fixture
-/// before they should be treated as hardware-green.
-///
-/// The ESP8266 RTOS SDK stores pointers to these buffers. PEM inputs must be
-/// NUL-terminated; DER inputs are length-delimited. The target backend rejects
-/// malformed PEM/DER material rather than forwarding a broken configuration to
-/// the SDK.
+/// The ESP8266 RTOS SDK retains these static buffers. The driver checks PEM
+/// termination and the DER ASN.1 sequence prefix before forwarding the inputs;
+/// the SDK parses and validates the certificate and key contents.
 #[cfg(feature = "wifi-enterprise")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Wpa2EnterpriseClientCertificate {
@@ -781,10 +694,8 @@ impl Wpa2EnterpriseClientCertificate {
 
 /// WPA2 Enterprise station credentials.
 ///
-/// `new` covers the validated username/password path used by the OpenWrt/RADIUS
-/// hardware fixture. Optional CA and client certificate fields expose the
-/// corresponding ESP8266 RTOS SDK supplicant hooks for deployments that require
-/// certificate validation or EAP-TLS-style client material. PEM certificate
+/// Username/password, optional CA validation, and optional client certificates
+/// configure the ESP8266 RTOS SDK supplicant. PEM certificate
 /// slices must include a trailing NUL byte for the ESP8266 RTOS SDK; DER slices
 /// should be provided through the DER-specific constructors.
 #[cfg(feature = "wifi-enterprise")]
@@ -1040,11 +951,22 @@ impl<'a> MixedConfig<'a> {
     }
 }
 
+/// Native SDK buffer counts and independently sized Rust queues.
+///
+/// Native buffers persist across Wi-Fi stop and drop. Once native buffer
+/// initialization begins, later Wi-Fi objects in the same boot must use the
+/// same RX buffer, RX packet, and TX buffer counts, even if a later SDK setup
+/// step failed. Changing those counts requires a reset. Initialization that
+/// fails before native buffer setup does not lock the counts.
+///
+/// [`QueueConfig`] may change between Wi-Fi objects; its storage is owned and
+/// allocated separately for each object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InitConfig {
     rx_buf_num: u8,
     rx_pkt_num: u8,
     tx_buf_num: u8,
+    pub queues: QueueConfig,
 }
 
 impl InitConfig {
@@ -1070,6 +992,7 @@ impl InitConfig {
             rx_buf_num,
             rx_pkt_num,
             tx_buf_num,
+            queues: QueueConfig::default(),
         })
     }
 
@@ -1180,6 +1103,53 @@ impl Default for InitConfig {
             rx_buf_num: 16,
             rx_pkt_num: 7,
             tx_buf_num: 6,
+            queues: QueueConfig::default(),
+        }
+    }
+}
+
+/// Queue storage is allocated once by Wifi initialization. Zero disables a queue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueConfig {
+    pub station_rx: usize,
+    pub access_point_rx: usize,
+    pub frame_bytes: usize,
+    pub events: usize,
+    pub esp_now_peers: usize,
+    pub esp_now_rx: usize,
+    pub promiscuous_rx: usize,
+}
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            station_rx: 4,
+            access_point_rx: 0,
+            frame_bytes: 1514,
+            events: 8,
+            esp_now_peers: 0,
+            esp_now_rx: 0,
+            promiscuous_rx: 0,
+        }
+    }
+}
+
+/// Radio mode and its complete application-selected configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Configuration<'a> {
+    Station(ClientConfig<'a>),
+    AccessPoint(AccessPointConfig),
+    Mixed(MixedConfig<'a>),
+}
+
+impl Default for AccessPointRecord {
+    fn default() -> Self {
+        Self {
+            ssid: Vec::new(),
+            bssid: [0; 6],
+            channel: Channel(1),
+            rssi: 0,
+            authentication: AuthenticationMethod::None,
+            wps: false,
         }
     }
 }

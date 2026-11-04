@@ -1,4 +1,4 @@
-//! WPS provisioning example using the typestate WiFi core.
+//! WPS provisioning example using the Wi-Fi controller.
 
 #![no_std]
 #![no_main]
@@ -6,26 +6,21 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 
-use esp8266_hal::wifi::{
-    DriverError, InitConfig, Ssid, WifiDriver, WifiResources, WpsConfig, WpsEvent, WpsPin,
-};
+mod support;
+use esp8266_hal::timer::TimerExt;
+use support::log_line;
+
+use esp8266_hal::wifi::{InitConfig, Ssid, Wifi, WpsConfig, WpsEvent, WpsPin};
 use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
-type WpsResources = WifiResources<8, 4, 0, 0, 0>;
 const DEFAULT_MAX_WPS_ATTEMPTS: u8 = 8;
 
-static WIFI_RESOURCES: StaticCell<WpsResources> = StaticCell::new();
+static WIFI: StaticCell<Wifi> = StaticCell::new();
 
-#[inline(always)]
-fn log_line(message: &[u8]) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_newline();
-}
-
-fn log_disconnect_reason(resources: &WpsResources) {
+fn log_disconnect_reason(reason: Option<u8>) {
     esp8266_hal::logger::write_bytes(b" disconnect=");
-    esp8266_hal::logger::write_dec_u32(resources.last_disconnect_reason().unwrap_or(0) as u32);
+    esp8266_hal::logger::write_dec_u32(reason.unwrap_or(0) as u32);
 }
 
 const fn should_retry_wps_disconnect(reason: Option<u8>) -> bool {
@@ -47,18 +42,33 @@ fn selected_max_wps_attempts() -> u8 {
 }
 
 #[esp8266_hal::main]
-async fn main(_spawner: Spawner) {
+fn main() -> ! {
+    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let (_, timer2) = peripherals.TIMER.timers();
+    let runtime = support::init(timer2);
+    static EXECUTOR: StaticCell<esp8266_hal::wifi::executor::Executor> = StaticCell::new();
+    EXECUTOR
+        .init(esp8266_hal::wifi::executor::Executor::new())
+        .run(runtime, |spawner| {
+            spawner.must_spawn(app_main(spawner, runtime));
+        })
+}
+
+#[embassy_executor::task]
+async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtime) {
     log_line(b"wifi_wps start");
 
-    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let init_config = InitConfig::new(14, 4, 4).expect("init config");
-    let driver = WifiDriver::new(resources)
-        .initialize(init_config)
-        .expect("wifi init");
+    let init = InitConfig::new(14, 4, 4).expect("init config");
+
+    let wifi = WIFI.init(Wifi::new(runtime, init).expect("wifi init"));
+    let (mut driver, _) = wifi.split();
     log_line(b"wifi init ok");
 
-    let mut driver = match driver.enable_sta().and_then(|driver| driver.start()) {
-        Ok(driver) => driver,
+    match driver
+        .enable_station()
+        .and_then(|()| driver.start_blocking(1_000))
+    {
+        Ok(()) => {}
         Err(_error) => {
             log_line(b"wps sta start err");
             loop {
@@ -91,31 +101,7 @@ async fn main(_spawner: Spawner) {
     esp8266_hal::logger::write_newline();
     if let Err(error) = session.start(&config) {
         esp8266_hal::logger::write_bytes(b"wps start detail");
-        match error {
-            DriverError::BackendError(code) => {
-                esp8266_hal::logger::write_bytes(b" code=");
-                if code < 0 {
-                    esp8266_hal::logger::write_byte(b'-');
-                    esp8266_hal::logger::write_dec_u32(code.unsigned_abs());
-                } else {
-                    esp8266_hal::logger::write_dec_u32(code as u32);
-                }
-            }
-            DriverError::BackendRejected => esp8266_hal::logger::write_bytes(b" rejected"),
-            DriverError::Timeout => esp8266_hal::logger::write_bytes(b" timeout"),
-            DriverError::StaStartTimeout => esp8266_hal::logger::write_bytes(b" sta-start-timeout"),
-            DriverError::Disconnected => esp8266_hal::logger::write_bytes(b" disconnected"),
-            DriverError::EventOverflow => esp8266_hal::logger::write_bytes(b" event-overflow"),
-            DriverError::PacketOverflow => esp8266_hal::logger::write_bytes(b" packet-overflow"),
-            DriverError::PeerOverflow => esp8266_hal::logger::write_bytes(b" peer-overflow"),
-            DriverError::PayloadTooLong => esp8266_hal::logger::write_bytes(b" payload-too-long"),
-            DriverError::InvalidFrameSize => {
-                esp8266_hal::logger::write_bytes(b" invalid-frame-size")
-            }
-            DriverError::OutOfMemory => esp8266_hal::logger::write_bytes(b" out-of-memory"),
-            DriverError::NotStarted => esp8266_hal::logger::write_bytes(b" not-started"),
-            DriverError::WouldBlock => esp8266_hal::logger::write_bytes(b" would-block"),
-        }
+        support::log_debug(&error);
         esp8266_hal::logger::write_newline();
         log_line(b"wps start err");
         loop {
@@ -126,7 +112,7 @@ async fn main(_spawner: Spawner) {
 
     loop {
         match session.next_event() {
-            Some(WpsEvent::Succeeded) => {
+            Ok(Some(WpsEvent::Succeeded)) => {
                 let _ = session.stop();
                 esp8266_hal::logger::write_bytes(b"wps-ok");
                 esp8266_hal::logger::write_newline();
@@ -134,7 +120,7 @@ async fn main(_spawner: Spawner) {
                     Timer::after(Duration::from_secs(60)).await;
                 }
             }
-            Some(WpsEvent::Failed { reason }) => {
+            Ok(Some(WpsEvent::Failed { reason })) => {
                 if wps_attempt < max_wps_attempts {
                     let _ = session.stop();
                     Timer::after(Duration::from_millis(1000)).await;
@@ -151,11 +137,11 @@ async fn main(_spawner: Spawner) {
                     esp8266_hal::logger::write_bytes(b" reason=");
                     esp8266_hal::logger::write_dec_u32(reason);
                 }
-                log_disconnect_reason(resources);
+                log_disconnect_reason(session.last_disconnect_reason());
                 esp8266_hal::logger::write_bytes(b" wps-failed");
                 esp8266_hal::logger::write_newline();
             }
-            Some(WpsEvent::TimedOut) => {
+            Ok(Some(WpsEvent::TimedOut)) => {
                 if wps_attempt < max_wps_attempts {
                     let _ = session.stop();
                     Timer::after(Duration::from_millis(750)).await;
@@ -168,16 +154,16 @@ async fn main(_spawner: Spawner) {
                     }
                 }
                 esp8266_hal::logger::write_bytes(b"wps-timeout-detail");
-                log_disconnect_reason(resources);
+                log_disconnect_reason(session.last_disconnect_reason());
                 esp8266_hal::logger::write_bytes(b" wps-timeout");
                 esp8266_hal::logger::write_newline();
             }
-            Some(WpsEvent::Pin { pin }) => {
+            Ok(Some(WpsEvent::Pin { pin })) => {
                 esp8266_hal::logger::write_bytes(b"wps pin=");
                 esp8266_hal::logger::write_bytes(pin.as_bytes());
                 esp8266_hal::logger::write_newline();
             }
-            Some(WpsEvent::Disconnected { reason }) => {
+            Ok(Some(WpsEvent::Disconnected { reason })) => {
                 esp8266_hal::logger::write_bytes(b"wps-sta-disconnect");
                 if let Some(reason) = reason {
                     esp8266_hal::logger::write_bytes(b" reason=");
@@ -197,10 +183,14 @@ async fn main(_spawner: Spawner) {
                     }
                 } else if !should_retry_wps_disconnect(reason) {
                     esp8266_hal::logger::write_bytes(b"wps-fail-detail");
-                    log_disconnect_reason(resources);
+                    log_disconnect_reason(session.last_disconnect_reason());
                     esp8266_hal::logger::write_bytes(b" wps-failed");
                     esp8266_hal::logger::write_newline();
                 }
+            }
+            Err(error) => {
+                support::log_debug(&error);
+                log_line(b"provisioning event err");
             }
             _ => {}
         }

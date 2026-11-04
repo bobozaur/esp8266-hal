@@ -1,16 +1,16 @@
 #[cfg(feature = "wifi-smartconfig")]
-use esp8266_hal::wifi_core::SmartConfigTimeout;
-use esp8266_hal::wifi_core::{
+use esp8266_hal::wifi::SmartConfigTimeout;
+use esp8266_hal::wifi::{
     AccessPointConfig, ApClientLimit, BeaconInterval, Channel, ClientConfig, ConfigError,
     InitConfig, Passphrase, Ssid, StationCredential, StationPowerSave,
 };
 #[cfg(feature = "wifi-enterprise")]
-use esp8266_hal::wifi_core::{
+use esp8266_hal::wifi::{
     EnterpriseIdentity, EnterprisePassword, EnterpriseUsername, Wpa2EnterpriseClientCertificate,
     Wpa2EnterpriseCredentials, Wpa2EnterpriseMaterialFormat,
 };
 #[cfg(feature = "wifi-wps")]
-use esp8266_hal::wifi_core::{WpsConfig, WpsFactoryInfo, WpsMode, WpsPin};
+use esp8266_hal::wifi::{WpsConfig, WpsFactoryInfo, WpsMode, WpsPin};
 
 #[test]
 fn ssid_rejects_more_than_32_bytes() {
@@ -366,4 +366,17 @@ fn init_config_rejects_counts_outside_sdk_ranges() {
         Err(ConfigError::InvalidTxBufferCount(3))
     );
     assert_eq!(InitConfig::new(14, 4, 4).unwrap().rx_buf_num(), 14);
+}
+
+#[cfg(feature = "wifi-wps")]
+#[test]
+fn wps_factory_fields_cannot_be_native_format_strings() {
+    for index in 0..4 {
+        let mut fields: [&[u8]; 4] = [b"safe"; 4];
+        fields[index] = b"%n";
+        assert_eq!(
+            WpsFactoryInfo::new(fields[0], fields[1], fields[2], fields[3]),
+            Err(ConfigError::WpsFactoryInfoContainsPercent)
+        );
+    }
 }

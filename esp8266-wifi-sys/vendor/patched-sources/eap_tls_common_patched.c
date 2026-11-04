@@ -603,28 +603,20 @@ int eap_peer_tls_process_helper(struct eap_sm *sm, struct eap_ssl_data *data,
 				struct wpabuf **out_data)
 {
 	int ret = 0;
-	int esp8266_hal_eap_input_reserved = 0;
 
 	*out_data = NULL;
 
 	if (data->tls_out && wpabuf_len(data->tls_out) > 0 && in_len > 0) {
 		wpa_printf(MSG_DEBUG, "SSL: Received non-ACK when output "
 			   "fragments are waiting to be sent out");
-		if (esp8266_hal_eap_input_reserved) {
-			extern void esp8266_hal_eap_rsa_release(void);
-			esp8266_hal_eap_rsa_release();
-		}
 		return -1;
 	}
 
 	if (in_len > 0) {
 		extern int esp8266_hal_tls_restore_deferred_input(struct tls_connection *conn);
-		extern void esp8266_hal_eap_rsa_reserve(void);
 		ret = esp8266_hal_tls_restore_deferred_input(data->conn);
 		if (ret != 0)
 			return -1;
-		esp8266_hal_eap_rsa_reserve();
-		esp8266_hal_eap_input_reserved = 1;
 	}
 
 	if (data->tls_out == NULL || wpabuf_len(data->tls_out) == 0) {
@@ -639,10 +631,6 @@ int eap_peer_tls_process_helper(struct eap_sm *sm, struct eap_ssl_data *data,
 			 * Input processing failed (res = -1) or more data is
 			 * needed (res = 1).
 			 */
-			if (esp8266_hal_eap_input_reserved) {
-				extern void esp8266_hal_eap_rsa_release(void);
-				esp8266_hal_eap_rsa_release();
-			}
 			return res;
 		}
 
@@ -659,10 +647,6 @@ int eap_peer_tls_process_helper(struct eap_sm *sm, struct eap_ssl_data *data,
 		 * processing.
 		 */
 		eap_peer_tls_reset_output(data);
-		if (esp8266_hal_eap_input_reserved) {
-			extern void esp8266_hal_eap_rsa_release(void);
-			esp8266_hal_eap_rsa_release();
-		}
 		return -1;
 	}
 
@@ -683,24 +667,12 @@ int eap_peer_tls_process_helper(struct eap_sm *sm, struct eap_ssl_data *data,
 		wpa_printf(MSG_DEBUG, "SSL: No data to be sent out");
 		wpabuf_free(data->tls_out);
 		data->tls_out = NULL;
-		if (esp8266_hal_eap_input_reserved) {
-			extern void esp8266_hal_eap_rsa_release(void);
-			esp8266_hal_eap_rsa_release();
-		}
 		return 1;
 	}
 
 	/* Send the pending message (in fragments, if needed). */
 	ret = eap_tls_process_output(data, eap_type, peap_version, id, ret,
 				      out_data);
-	if (ret >= 0 && in_len == 0 && *out_data != NULL) {
-		extern void esp8266_hal_eap_rsa_boost(void);
-		esp8266_hal_eap_rsa_boost();
-	}
-	if (esp8266_hal_eap_input_reserved) {
-		extern void esp8266_hal_eap_rsa_release(void);
-		esp8266_hal_eap_rsa_release();
-	}
 	return ret;
 }
 

@@ -1,7 +1,8 @@
-use esp8266_hal::wifi_core::{
-    DhcpMessageType, DhcpServer, DhcpServerConfig, DhcpServerError, Ipv4Addr,
-};
-
+#[path = "../examples/support/dhcp.rs"]
+#[allow(dead_code)] // Other application helpers are outside these protocol tests.
+mod dhcp;
+use core::net::Ipv4Addr;
+use dhcp::{DhcpMessageType, DhcpServer, DhcpServerConfig, DhcpServerError};
 const DHCP_MIN_LEN: usize = 240;
 const OPT_MESSAGE_TYPE: u8 = 53;
 const OPT_REQUESTED_IP: u8 = 50;

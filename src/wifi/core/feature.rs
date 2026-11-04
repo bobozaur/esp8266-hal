@@ -8,9 +8,9 @@ use super::config::WpsPin;
 use super::config::{ClientConfig, Ipv4Addr, Passphrase, StationCredential};
 #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
 use super::ConfigError;
-#[cfg(any(
-    feature = "wifi-esp-now",
-    all(feature = "wifi-promiscuous", any(target_arch = "xtensa", test))
+#[cfg(all(
+    any(target_arch = "xtensa", test),
+    any(feature = "wifi-esp-now", feature = "wifi-promiscuous")
 ))]
 use super::DriverError;
 
@@ -24,6 +24,7 @@ pub const ESP_NOW_KEY_LEN: usize = 16;
 pub const SMARTCONFIG_KEY_LEN: usize = 16;
 
 #[cfg(feature = "wifi-esp-now")]
+#[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EspNowPeer {
     peer_addr: [u8; 6],
@@ -31,6 +32,7 @@ pub(crate) struct EspNowPeer {
 }
 
 #[cfg(feature = "wifi-esp-now")]
+#[cfg(any(target_arch = "xtensa", test))]
 impl EspNowPeer {
     pub(crate) const fn unencrypted(peer_addr: [u8; 6]) -> Self {
         Self {
@@ -125,11 +127,13 @@ impl EspNowPeerConfig {
     }
 
     #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+    #[cfg(target_arch = "xtensa")]
     pub(crate) const fn lmk(&self) -> Option<&[u8; ESP_NOW_KEY_LEN]> {
         self.lmk.as_ref()
     }
 
     #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+    #[cfg(target_arch = "xtensa")]
     pub(crate) const fn channel_value(&self) -> u8 {
         match self.channel {
             Some(channel) => channel.get(),
@@ -138,14 +142,17 @@ impl EspNowPeerConfig {
     }
 
     #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+    #[cfg(any(target_arch = "xtensa", test))]
     pub(crate) const fn interface_value(&self) -> EspNowInterface {
         self.interface
     }
 
+    #[cfg(any(target_arch = "xtensa", test))]
     pub(crate) const fn is_encrypted(&self) -> bool {
         self.lmk.is_some()
     }
 
+    #[cfg(any(target_arch = "xtensa", test))]
     pub(crate) const fn peer_record(&self) -> EspNowPeer {
         if self.is_encrypted() {
             EspNowPeer::encrypted(self.peer_addr)
@@ -157,6 +164,7 @@ impl EspNowPeerConfig {
 
 #[cfg(feature = "wifi-esp-now")]
 impl EspNowStationPeerConfig {
+    #[cfg(any(target_arch = "xtensa", test))]
     pub(crate) const fn inner(&self) -> &EspNowPeerConfig {
         &self.inner
     }
@@ -164,6 +172,7 @@ impl EspNowStationPeerConfig {
 
 #[cfg(feature = "wifi-esp-now")]
 impl EspNowAccessPointPeerConfig {
+    #[cfg(any(target_arch = "xtensa", test))]
     pub(crate) const fn inner(&self) -> &EspNowPeerConfig {
         &self.inner
     }
@@ -265,6 +274,13 @@ impl<'a> WpsFactoryInfo<'a> {
             .any(|field| field.contains(&0))
         {
             return Err(ConfigError::WpsFactoryInfoContainsNul);
+        }
+        // The pinned native WPS library treats these fields as printf formats.
+        if [manufacturer, model_number, model_name, device_name]
+            .iter()
+            .any(|field| field.contains(&b'%'))
+        {
+            return Err(ConfigError::WpsFactoryInfoContainsPercent);
         }
         Ok(Self {
             manufacturer,
@@ -483,7 +499,11 @@ impl SmartConfigCredentials {
         } else {
             StationCredential::wpa2(Passphrase::wpa2_bytes(self.password())?)
         };
-        Ok(ClientConfig::new(ssid, credential))
+        let config = ClientConfig::new(ssid, credential);
+        Ok(match self.bssid {
+            Some(bssid) => config.with_bssid(bssid),
+            None => config,
+        })
     }
 }
 
@@ -743,107 +763,59 @@ impl PromiscuousRxFrame {
 }
 
 #[cfg(feature = "wifi-esp-now")]
-pub(crate) struct EspNowPeerTable<const N: usize> {
-    peers: [Option<EspNowPeer>; N],
-    len: usize,
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) struct EspNowPeerTable {
+    peers: allocator_api2::vec::Vec<EspNowPeer, super::allocator::RuntimeAllocator>,
+    capacity: usize,
 }
 
 #[cfg(feature = "wifi-esp-now")]
-impl<const N: usize> EspNowPeerTable<N> {
-    pub const fn new() -> Self {
-        Self {
-            peers: [const { None }; N],
-            len: 0,
-        }
+#[cfg(any(target_arch = "xtensa", test))]
+impl EspNowPeerTable {
+    pub fn try_new(
+        capacity: usize,
+        allocator: super::allocator::RuntimeAllocator,
+    ) -> Result<Self, super::InitError> {
+        let mut peers = allocator_api2::vec::Vec::new_in(allocator);
+        peers
+            .try_reserve_exact(capacity)
+            .map_err(|_| super::InitError::OutOfMemory)?;
+        Ok(Self { peers, capacity })
     }
-
-    pub const fn len(&self) -> usize {
-        self.len
+    pub fn len(&self) -> usize {
+        self.peers.len()
     }
-
-    pub fn contains(&self, peer_addr: &[u8; 6]) -> bool {
-        self.peers
-            .iter()
-            .flatten()
-            .any(|peer| peer.peer_addr() == peer_addr)
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
-
+    pub fn clear(&mut self) {
+        self.peers.clear();
+    }
+    pub fn contains(&self, addr: &[u8; 6]) -> bool {
+        self.peers.iter().any(|peer| peer.peer_addr() == addr)
+    }
     pub fn insert(&mut self, peer: EspNowPeer) -> Result<bool, DriverError> {
-        for existing in self.peers.iter_mut().flatten() {
-            if existing.peer_addr() == peer.peer_addr() {
-                let changed = *existing != peer;
-                *existing = peer;
-                return Ok(changed);
-            }
+        if let Some(existing) = self
+            .peers
+            .iter_mut()
+            .find(|p| p.peer_addr() == peer.peer_addr())
+        {
+            let changed = *existing != peer;
+            *existing = peer;
+            return Ok(changed);
         }
-
-        for slot in &mut self.peers {
-            if slot.is_none() {
-                *slot = Some(peer);
-                self.len += 1;
-                return Ok(true);
-            }
+        if self.peers.len() == self.capacity {
+            return Err(DriverError::PeerOverflow);
         }
-
-        Err(DriverError::PeerOverflow)
+        self.peers.push(peer);
+        Ok(true)
     }
-
-    pub fn remove(&mut self, peer_addr: &[u8; 6]) -> bool {
-        for slot in &mut self.peers {
-            if slot
-                .as_ref()
-                .is_some_and(|peer| peer.peer_addr() == peer_addr)
-            {
-                *slot = None;
-                self.len -= 1;
-                return true;
-            }
+    pub fn remove(&mut self, addr: &[u8; 6]) -> bool {
+        if let Some(index) = self.peers.iter().position(|peer| peer.peer_addr() == addr) {
+            self.peers.swap_remove(index);
+            true
+        } else {
+            false
         }
-
-        false
-    }
-}
-
-#[cfg(any(feature = "wifi-esp-now", feature = "wifi-promiscuous"))]
-pub(crate) struct BoundedQueue<T: Copy, const N: usize> {
-    entries: [Option<T>; N],
-    #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-    head: usize,
-    tail: usize,
-    len: usize,
-}
-
-#[cfg(any(feature = "wifi-esp-now", feature = "wifi-promiscuous"))]
-impl<T: Copy, const N: usize> BoundedQueue<T, N> {
-    pub const fn new() -> Self {
-        Self {
-            entries: [const { None }; N],
-            head: 0,
-            tail: 0,
-            len: 0,
-        }
-    }
-
-    #[cfg(any(target_arch = "xtensa", test))]
-    pub fn try_push(&mut self, record: T) -> Result<(), DriverError> {
-        if N == 0 || self.len == N {
-            return Err(DriverError::PacketOverflow);
-        }
-
-        self.entries[self.head] = Some(record);
-        self.head = (self.head + 1) % N;
-        self.len += 1;
-        Ok(())
-    }
-
-    pub fn pop(&mut self) -> Option<T> {
-        if N == 0 || self.len == 0 {
-            return None;
-        }
-
-        let record = self.entries[self.tail].take();
-        self.tail = (self.tail + 1) % N;
-        self.len -= 1;
-        record
     }
 }

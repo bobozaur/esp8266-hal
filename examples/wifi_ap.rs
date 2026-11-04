@@ -1,4 +1,4 @@
-//! ESP8266 soft-AP start validation using the typestate WiFi core.
+//! ESP8266 soft-AP start validation using the Wi-Fi controller.
 
 #![no_std]
 #![no_main]
@@ -9,11 +9,15 @@ use core::task::Poll;
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_time::{Duration, Instant, Timer};
-use esp8266_hal::wifi::smoltcp::ApWifiDevice;
+use esp8266_hal::wifi::smoltcp::WifiDevice;
+mod support;
+use esp8266_hal::timer::TimerExt;
+use support::dhcp::{DhcpMessageType, DhcpReply, DhcpServer, DhcpServerConfig};
+use support::log_line;
+
 use esp8266_hal::wifi::{
-    AccessPointConfig, ApClientLimit, ApCredential, ApMode, BeaconInterval, Channel,
-    DhcpMessageType, DhcpServer, DhcpServerConfig, DriverError, Esp8266TargetBackend, InitConfig,
-    Ipv4Addr, Ssid, Started, WifiDriver, WifiResources,
+    AccessPointConfig, ApClientLimit, ApCredential, BeaconInterval, Channel, Configuration,
+    DriverError, InitConfig, Interface as WifiInterface, Ipv4Addr, Ssid, Wifi,
 };
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{
@@ -34,26 +38,16 @@ const DHCP_REPLY_FRAME_BYTES: usize =
     ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN + DHCP_PACKET_BYTES;
 const DHCP_REPLY_HEADERS: usize = ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN;
 
-type ApResources = WifiResources<8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type ApBackend = Esp8266TargetBackend<'static, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type ApDriver =
-    WifiDriver<'static, Started<ApMode>, ApBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type ApNetDevice = ApWifiDevice<'static, ApMode, ApBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
+type ApNetDevice = WifiDevice<'static>;
 
 struct ApNetRuntime {
     device: ApNetDevice,
 }
 
-static WIFI_RESOURCES: StaticCell<ApResources> = StaticCell::new();
+static WIFI: StaticCell<Wifi> = StaticCell::new();
 static AP_RUNTIME: StaticCell<ApNetRuntime> = StaticCell::new();
 static AP_RX_FRAME: StaticCell<[u8; AP_RX_FRAME_BYTES]> = StaticCell::new();
 static DHCP_REPLY_FRAME: StaticCell<[u8; DHCP_REPLY_FRAME_BYTES]> = StaticCell::new();
-
-#[inline(always)]
-fn log_line(message: &[u8]) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_newline();
-}
 
 #[inline(never)]
 fn log_station_count(count: usize) {
@@ -147,15 +141,7 @@ async fn run_dhcp_server(runtime: &'static mut ApNetRuntime) -> ! {
     let mut server = DhcpServer::<4>::new(config);
     let reply_frame = DHCP_REPLY_FRAME.init([0; DHCP_REPLY_FRAME_BYTES]);
     let rx_frame = AP_RX_FRAME.init([0; AP_RX_FRAME_BYTES]);
-    let ap_mac = match runtime.device.mac_address() {
-        Ok(mac) => EthernetAddress(mac),
-        Err(_error) => {
-            log_line(b"ap-dhcp mac err");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-    };
+    let ap_mac = EthernetAddress(runtime.device.mac_address());
     let mut last_wait_log = Instant::now();
 
     log_line(b"ap-dhcp-ready");
@@ -266,7 +252,7 @@ fn transmit_dhcp_reply(
     device: &mut ApNetDevice,
     frame: &mut [u8],
     ap_mac: EthernetAddress,
-    reply: esp8266_hal::wifi::DhcpReply,
+    reply: DhcpReply,
 ) -> Result<(), DriverError> {
     let src_ip = SmoltcpIpv4Address::from(AP_IP.octets());
     let payload_len = reply.len();
@@ -316,36 +302,39 @@ fn transmit_dhcp_reply(
     device.transmit_frame(&frame[..frame_len])
 }
 
-fn start_ap_network(driver: ApDriver) -> Result<&'static mut ApNetRuntime, &'static [u8]> {
+fn start_ap_network(
+    link: WifiInterface<'static>,
+) -> Result<&'static mut ApNetRuntime, &'static [u8]> {
     log_stage(b"net-link");
-    let link = driver
-        .ap_link()
-        .map_err(|_| b"ap-net link err" as &'static [u8])?;
-    let device =
-        ApWifiDevice::new(link).map_err(|_| b"ap-net frame size err" as &'static [u8])?;
-    let _mac = device
-        .mac_address()
-        .map_err(|_| b"ap-net mac err" as &'static [u8])?;
+    let device = WifiDevice::new(link).map_err(|_| b"ap-net frame size err" as &'static [u8])?;
 
     log_stage(b"net-ready");
     Ok(AP_RUNTIME.init(ApNetRuntime { device }))
 }
 
 #[esp8266_hal::main]
-async fn main(_spawner: Spawner) {
+fn main() -> ! {
+    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let (_, timer2) = peripherals.TIMER.timers();
+    let runtime = support::init(timer2);
+    static EXECUTOR: StaticCell<esp8266_hal::wifi::executor::Executor> = StaticCell::new();
+    EXECUTOR
+        .init(esp8266_hal::wifi::executor::Executor::new())
+        .run(runtime, |spawner| {
+            spawner.must_spawn(app_main(spawner, runtime));
+        })
+}
+
+#[embassy_executor::task]
+async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtime) {
     log_line(b"wifi_ap start");
 
-    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    log_stage(b"wifi-init");
-    let driver = match WifiDriver::new(resources).initialize(InitConfig::default()) {
-        Ok(driver) => driver,
-        Err(_error) => {
-            log_line(b"wifi init err");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-    };
+    let mut init = InitConfig::default();
+    init.queues.station_rx = 0;
+    init.queues.access_point_rx = 2;
+    init.queues.frame_bytes = AP_RX_FRAME_BYTES;
+    let wifi = WIFI.init(Wifi::new(runtime, init).expect("wifi init"));
+    let (mut driver, interfaces) = wifi.split();
     log_line(b"wifi init ok");
 
     let config = AccessPointConfig::builder(
@@ -358,8 +347,8 @@ async fn main(_spawner: Spawner) {
     .build();
 
     log_stage(b"ap-configure");
-    let driver = match driver.configure_ap(config) {
-        Ok(driver) => driver,
+    match driver.set_configuration(&Configuration::AccessPoint(config)) {
+        Ok(()) => {}
         Err(_error) => {
             log_line(b"ap cfg err");
             loop {
@@ -368,8 +357,8 @@ async fn main(_spawner: Spawner) {
         }
     };
     log_stage(b"ap-start");
-    let mut driver = match driver.start() {
-        Ok(driver) => driver,
+    match driver.start_blocking(1_000) {
+        Ok(()) => {}
         Err(_error) => {
             log_line(b"ap start err");
             loop {
@@ -379,8 +368,9 @@ async fn main(_spawner: Spawner) {
     };
     log_line(b"ap started");
 
-    let station_count = match driver.ap().connected_stations::<10>() {
-        Ok(stations) => stations.len(),
+    let mut stations = [esp8266_hal::wifi::ApStationInfo::default(); 10];
+    let station_count = match driver.connected_stations(&mut stations) {
+        Ok(count) => count,
         Err(_error) => {
             log_line(b"ap start err");
             loop {
@@ -391,15 +381,7 @@ async fn main(_spawner: Spawner) {
     log_station_count(station_count);
 
     if ap_attach_only_enabled() {
-        let _link = match driver.ap_link() {
-            Ok(link) => link,
-            Err(_error) => {
-                log_line(b"ap-link err");
-                loop {
-                    Timer::after(Duration::from_secs(60)).await;
-                }
-            }
-        };
+        let _link = interfaces.access_point;
         log_line(b"ap-link-ready");
         loop {
             Timer::after(Duration::from_secs(60)).await;
@@ -413,7 +395,7 @@ async fn main(_spawner: Spawner) {
             log_line(b"ap-delay-before-net-done");
         }
         log_line(b"ap network starting");
-        let runtime = match start_ap_network(driver) {
+        let runtime = match start_ap_network(interfaces.access_point) {
             Ok(runtime) => runtime,
             Err(marker) => {
                 log_line(marker);
@@ -438,9 +420,9 @@ async fn main(_spawner: Spawner) {
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut saw_client = false;
         while Instant::now() < deadline {
-            match driver.ap().connected_stations::<10>() {
-                Ok(stations) if !stations.is_empty() => {
-                    log_station_count(stations.len());
+            match driver.connected_stations(&mut stations) {
+                Ok(count) if count != 0 => {
+                    log_station_count(count);
                     saw_client = true;
                     break;
                 }
@@ -462,7 +444,7 @@ async fn main(_spawner: Spawner) {
             }
         }
 
-        if driver.ap().deauth_all().is_err() {
+        if driver.deauth_all().is_err() {
             log_line(b"ap deauth err");
             loop {
                 Timer::after(Duration::from_secs(60)).await;

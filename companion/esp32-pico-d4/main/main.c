@@ -109,6 +109,8 @@ static unsigned char s_wps_ap_pin[9];
 static const char *s_last_smartconfig_step = "none";
 static int s_last_smartconfig_errno;
 static int s_last_smartconfig_reason;
+static char s_last_smartconfig_ack_hex[23];
+static char s_last_smartconfig_ack_source[16];
 
 static void write_line(const char *prefix, const char *fmt, ...) {
     char line[RESPONSE_BUFFER_SIZE];
@@ -1197,6 +1199,23 @@ static esp_err_t smartconfig_fail(const char *step, esp_err_t err) {
     return err;
 }
 
+// ESPTouch replies echo the encoded total-length token, station MAC and IPv4.
+// The sender does not know the DUT MAC; validate its shape and report raw bytes
+// so the host can correlate the response with the independently identified DUT.
+static bool esptouch_ack_valid(
+    const uint8_t *ack, int len, uint8_t token, const struct sockaddr_in *peer
+) {
+    if (len != 11 || ack[0] != token || (ack[1] & 1) != 0) {
+        return false;
+    }
+    bool has_mac = false;
+    for (size_t index = 1; index < 7; index++) {
+        has_mac |= ack[index] != 0;
+    }
+    return has_mac && ack[7] != 0 && ack[7] != 127 && ack[7] < 224 &&
+        memcmp(ack + 7, &peer->sin_addr.s_addr, 4) == 0;
+}
+
 static esp_err_t smartconfig_send_esptouch(
     const char *ssid,
     const char *pass,
@@ -1219,6 +1238,8 @@ static esp_err_t smartconfig_send_esptouch(
         return smartconfig_fail("build-lengths", ESP_ERR_INVALID_SIZE);
     }
 
+    const uint8_t expected_token = (uint8_t)(ESPTOUCH_EXTRA_HEAD_LEN + 4 + strlen(ssid) +
+        (pass == NULL || strcmp(pass, "open") == 0 ? 0 : strlen(pass)));
     int tx_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (tx_fd < 0) {
         smartconfig_fail("tx-socket", ESP_FAIL);
@@ -1302,7 +1323,12 @@ static esp_err_t smartconfig_send_esptouch(
         struct sockaddr_in peer;
         socklen_t peer_len = sizeof(peer);
         int received = recvfrom(rx_fd, ack, sizeof(ack), 0, (struct sockaddr *)&peer, &peer_len);
-        if (received > 0) {
+        if (esptouch_ack_valid(ack, received, expected_token, &peer)) {
+            for (size_t index = 0; index < 11; index++) {
+                snprintf(s_last_smartconfig_ack_hex + index * 2, 3, "%02x", ack[index]);
+            }
+            snprintf(s_last_smartconfig_ack_source, sizeof(s_last_smartconfig_ack_source),
+                "%u.%u.%u.%u", ack[7], ack[8], ack[9], ack[10]);
             close(rx_fd);
             close(tx_fd);
             return ESP_OK;
@@ -2900,7 +2926,8 @@ static void handle_smartconfig_ap_provision(const arg_pair_t *args, size_t arg_c
 
     esp_err_t err = smartconfig_ap_provision(ssid, pass, (uint8_t)channel, timeout_ms);
     if (err == ESP_OK) {
-        reply_ok("SMARTCONFIG_AP_PROVISION ssid=%s channel=%" PRIu32, ssid, channel);
+        reply_ok("SMARTCONFIG_AP_PROVISION ssid=%s channel=%" PRIu32 " hex=%s source=%s",
+            ssid, channel, s_last_smartconfig_ack_hex, s_last_smartconfig_ack_source);
     } else {
         reply_err(
             "smartconfig-ap-provision",
@@ -2944,7 +2971,8 @@ static void handle_smartconfig_sta_provision(const arg_pair_t *args, size_t arg_
         timeout_ms
     );
     if (err == ESP_OK) {
-        reply_ok("SMARTCONFIG_STA_PROVISION ssid=%s channel=%" PRIu32, ssid, channel);
+        reply_ok("SMARTCONFIG_STA_PROVISION ssid=%s channel=%" PRIu32 " hex=%s source=%s",
+            ssid, channel, s_last_smartconfig_ack_hex, s_last_smartconfig_ack_source);
     } else {
         reply_err(
             "smartconfig-sta-provision",

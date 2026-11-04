@@ -39,27 +39,25 @@ pub enum ConfigError {
     WpsDeviceNameTooLong,
     #[cfg(feature = "wifi-wps")]
     WpsFactoryInfoContainsNul,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StaticIpv4Error {
-    InvalidPrefix,
-    UnspecifiedAddress,
-    UnspecifiedGateway,
-    GatewayOutsideSubnet,
+    #[cfg(feature = "wifi-wps")]
+    WpsFactoryInfoContainsPercent,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InitError {
     AlreadyInitialized,
+    /// Native radio buffers already use different dimensions for this boot.
+    BufferConfigurationLocked,
     BackendUnavailable,
+    OutOfMemory,
+    InvalidConfiguration,
+    Sdk(i32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DriverError {
     Timeout,
-    StaStartTimeout,
-    Disconnected,
+    Disconnected { reason: Option<u8> },
     EventOverflow,
     PacketOverflow,
     PeerOverflow,
@@ -67,19 +65,8 @@ pub enum DriverError {
     InvalidFrameSize,
     OutOfMemory,
     NotStarted,
+    InvalidState,
+    Busy,
     WouldBlock,
-    BackendRejected,
-    BackendError(i32),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConnectError {
-    Timeout,
-    Disconnected,
-    BackendRejected,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DisconnectError {
-    BackendRejected,
+    Sdk(i32),
 }

@@ -26,7 +26,6 @@
 //! races between the tick ISR and task-level code.
 
 use core::cell::UnsafeCell;
-use core::ptr;
 
 use embassy_time_driver::{AlarmHandle, Driver};
 
@@ -36,17 +35,10 @@ extern "C" {
 
 const MAX_ALARMS: usize = 8;
 
-struct AlarmState {
-    /// Timestamp at which this alarm should fire (u64::MAX = disarmed).
-    at: u64,
-    /// Callback to invoke when the alarm fires.
-    callback: fn(*mut ()),
-    /// Opaque context pointer passed to the callback.
-    ctx: *mut (),
-}
+use super::runtime_clock::Alarm;
 
 struct EspTimeDriver {
-    alarms: UnsafeCell<[AlarmState; MAX_ALARMS]>,
+    alarms: UnsafeCell<[Alarm; MAX_ALARMS]>,
     /// Number of alarms that have been allocated.
     alarm_count: UnsafeCell<usize>,
 }
@@ -61,11 +53,7 @@ fn noop_callback(_ctx: *mut ()) {}
 
 impl EspTimeDriver {
     const fn new() -> Self {
-        const EMPTY: AlarmState = AlarmState {
-            at: u64::MAX,
-            callback: noop_callback,
-            ctx: ptr::null_mut(),
-        };
+        const EMPTY: Alarm = Alarm::new(noop_callback);
         Self {
             alarms: UnsafeCell::new([EMPTY; MAX_ALARMS]),
             alarm_count: UnsafeCell::new(0),
@@ -74,7 +62,7 @@ impl EspTimeDriver {
 
     /// Get mutable access to alarms. Caller must be in a critical section.
     #[allow(clippy::mut_from_ref)]
-    fn alarms(&self) -> &mut [AlarmState; MAX_ALARMS] {
+    fn alarms(&self) -> &mut [Alarm; MAX_ALARMS] {
         unsafe { &mut *self.alarms.get() }
     }
 
@@ -99,23 +87,16 @@ impl EspTimeDriver {
 
         critical_section::with(|_| unsafe {
             let count = (*self.alarm_count.get()).min(MAX_ALARMS);
-            let mut alarm = (*self.alarms.get()).as_mut_ptr();
-            let end = alarm.add(count);
-
-            while alarm < end {
-                let state = &mut *alarm;
-                if state.at <= now {
-                    state.at = u64::MAX;
-                    let cb = state.callback;
-                    let ctx = state.ctx;
-                    // Call outside the borrow but still inside the critical
-                    // section — the callback may re-arm the alarm.
-                    cb(ctx);
+            for index in 0..count {
+                let due = (&mut *self.alarms.get())[index].take_due(now);
+                if let Some((callback, context)) = due {
+                    callback(context);
                 }
-
-                alarm = alarm.add(1);
             }
         });
+        // The compare ISR first arms the SDK tick. Preserve all other handles'
+        // deadlines even if this callback did not re-arm an alarm itself.
+        self.maybe_shorten_tick();
     }
 
     /// If the earliest alarm deadline is sooner than the next tick, shorten
@@ -128,9 +109,8 @@ impl EspTimeDriver {
 
         let now = self.now();
         if earliest <= now {
-            // Already expired — trigger a software interrupt to process it
-            // immediately. We can't call check_alarms directly because we
-            // might be inside set_alarm's critical section.
+            // Already expired: arrange a compare IRQ after the register-write
+            // safety margin. Callbacks remain in the normal alarm dispatch.
             poke_tick_timer(0);
             return;
         }
@@ -156,30 +136,21 @@ extern "C" {
 /// Adjust CCOMPARE to fire after `cycles` CPU cycles from now.
 /// If `cycles` is 0, fires as soon as possible.
 fn poke_tick_timer(cycles: u32) {
-    // Only shorten, never extend past the normal tick.
-    let current_ccompare: u32;
-    let ccount: u32;
-    unsafe {
-        core::arch::asm!("rsr {0}, ccompare0", out(reg) current_ccompare, options(nomem, nostack));
-        core::arch::asm!("rsr {0}, ccount", out(reg) ccount, options(nomem, nostack));
-    }
-
-    let target = if cycles == 0 {
-        ccount.wrapping_add(50) // fire ASAP (small margin for pipeline)
-    } else {
-        ccount.wrapping_add(cycles)
-    };
-
-    // Only update if our target is sooner than the existing CCOMPARE.
-    // Use wrapping subtraction to handle counter wrap.
-    let remaining_normal = current_ccompare.wrapping_sub(ccount);
-    let remaining_new = target.wrapping_sub(ccount);
-
-    if remaining_new < remaining_normal {
+    critical_section::with(|_| {
+        // Only shorten, never extend past the normal tick.
+        let current_ccompare: u32;
+        let ccount: u32;
         unsafe {
-            core::arch::asm!("wsr {0}, ccompare0", in(reg) target, options(nomem, nostack));
+            core::arch::asm!("rsr {0}, ccompare0", out(reg) current_ccompare, options(nomem, nostack));
+            core::arch::asm!("rsr {0}, ccount", out(reg) ccount, options(nomem, nostack));
         }
-    }
+
+        let target = ccount.wrapping_add(cycles);
+        let remaining_normal = current_ccompare.wrapping_sub(ccount) as i32;
+        if remaining_normal <= 0 || cycles < remaining_normal as u32 {
+            unsafe { super::compat::port::program_compare(target) };
+        }
+    });
 }
 
 impl Driver for EspTimeDriver {
@@ -215,13 +186,7 @@ impl Driver for EspTimeDriver {
             let idx = alarm.id() as usize;
             let now = self.now();
 
-            if timestamp <= now {
-                // Already expired — don't arm, caller will handle it.
-                false
-            } else {
-                alarms[idx].at = timestamp;
-                true
-            }
+            alarms[idx].set(now, timestamp)
         });
 
         if armed {
@@ -240,4 +205,9 @@ embassy_time_driver::time_driver_impl!(static DRIVER: EspTimeDriver = EspTimeDri
 /// also be called by the user for lower-latency wakeup.
 pub fn poll_alarms() {
     DRIVER.check_alarms();
+}
+
+/// Recompute alarm programming after a CPU-clock conversion change.
+pub(crate) fn reschedule() {
+    DRIVER.maybe_shorten_tick();
 }

@@ -414,7 +414,8 @@ fn eap_wrong_password_is_an_implemented_negative_enterprise_scenario() {
     assert_eq!(scenario.state, ScenarioState::Implemented);
     assert_eq!(scenario.example, Some("wifi_eap"));
     assert!(scenario.features.contains(&"wifi-enterprise"));
-    assert!(success_markers.contains(&"eap-negative-ok"));
+    assert!(success_markers.contains(&"eap-negative-disconnected"));
+    assert!(failure_markers.contains(&"wifi eap connect err"));
     assert!(failure_markers.contains(&"eap-ok"));
     assert!(failure_markers.contains(&"wifi eap associated"));
     assert!(

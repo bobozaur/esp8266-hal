@@ -1,18 +1,22 @@
 #[cfg(feature = "wifi")]
 use core::arch::asm;
 
-/// Level-one interrupt stack plus the word used to save the interrupted stack
-/// pointer. The handler starts at byte 512, so calls grow down through the
-/// first field while the final word retains the pre-interrupt stack pointer.
+// AP/UART hardware checks used 432 bytes before heavier packet callbacks.
+// Leave room for those paths and application handlers without borrowing a task stack.
+#[cfg(feature = "wifi")]
+const WIFI_INTERRUPT_STACK_BYTES: usize = 1024;
+
+/// Level-one interrupt stack followed by the saved pre-interrupt stack pointer.
 #[cfg(feature = "wifi")]
 #[repr(C, align(16))]
-struct WifiInterruptStack([u8; 516]);
+struct WifiInterruptStack([u8; WIFI_INTERRUPT_STACK_BYTES + 4]);
 
 #[cfg(feature = "wifi")]
 #[used]
 #[no_mangle]
 #[link_section = ".bss"]
-static mut _chip_interrupt_stk: WifiInterruptStack = WifiInterruptStack([0; 516]);
+static mut _chip_interrupt_stk: WifiInterruptStack =
+    WifiInterruptStack([0; WIFI_INTERRUPT_STACK_BYTES + 4]);
 
 use xtensa_lx_rt::exception::Context;
 #[cfg(not(feature = "wifi"))]
@@ -38,70 +42,71 @@ impl InterruptType {
     }
 }
 
-extern "Rust" {
-    // interrupt handlers set by #[interrupt] macro
-    fn __slc_interrupt(context: &Context);
-    fn __spi_interrupt(context: &Context);
-    fn __gpio_interrupt(context: &Context);
-    fn __uart_interrupt(context: &Context);
-    fn __ccompare_interrupt(context: &Context);
-    fn __soft_interrupt(context: &Context);
-    fn __wdt_interrupt(context: &Context);
-    fn __timer1_interrupt(context: &Context);
+/// Default for application sources without a static handler. The level-one
+/// runtime fallback has a different signature and cannot serve this ABI.
+#[doc(hidden)]
+#[no_mangle]
+#[ram]
+pub extern "C" fn __esp8266_hal_default_interrupt() {}
 
-    // interrupt handlers for the hal to use
-    fn __slc_hal_interrupt(context: &Context);
-    fn __spi_hal_interrupt(context: &Context);
-    fn __gpio_hal_interrupt(context: &Context);
-    fn __uart_hal_interrupt(context: &Context);
-    fn __ccompare_hal_interrupt(context: &Context);
-    fn __soft_hal_interrupt(context: &Context);
-    fn __wdt_hal_interrupt(context: &Context);
-    fn __timer1_hal_interrupt(context: &Context);
+extern "C" {
+    // Static application handlers exported by #[interrupt], or linker defaults.
+    fn __slc_interrupt();
+    fn __spi_interrupt();
+    fn __gpio_interrupt();
+    fn __uart_interrupt();
+    fn __ccompare_interrupt();
+    fn __soft_interrupt();
+    fn __wdt_interrupt();
+    fn __timer1_interrupt();
+}
+
+/// Call application handlers after the dispatcher clears CPU pending bits.
+///
+/// # Safety
+/// Call only from the serialized level-one interrupt dispatcher, for sources
+/// which have no registered SDK handler. Handlers must clear their peripheral
+/// interrupt condition before returning.
+#[ram]
+pub(crate) unsafe fn dispatch_app_interrupts(mask: u32) {
+    unsafe {
+        if mask & InterruptType::SLC.mask() != 0 {
+            __slc_interrupt();
+        }
+        if mask & InterruptType::SPI.mask() != 0 {
+            __spi_interrupt();
+        }
+        if mask & InterruptType::GPIO.mask() != 0 {
+            __gpio_interrupt();
+        }
+        if mask & InterruptType::UART.mask() != 0 {
+            __uart_interrupt();
+        }
+        if mask & InterruptType::CCOMPARE.mask() != 0 {
+            __ccompare_interrupt();
+        }
+        if mask & InterruptType::SOFT.mask() != 0 {
+            __soft_interrupt();
+        }
+        if mask & InterruptType::WDT.mask() != 0 {
+            __wdt_interrupt();
+        }
+        if mask & InterruptType::TIMER1.mask() != 0 {
+            __timer1_interrupt();
+        }
+    }
 }
 
 #[cfg(not(feature = "wifi"))]
 #[interrupt]
 #[ram]
 fn interrupt_trampoline(level: u32, frame: Context) {
-    let _ = level;
-    let mask = xtensa_lx::interrupt::get();
+    let _ = (level, frame);
+    let mask = xtensa_lx::interrupt::get() & xtensa_lx::interrupt::get_mask();
+    // SAFETY: the runtime invokes this once for the current level-one frame.
     unsafe {
         xtensa_lx::interrupt::clear(mask);
-    }
-    unsafe {
-        if InterruptType::SLC.mask() & mask > 0 {
-            __slc_interrupt(&frame);
-            __slc_hal_interrupt(&frame);
-        };
-        if InterruptType::SPI.mask() & mask > 0 {
-            __spi_interrupt(&frame);
-            __spi_hal_interrupt(&frame);
-        };
-        if InterruptType::GPIO.mask() & mask > 0 {
-            __gpio_interrupt(&frame);
-            __gpio_hal_interrupt(&frame);
-        };
-        if InterruptType::UART.mask() & mask > 0 {
-            __uart_interrupt(&frame);
-            __uart_hal_interrupt(&frame);
-        };
-        if InterruptType::CCOMPARE.mask() & mask > 0 {
-            __ccompare_interrupt(&frame);
-            __ccompare_hal_interrupt(&frame);
-        };
-        if InterruptType::SOFT.mask() & mask > 0 {
-            __soft_interrupt(&frame);
-            __soft_hal_interrupt(&frame);
-        };
-        if InterruptType::WDT.mask() & mask > 0 {
-            __wdt_interrupt(&frame);
-            __wdt_hal_interrupt(&frame);
-        };
-        if InterruptType::TIMER1.mask() & mask > 0 {
-            __timer1_interrupt(&frame);
-            __timer1_hal_interrupt(&frame);
-        };
+        dispatch_app_interrupts(mask);
     }
 }
 
@@ -114,7 +119,7 @@ unsafe extern "C" fn __level_1_interrupt() {
         "movi a4, 0x23",
         "wsr.ps a4",
         "rsync",
-        "movi a4, _chip_interrupt_stk + 512",
+        "movi a4, _chip_interrupt_stk + {stack_bytes}",
         "s32i a1, a4, 0",
         "mov a1, a4",
         "call0 __level_1_interrupt_body",
@@ -125,7 +130,7 @@ unsafe extern "C" fn __level_1_interrupt() {
         "s32i a6, a4, 0",
         "j 2f",
         "1:",
-        "movi a4, _chip_interrupt_stk + 512",
+        "movi a4, _chip_interrupt_stk + {stack_bytes}",
         "l32i a5, a4, 0",
         "2:",
         "mov a2, a5",
@@ -140,6 +145,7 @@ unsafe extern "C" fn __level_1_interrupt() {
         "l32i a1, a1, 0x0c",
         "rsync",
         ".byte 0x00, 0x30, 0x00",
+        stack_bytes = const WIFI_INTERRUPT_STACK_BYTES,
         options(noreturn)
     );
 }
@@ -157,112 +163,20 @@ unsafe extern "C" fn __level_1_interrupt_body(_level: u32, frame: &mut Context) 
     }
 }
 
-pub fn enable_interrupt(ty: InterruptType) -> u32 {
-    let type_mask = ty.mask();
-    unsafe { xtensa_lx::interrupt::enable_mask(type_mask) }
-}
-
-pub fn disable_interrupt(ty: InterruptType) -> u32 {
-    let type_mask = !(1u32 << ty as u8);
-    unsafe { xtensa_lx::interrupt::enable_mask(type_mask) }
-}
-
-/// Uses the magic of monomorphization to "save" the type parameter for our interrupt handler
+/// Unmask a CPU interrupt source, returning the previous mask.
 ///
-/// Because a new version of this function will be compiled for every H, the function pointer
-/// for a monomorphized version of this function will "remember" it's function pointer,
-/// allowing us to cast the function pointer into a monomorphized interrupt handler.
-pub(crate) fn trampoline<H: Callable>(handler: *mut ()) {
-    let handler: &mut H = unsafe { &mut *(handler as *mut H) };
-    handler.call();
+/// # Safety
+/// The source must have a handler and must not be owned by the SDK runtime.
+/// Do not unmask interrupts inside an interrupt-free critical section.
+/// The runtime permanently reserves its registered interrupt sources.
+pub unsafe fn enable_interrupt(ty: InterruptType) -> u32 {
+    // SAFETY: the caller establishes handler ownership and exclusion requirements.
+    unsafe { xtensa_lx::interrupt::enable_mask(ty.mask()) }
 }
 
-pub(crate) trait Callable {
-    fn call(&mut self);
-}
-
-/// Setup an interrupt handler accepting a closure
-macro_rules! int_handler {
-    ($INT_TYPE:ident => $INT:ident($DATA:ty)) => {
-        use crate::interrupt::*;
-        use core::intrinsics::transmute;
-        use core::marker::PhantomPinned;
-        use core::pin::Pin;
-        use paste::paste;
-        use xtensa_lx_rt::exception::Context;
-
-        paste! { static mut [<INT_ $INT_TYPE _TRAMPOLINE>]: Option<fn(handler: *mut ())> = None; }
-        paste! { static mut [<INT_ $INT_TYPE _HANDLER>]: *mut () = core::ptr::null_mut(); }
-
-        paste! {
-            #[no_mangle]
-            fn [<__ $INT_TYPE:lower _hal_interrupt>](_frame: &Context) {
-                // this is safe because the drop impl for the handler cleans up the pointers
-                unsafe {
-                    if let Some(trampoline) = paste!{[<INT_ $INT_TYPE _TRAMPOLINE>]} {
-                        trampoline(paste!{[<INT_ $INT_TYPE _HANDLER>]})
-                    }
-                }
-            }
-        }
-
-        pub struct $INT<F> {
-            closure: F,
-            data: $DATA,
-            _pin: PhantomPinned,
-        }
-
-        impl<F: FnMut(&mut $DATA)> $INT<F> {
-            /// Create interrupt handler that keeps the closure in scope and sets the static pointers
-            ///
-            /// returns the handler pinned to ensure that the pointers stay valid
-            pub(crate) fn new(data: $DATA, closure: F) -> Pin<Self> {
-                enable_interrupt(InterruptType::$INT_TYPE);
-
-                let handler = unsafe {
-                    Pin::new_unchecked($INT {
-                        data,
-                        closure,
-                        _pin: PhantomPinned,
-                    })
-                };
-                unsafe {
-                    paste! {[<INT_ $INT_TYPE _TRAMPOLINE>] = Some(trampoline::<Self>) };
-                    paste! {[<INT_ $INT_TYPE _HANDLER>] = transmute(&handler) };
-                }
-                handler
-            }
-        }
-
-        impl<F: FnMut(&mut $DATA)> Callable for $INT<F> {
-            fn call(&mut self) {
-                (self.closure)(&mut self.data)
-            }
-        }
-
-        impl<F> Drop for $INT<F> {
-            fn drop(&mut self) {
-                disable_interrupt(InterruptType::$INT_TYPE);
-
-                unsafe {
-                    paste! {[<INT_ $INT_TYPE _TRAMPOLINE>] = None };
-                    paste! {[<INT_ $INT_TYPE _HANDLER>] = core::ptr::null_mut() };
-                }
-            }
-        }
-
-        impl<F> core::ops::Deref for $INT<F> {
-            type Target = $DATA;
-
-            fn deref(&self) -> &Self::Target {
-                &self.data
-            }
-        }
-
-        impl<F> core::ops::DerefMut for $INT<F> {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.data
-            }
-        }
-    };
+/// Mask a CPU interrupt source, returning the previous mask.
+///
+/// Disabling a runtime-owned source prevents that runtime from making progress.
+pub fn disable_interrupt(ty: InterruptType) -> u32 {
+    xtensa_lx::interrupt::disable_mask(ty.mask())
 }

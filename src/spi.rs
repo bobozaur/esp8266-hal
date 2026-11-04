@@ -57,7 +57,7 @@ impl SPI1Master {
         let mut spi = SPI1Master {
             spi,
             sclk,
-            miso: miso.into_push_pull_output().into_hspi(),
+            miso,
             mosi,
         };
 
@@ -71,15 +71,21 @@ impl SPI1Master {
                 .spi_ck_i_edge()
                 .set_bit()
         });
-        spi.set_data_bits(8);
+        spi.spi.spi_user1().write(|w| unsafe {
+            w.reg_usr_mosi_bitlen()
+                .bits(7)
+                .reg_usr_miso_bitlen()
+                .bits(7)
+        });
         unsafe { spi.spi.spi_ctrl1().write_with_zero(|w| w) };
 
         spi
     }
 
-    /// free up the spi device and return the pins used
-    pub fn decompose(self) -> nb::Result<(SPI1, Gpio14<HSPI>, Gpio12<HSPI>, Gpio13<HSPI>), Void> {
-        Ok((self.spi, self.sclk, self.miso, self.mosi))
+    /// Wait for the current transfer, then release the peripheral and its pins.
+    pub fn decompose(self) -> (SPI1, Gpio14<HSPI>, Gpio12<HSPI>, Gpio13<HSPI>) {
+        while self.spi.spi_cmd().read().spi_usr().bit_is_set() {}
+        (self.spi, self.sclk, self.miso, self.mosi)
     }
 
     pub fn set_data_mode(&mut self, mode: Mode) {
@@ -128,19 +134,10 @@ impl SPI1Master {
                         .spi_clkcnt_h()
                         .bits((frequency as u8) / 2 - 1)
                         .spi_clkcnt_l()
-                        .bits((frequency as u8 - 1) & 0x40)
+                        .bits(frequency as u8 - 1)
                 })
             };
         }
-    }
-
-    fn set_data_bits(&mut self, bits: u16) {
-        self.spi.spi_user1().write(|w| unsafe {
-            w.reg_usr_mosi_bitlen()
-                .bits(bits - 1)
-                .reg_usr_miso_bitlen()
-                .bits(bits - 1)
-        });
     }
 }
 
@@ -159,8 +156,6 @@ impl FullDuplex<u8> for SPI1Master {
         if self.spi.spi_cmd().read().spi_usr().bit_is_set() {
             return Err(nb::Error::WouldBlock);
         }
-
-        self.set_data_bits(8);
 
         self.spi.spi_w0().write(|w| unsafe { w.bits(word as u32) });
         self.spi.spi_cmd().modify(|_, w| w.spi_usr().set_bit());

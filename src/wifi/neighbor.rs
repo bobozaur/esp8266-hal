@@ -1,5 +1,8 @@
-//! RX-side Ethernet neighbor hints for upstream smoltcp.
+//! Adapter-local neighbor-learning workaround for published smoltcp.
 //!
+//! The prior target TCP server regression needed learning from its first inbound
+//! IPv4 frame to avoid a first-response ARP timeout. Retain this narrow adapter
+//! workaround until the upstream change or target comparison removes that need.
 //! This keeps the crate on published smoltcp while preserving the useful part
 //! of the removed fork: after a validated unicast IPv4 frame addressed to this
 //! interface, queue one synthetic ARP reply so smoltcp learns the peer through
@@ -8,7 +11,7 @@
 //! neighbor before it receives the synthetic ARP reply.
 
 #[cfg(feature = "wifi-embassy-net")]
-use super::WifiDataLink;
+use crate::wifi_core::Interface;
 
 pub(crate) const ETHERNET_ARP_IPV4_FRAME_LEN: usize = 42;
 
@@ -42,14 +45,17 @@ impl EthernetNeighborHints {
         }
     }
 
-    #[cfg(any(feature = "wifi-embassy-net", test))]
     pub(crate) fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
 
-    #[cfg(any(all(feature = "wifi", target_arch = "xtensa"), test))]
+    #[cfg(any(feature = "wifi-smoltcp", test))]
     pub(crate) fn take_pending(&mut self) -> Option<EthernetNeighborHint> {
         self.pending.take()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.pending = None;
     }
 
     pub(crate) fn observe(&mut self, frame: &[u8]) {
@@ -64,16 +70,16 @@ impl EthernetNeighborHints {
 
     #[cfg(feature = "wifi-embassy-net")]
     #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-    pub(crate) fn receive_into<L: WifiDataLink>(
+    pub(crate) fn receive_into(
         &mut self,
-        link: &mut L,
+        link: &mut Interface<'_>,
         buf: &mut [u8],
-    ) -> Result<Option<usize>, super::DriverError> {
+    ) -> Result<Option<usize>, crate::wifi_core::DriverError> {
         if let Some(hint) = self.pending.take() {
             if let Some(len) = hint.emit_arp_reply(buf) {
                 return Ok(Some(len));
             }
-            return Err(super::DriverError::PacketOverflow);
+            return Err(crate::wifi_core::DriverError::PacketOverflow);
         }
 
         let Some(len) = link.receive(buf)? else {

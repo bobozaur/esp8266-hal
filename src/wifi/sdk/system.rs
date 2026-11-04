@@ -3,7 +3,6 @@
 //! Replaces `sdk_overrides/system_api.c`. These functions are called by
 //! both Rust code (via FFI) and the WiFi blob libraries (by symbol name).
 
-use core::ffi::c_void;
 use esp8266_wifi_sys as sys;
 
 // ---------------------------------------------------------------------------
@@ -24,7 +23,6 @@ const EFUSE_VERSION_2: u32 = 2;
 const DPORT_CTL_REG: *const u32 = 0x3FF0_0014 as *const u32;
 const DPORT_CTL_DOUBLE_CLK: u32 = 1;
 const CPU_CLK_FREQ: u32 = 80_000_000;
-const CONFIG_FREERTOS_HZ: u32 = 100;
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -56,18 +54,7 @@ pub static g_esp_sys_info: EspSysInfo = EspSysInfo {
 
 extern "C" {
     fn esp_crc8(data: *const u8, len: u32) -> u8;
-    fn nvs_flash_init() -> i32;
-    fn nvs_open(name: *const u8, mode: u32, handle: *mut u32) -> i32;
-    fn nvs_close(handle: u32);
-    fn nvs_get_blob(handle: u32, key: *const u8, out: *mut c_void, len: *mut usize) -> i32;
-    fn nvs_set_blob(handle: u32, key: *const u8, data: *const c_void, len: usize) -> i32;
-    fn nvs_commit(handle: u32) -> i32;
-    static mut _xt_tick_divisor: u32;
 }
-
-// NVS constants
-const NVS_READONLY: u32 = 0;
-const NVS_READWRITE: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // MAC address functions
@@ -208,135 +195,6 @@ pub unsafe extern "C" fn esp_read_mac(mac: *mut u8, mac_type: u32) -> i32 {
     }
 }
 
-/// Initialize MAC address subsystem: read from EFUSE, store backup in NVS.
-#[no_mangle]
-pub unsafe extern "C" fn esp_mac_init() -> i32 {
-    unsafe {
-        let ret = nvs_flash_init();
-        if ret != sys::ESP_OK {
-            return 0x1102; // ESP_ERR_INVALID_MAC
-        }
-
-        let mut efuse_mac = [0u8; 6];
-
-        // Try loading from NVS backup first
-        if load_backup_mac_data(efuse_mac.as_mut_ptr()) == sys::ESP_OK {
-            return sys::ESP_OK;
-        }
-
-        // Read from EFUSE
-        let ret = esp_efuse_mac_get_default(efuse_mac.as_mut_ptr());
-        if ret != sys::ESP_OK {
-            return 0x1102;
-        }
-
-        // Populate the global base MAC
-        esp_base_mac_addr_set(efuse_mac.as_ptr());
-
-        // Store backup
-        let _ = store_backup_mac_data();
-
-        sys::ESP_OK
-    }
-}
-
-// ---------------------------------------------------------------------------
-// NVS backup MAC helpers
-// ---------------------------------------------------------------------------
-
-const BACKUP_MAC_NAMESPACE: &[u8] = b"backup_mac\0";
-const BACKUP_MAC_DATA_KEY: &[u8] = b"backup_mac_data\0";
-const MAC_DATA_LEN_WITH_CRC: usize = 16; // 4 × u32
-
-unsafe fn load_backup_mac_data(mac: *mut u8) -> i32 {
-    unsafe {
-        let mut handle: u32 = 0;
-        let err = nvs_open(BACKUP_MAC_NAMESPACE.as_ptr(), NVS_READONLY, &mut handle);
-        if err != sys::ESP_OK {
-            return 0x1102;
-        }
-
-        let mut efuse = [0u32; 4];
-        let mut length = MAC_DATA_LEN_WITH_CRC;
-        let err = nvs_get_blob(
-            handle,
-            BACKUP_MAC_DATA_KEY.as_ptr(),
-            efuse.as_mut_ptr() as *mut c_void,
-            &mut length,
-        );
-        nvs_close(handle);
-        if err != sys::ESP_OK || length != MAC_DATA_LEN_WITH_CRC {
-            return 0x1102;
-        }
-
-        let m = core::slice::from_raw_parts_mut(mac, 6);
-        m[3] = (efuse[1] >> 8) as u8;
-        m[4] = efuse[1] as u8;
-        m[5] = (efuse[0] >> 24) as u8;
-
-        if efuse[2] & EFUSE_IS_48BITS_MAC != 0 {
-            m[0] = (efuse[3] >> 16) as u8;
-            m[1] = (efuse[3] >> 8) as u8;
-            m[2] = efuse[3] as u8;
-
-            // Validate CRC
-            let tmp = [m[2], m[1], m[0]];
-            let efuse_crc = (efuse[2] >> 24) as u8;
-            let calc_crc = esp_crc8(tmp.as_ptr(), 3);
-            if efuse_crc != calc_crc {
-                return 0x1102;
-            }
-
-            let version = (efuse[1] >> EFUSE_VERSION_S) & EFUSE_VERSION_V;
-            if version == EFUSE_VERSION_1 || version == EFUSE_VERSION_2 {
-                let tmp2 = [m[5], m[4], m[3], (efuse[1] >> 16) as u8];
-                let efuse_crc2 = (efuse[0] >> 16) as u8;
-                let calc_crc2 = esp_crc8(tmp2.as_ptr(), 4);
-                if efuse_crc2 != calc_crc2 {
-                    return 0x1102;
-                }
-            }
-        } else {
-            m[0] = 0x18;
-            m[1] = 0xFE;
-            m[2] = 0x34;
-        }
-
-        sys::ESP_OK
-    }
-}
-
-unsafe fn store_backup_mac_data() -> i32 {
-    unsafe {
-        let efuse = [
-            EFUSE_DATA0_REG.read_volatile(),
-            EFUSE_DATA1_REG.read_volatile(),
-            EFUSE_DATA2_REG.read_volatile(),
-            EFUSE_DATA3_REG.read_volatile(),
-        ];
-
-        let mut handle: u32 = 0;
-        let err = nvs_open(BACKUP_MAC_NAMESPACE.as_ptr(), NVS_READWRITE, &mut handle);
-        if err != sys::ESP_OK {
-            return err;
-        }
-
-        let err = nvs_set_blob(
-            handle,
-            BACKUP_MAC_DATA_KEY.as_ptr(),
-            efuse.as_ptr() as *const c_void,
-            MAC_DATA_LEN_WITH_CRC,
-        );
-        if err != sys::ESP_OK {
-            return err;
-        }
-
-        let err = nvs_commit(handle);
-        nvs_close(handle);
-        err
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Chip info and system utilities
 // ---------------------------------------------------------------------------
@@ -375,11 +233,9 @@ pub unsafe extern "C" fn esp_chip_info(out_info: *mut ChipInfo) {
 pub unsafe extern "C" fn os_update_cpu_frequency(_ticks_per_us: u32) {
     unsafe {
         if DPORT_CTL_REG.read_volatile() & DPORT_CTL_DOUBLE_CLK != 0 {
-            g_esp_ticks_per_us = CPU_CLK_FREQ * 2 / 1_000_000;
-            _xt_tick_divisor = CPU_CLK_FREQ * 2 / CONFIG_FREERTOS_HZ;
+            super::super::compat::port::update_cpu_frequency(CPU_CLK_FREQ * 2 / 1_000_000);
         } else {
-            g_esp_ticks_per_us = CPU_CLK_FREQ / 1_000_000;
-            _xt_tick_divisor = CPU_CLK_FREQ / CONFIG_FREERTOS_HZ;
+            super::super::compat::port::update_cpu_frequency(CPU_CLK_FREQ / 1_000_000);
         }
     }
 }
@@ -388,16 +244,6 @@ pub unsafe extern "C" fn os_update_cpu_frequency(_ticks_per_us: u32) {
 pub unsafe extern "C" fn ets_update_cpu_frequency(ticks_per_us: u32) {
     unsafe { os_update_cpu_frequency(ticks_per_us) }
 }
-
-// ---------------------------------------------------------------------------
-// Heap size (forwarded to our allocator)
-// ---------------------------------------------------------------------------
-
-// These are also defined in memory.rs. The C versions called
-// heap_caps_get_free_size / heap_caps_get_minimum_free_size from the SDK.
-// Our allocator provides the same info through the Rust API.
-// The symbols are already provided by memory.rs (#[no_mangle] pub extern "C"),
-// so we don't need to redefine them here.
 
 // ---------------------------------------------------------------------------
 // Old sysconf addr (ROM compatibility)

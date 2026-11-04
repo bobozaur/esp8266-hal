@@ -1,4 +1,9 @@
-//! ESP8266 AP+STA coexistence validation using the typestate WiFi core.
+//! ESP8266 AP+STA coexistence validation using the Wi-Fi controller.
+//!
+//! ESP8266 shares one radio channel. ESP8266_HAL_WIFI_CHANNEL optionally hints
+//! the upstream channel; without it the station scans and the AP starts on 6.
+//! After association the AP follows the actual upstream channel, so downstream
+//! clients should scan rather than assume the initial AP channel remains 6.
 
 #![no_std]
 #![no_main]
@@ -6,13 +11,17 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 
-use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverState};
-use esp8266_hal::wifi::smoltcp::LinkDevice;
+use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverStateWithMtu};
+use esp8266_hal::wifi::smoltcp::WifiDevice;
+mod support;
+use esp8266_hal::timer::TimerExt;
+use support::dhcp::{DhcpMessageType, DhcpReply, DhcpServer, DhcpServerConfig};
+use support::log_line;
+
 use esp8266_hal::wifi::{
     AccessPointConfig, ApClientLimit, ApCredential, BeaconInterval, Channel, ClientConfig,
-    DhcpMessageType, DhcpServer, DhcpServerConfig, DriverError, Esp8266TargetBackend, InitConfig,
-    Ipv4Addr, MixedApLink, MixedConfig, MixedLink, MixedMode, MixedStaLink, Passphrase, Ssid,
-    Started, StationCredential, WifiDriver, WifiResources,
+    Configuration, Controller, DriverError, InitConfig, Ipv4Addr, MixedConfig, Passphrase, Ssid,
+    StationCredential, Wifi,
 };
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{
@@ -32,11 +41,13 @@ const WIFI_PASS: &str = match option_env!("ESP8266_HAL_WIFI_PASS") {
     None => "esp8266-pass",
 };
 const AP_SSID: &str = "esp8266-hal-apsta";
-const WIFI_CHANNEL: u8 = 6;
+const WIFI_CHANNEL: Option<&str> = option_env!("ESP8266_HAL_WIFI_CHANNEL");
 const AP_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 4, 1);
 const AP_LEASE_START: Ipv4Addr = Ipv4Addr::new(192, 168, 4, 2);
 const AP_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
-const AP_RX_FRAME_BYTES: usize = 640;
+// smoltcp DHCP needs at least 658 Ethernet bytes to advertise option 57 >= 576.
+// Keep this DHCP-only demo at 672 to bound channel and copied AP storage.
+const NET_MTU: usize = 672;
 const DHCP_PACKET_BYTES: usize = 576;
 const DHCP_REPLY_FRAME_BYTES: usize =
     ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN + DHCP_PACKET_BYTES;
@@ -44,34 +55,20 @@ const DHCP_REPLY_HEADERS: usize = ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HE
 const NET_RX_PACKETS: usize = 1;
 const NET_TX_PACKETS: usize = 1;
 
-type MixedNetState = NetDriverState<NET_RX_PACKETS, NET_TX_PACKETS>;
-type MixedResources = WifiResources<8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type MixedBackend = Esp8266TargetBackend<'static, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type MixedDriver =
-    WifiDriver<'static, Started<MixedMode>, MixedBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type MixedLinkOwner = MixedLink<'static, MixedBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type MixedStaEndpoint =
-    MixedStaLink<'static, 'static, MixedBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type MixedApEndpoint =
-    MixedApLink<'static, 'static, MixedBackend, 8, 4, 0, 0, 0, 2, AP_RX_FRAME_BYTES>;
-type WifiNetRunner = wifi_net::LinkRunner<'static, MixedStaEndpoint>;
-type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDevice<'static>>;
-type ApNetDevice = LinkDevice<MixedApEndpoint>;
+type MixedNetState = NetDriverStateWithMtu<NET_MTU, NET_RX_PACKETS, NET_TX_PACKETS>;
+type WifiNetRunner = wifi_net::RunnerWithMtu<'static, 'static, NET_MTU>;
+type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDeviceWithMtu<'static, NET_MTU>>;
+type ApNetDevice = WifiDevice<'static>;
 
 static NET_STATE: StaticCell<MixedNetState> = StaticCell::new();
-static WIFI_RESOURCES: StaticCell<MixedResources> = StaticCell::new();
-static MIXED_LINK: StaticCell<MixedLinkOwner> = StaticCell::new();
+static WIFI: StaticCell<Wifi> = StaticCell::new();
 static STACK_RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
 static WIFI_RUNNER: StaticCell<WifiNetRunner> = StaticCell::new();
 static NET_RUNNER: StaticCell<EmbassyNetRunner> = StaticCell::new();
-static AP_RX_FRAME: StaticCell<[u8; AP_RX_FRAME_BYTES]> = StaticCell::new();
+// Keep the adapter's fixed TX buffer outside the Embassy task arena.
+static AP_DEVICE: StaticCell<ApNetDevice> = StaticCell::new();
+static AP_RX_FRAME: StaticCell<[u8; NET_MTU]> = StaticCell::new();
 static DHCP_REPLY_FRAME: StaticCell<[u8; DHCP_REPLY_FRAME_BYTES]> = StaticCell::new();
-
-#[inline(always)]
-fn log_line(message: &[u8]) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_newline();
-}
 
 #[inline(never)]
 fn log_dhcp_up(config: embassy_net::StaticConfigV4) {
@@ -90,11 +87,15 @@ fn log_station_count(count: usize) {
     esp8266_hal::logger::write_newline();
 }
 
-fn init_wifi() -> MixedDriver {
-    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let driver = WifiDriver::new(resources)
-        .initialize(InitConfig::new(14, 4, 4).expect("init config"))
-        .expect("wifi init");
+fn init_wifi(
+    runtime: &'static esp8266_hal::wifi::Runtime,
+) -> (Controller<'static>, esp8266_hal::wifi::Interfaces<'static>) {
+    let mut init = InitConfig::new(14, 4, 4).expect("init config");
+    init.queues.station_rx = 4;
+    init.queues.access_point_rx = 2;
+    init.queues.frame_bytes = NET_MTU;
+    let wifi = WIFI.init(Wifi::new(runtime, init).expect("wifi init"));
+    let (mut driver, interfaces) = wifi.split();
     log_line(b"wifi init ok");
 
     let sta_credential = if WIFI_PASS.trim().is_empty() {
@@ -102,31 +103,31 @@ fn init_wifi() -> MixedDriver {
     } else {
         StationCredential::wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("pass"))
     };
-    let wifi_channel = Channel::try_from(WIFI_CHANNEL).expect("wifi channel");
-    let sta_config = ClientConfig::new(
+    let wifi_channel = WIFI_CHANNEL.map(|value| {
+        Channel::try_from(value.parse::<u8>().expect("wifi channel")).expect("wifi channel")
+    });
+    let mut sta_config = ClientConfig::new(
         Ssid::try_from(WIFI_SSID.trim()).expect("sta ssid"),
         sta_credential,
-    )
-    .with_channel(wifi_channel);
+    );
+    if let Some(channel) = wifi_channel {
+        sta_config = sta_config.with_channel(channel);
+    }
+    let ap_channel = wifi_channel.unwrap_or(Channel::try_from(6).expect("initial AP channel"));
     let ap_config =
-        AccessPointConfig::builder(Ssid::try_from(AP_SSID).expect("ap ssid"), wifi_channel)
+        AccessPointConfig::builder(Ssid::try_from(AP_SSID).expect("ap ssid"), ap_channel)
             .credential(ApCredential::Open)
             .max_clients(ApClientLimit::try_from(4).expect("ap clients"))
             .beacon_interval(BeaconInterval::try_from(100).expect("beacon"))
             .build();
 
     driver
-        .configure_mixed(MixedConfig::new(sta_config, ap_config))
-        .expect("configure mixed")
-        .start()
-        .expect("wifi start")
-}
-
-fn connect_wifi(driver: &mut MixedDriver) -> Result<(), esp8266_hal::wifi::DriverError> {
-    let mut sta = driver.sta();
-    sta.connect_blocking(60_000)?;
-    log_line(b"wifi connected");
-    Ok(())
+        .set_configuration(&Configuration::Mixed(MixedConfig::new(
+            sta_config, ap_config,
+        )))
+        .expect("configure mixed");
+    driver.start_blocking(1_000).expect("wifi start");
+    (driver, interfaces)
 }
 
 #[embassy_executor::task]
@@ -141,14 +142,15 @@ async fn net_runner_task(runner: &'static mut EmbassyNetRunner) -> ! {
 
 fn start_network(
     spawner: Spawner,
-    driver: MixedDriver,
-) -> (embassy_net::Stack<'static>, ApNetDevice) {
-    let mixed = MIXED_LINK.init(driver.mixed_link().expect("mixed link"));
-    let (sta_link, ap_link) = mixed.split();
+    interfaces: esp8266_hal::wifi::Interfaces<'static>,
+) -> (embassy_net::Stack<'static>, &'static mut ApNetDevice) {
+    let sta_link = interfaces.station;
+    let ap_link = interfaces.access_point;
     let net_state = NET_STATE.init(MixedNetState::new());
     let (driver_runner, net_device) =
-        wifi_net::new_link(net_state, sta_link).expect("STA net driver");
-    let ap_device = LinkDevice::new(ap_link).expect("valid AP frame capacity");
+        wifi_net::new_with_mtu(net_state, sta_link).expect("STA net driver");
+    let ap_device =
+        AP_DEVICE.init_with(|| WifiDevice::new(ap_link).expect("valid AP frame capacity"));
 
     let config = embassy_net::Config::dhcpv4(Default::default());
     let resources = STACK_RESOURCES.init(embassy_net::StackResources::<2>::new());
@@ -162,18 +164,10 @@ fn start_network(
     (stack, ap_device)
 }
 
-async fn run_networks(stack: embassy_net::Stack<'static>, mut device: ApNetDevice) -> ! {
-    let rx_frame = AP_RX_FRAME.init([0; AP_RX_FRAME_BYTES]);
+async fn run_networks(stack: embassy_net::Stack<'static>, device: &'static mut ApNetDevice) -> ! {
+    let rx_frame = AP_RX_FRAME.init([0; NET_MTU]);
     let reply_frame = DHCP_REPLY_FRAME.init([0; DHCP_REPLY_FRAME_BYTES]);
-    let ap_mac = match device.mac_address() {
-        Ok(mac) => EthernetAddress(mac),
-        Err(_error) => {
-            log_line(b"ap_sta err ap-mac");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-    };
+    let ap_mac = EthernetAddress(device.mac_address());
     let config = DhcpServerConfig::new(AP_IP, AP_NETMASK, AP_LEASE_START, 4)
         .expect("dhcp config")
         .router(AP_IP)
@@ -218,20 +212,23 @@ async fn run_networks(stack: embassy_net::Stack<'static>, mut device: ApNetDevic
         }
 
         if let Some(reply) = reply {
-            if transmit_dhcp_reply(&mut device, reply_frame, ap_mac, reply.len()).is_err() {
-                log_line(b"ap_sta err dhcp-send");
-            }
-            match reply.message_type() {
-                DhcpMessageType::Offer => log_line(b"ap-sta-dhcp-offer"),
-                DhcpMessageType::Ack => {
-                    log_line(b"ap-sta-dhcp-ack");
-                    if !downstream_ready {
-                        log_line(b"ap-sta-downstream-ok");
-                        downstream_ready = true;
+            if let Err(error) = transmit_dhcp_reply(device, reply_frame, ap_mac, reply).await {
+                esp8266_hal::logger::write_bytes(b"ap_sta err dhcp-send ");
+                support::log_debug(&error);
+                esp8266_hal::logger::write_newline();
+            } else {
+                match reply.message_type() {
+                    DhcpMessageType::Offer => log_line(b"ap-sta-dhcp-offer"),
+                    DhcpMessageType::Ack => {
+                        log_line(b"ap-sta-dhcp-ack");
+                        if !downstream_ready {
+                            log_line(b"ap-sta-downstream-ok");
+                            downstream_ready = true;
+                        }
                     }
+                    DhcpMessageType::Nak => log_line(b"ap-sta-dhcp-nak"),
+                    _ => {}
                 }
-                DhcpMessageType::Nak => log_line(b"ap-sta-dhcp-nak"),
-                _ => {}
             }
         } else if !downstream_ready {
             if last_wait_log.elapsed() >= Duration::from_secs(2) {
@@ -279,21 +276,31 @@ fn dhcp_payload(frame: &[u8]) -> Option<&[u8]> {
     }
 }
 
-fn transmit_dhcp_reply(
+async fn transmit_dhcp_reply(
     device: &mut ApNetDevice,
     frame: &mut [u8],
     ap_mac: EthernetAddress,
-    payload_len: usize,
+    reply: DhcpReply,
 ) -> Result<(), DriverError> {
     let src_ip = SmoltcpIpv4Address::from(AP_IP.octets());
-    let dst_ip = SmoltcpIpv4Address::BROADCAST;
+    let payload_len = reply.len();
+    let broadcast = reply.broadcast() || reply.leased_ip() == Ipv4Addr::UNSPECIFIED;
+    let dst_ip = if broadcast {
+        SmoltcpIpv4Address::BROADCAST
+    } else {
+        SmoltcpIpv4Address::from(reply.leased_ip().octets())
+    };
     let src_ip_addr = IpAddress::Ipv4(src_ip);
     let dst_ip_addr = IpAddress::Ipv4(dst_ip);
     let checksum_caps = ChecksumCapabilities::default();
     let frame_len = DHCP_REPLY_HEADERS + payload_len;
 
     let mut ethernet = EthernetFrame::new_unchecked(&mut frame[..frame_len]);
-    ethernet.set_dst_addr(EthernetAddress::BROADCAST);
+    ethernet.set_dst_addr(if broadcast {
+        EthernetAddress::BROADCAST
+    } else {
+        EthernetAddress(reply.client_mac())
+    });
     ethernet.set_src_addr(ap_mac);
     ethernet.set_ethertype(EthernetProtocol::Ipv4);
 
@@ -320,48 +327,63 @@ fn transmit_dhcp_reply(
         &checksum_caps,
     );
 
-    device.transmit_frame(&frame[..frame_len])
+    // Both interfaces share SDK packet storage. Keep this reply while yielding
+    // to the station stack, but bound how long a busy radio can delay the AP.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match device.transmit_frame(&frame[..frame_len]) {
+            Err(DriverError::WouldBlock | DriverError::OutOfMemory)
+                if Instant::now() < deadline =>
+            {
+                Timer::after_millis(1).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 #[esp8266_hal::main]
-async fn main(spawner: Spawner) {
+fn main() -> ! {
+    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let (_, timer2) = peripherals.TIMER.timers();
+    let runtime = support::init(timer2);
+    static EXECUTOR: StaticCell<esp8266_hal::wifi::executor::Executor> = StaticCell::new();
+    EXECUTOR
+        .init(esp8266_hal::wifi::executor::Executor::new())
+        .run(runtime, |spawner| {
+            spawner.must_spawn(app_main(spawner, runtime));
+        })
+}
+
+#[embassy_executor::task]
+async fn app_main(spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtime) {
     log_line(b"wifi_ap_sta start");
 
-    let mut driver = init_wifi();
+    let (mut driver, interfaces) = init_wifi(runtime);
     log_line(b"ap started");
 
-    if let Err(error) = connect_wifi(&mut driver) {
-        match error {
-            esp8266_hal::wifi::DriverError::Timeout => log_line(b"ap_sta err connect-timeout"),
-            esp8266_hal::wifi::DriverError::StaStartTimeout => {
-                log_line(b"ap_sta err sta-start-timeout")
-            }
-            esp8266_hal::wifi::DriverError::Disconnected => {
-                log_line(b"ap_sta err connect-disconnected")
-            }
-            esp8266_hal::wifi::DriverError::BackendRejected => {
-                log_line(b"ap_sta err connect-backend")
-            }
-            _ => log_line(b"ap_sta err connect-other"),
-        }
+    if let Err(error) = support::connect(&mut driver) {
+        support::log_debug(&error);
+        log_line(b"ap_sta err connect");
         loop {
             embassy_time::Timer::after(Duration::from_secs(60)).await;
         }
     }
 
-    match driver.ap().connected_stations::<10>() {
-        Ok(stations) => log_station_count(stations.len()),
+    let mut stations = [esp8266_hal::wifi::ApStationInfo::default(); 10];
+    match driver.connected_stations(&mut stations) {
+        Ok(count) => log_station_count(count),
         Err(_error) => log_line(b"ap_sta err stations"),
     }
 
     log_line(b"network starting");
-    let (stack, ap_device) = start_network(spawner, driver);
+    let (stack, ap_device) = start_network(spawner, interfaces);
     run_networks(stack, ap_device).await
 }
 
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    esp8266_hal::logger::write_byte(b'?');
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    esp8266_hal::println!("panic {info}");
     loop {}
 }
 

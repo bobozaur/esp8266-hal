@@ -3,9 +3,11 @@
 
 use panic_halt as _;
 
+mod support;
+use esp8266_hal::timer::TimerExt;
+
 use esp8266_hal::wifi::{
-    Channel, ClientConfig, InitConfig, Passphrase, Ssid, StationCredential, WifiDriver,
-    WifiResources,
+    Channel, ClientConfig, Configuration, InitConfig, Passphrase, Ssid, StationCredential, Wifi,
 };
 use static_cell::StaticCell;
 
@@ -20,16 +22,18 @@ const WIFI_PASS: &str = match option_env!("ESP8266_HAL_WIFI_PASS") {
 const WIFI_CHANNEL: Option<&str> = option_env!("ESP8266_HAL_WIFI_CHANNEL");
 const WIFI_CONNECT_TIMEOUT_MS: Option<&str> = option_env!("ESP8266_HAL_WIFI_CONNECT_TIMEOUT_MS");
 
-static RESOURCES: StaticCell<WifiResources<8, 4>> = StaticCell::new();
+static WIFI: StaticCell<Wifi> = StaticCell::new();
 
 #[esp8266_hal::main]
 fn main() -> ! {
+    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let (_, timer2) = peripherals.TIMER.timers();
+    let runtime = support::init(timer2);
     esp8266_hal::logger::write_bytes(b"wifi_core_connect start");
     esp8266_hal::logger::write_newline();
 
-    let resources = RESOURCES.init_with(WifiResources::new);
-    let driver = WifiDriver::new(resources);
-    let driver = driver.initialize(InitConfig::default()).expect("init");
+    let wifi = WIFI.init(Wifi::new(runtime, InitConfig::default()).expect("wifi init"));
+    let (mut driver, interfaces) = wifi.split();
     esp8266_hal::logger::write_bytes(b"wifi core initialized");
     esp8266_hal::logger::write_newline();
 
@@ -47,25 +51,22 @@ fn main() -> ! {
         config = config.with_channel(channel);
     }
 
-    let mut driver = driver
-        .configure_sta(config)
-        .expect("configure")
-        .start()
-        .expect("start");
+    driver
+        .set_configuration(&Configuration::Station(config))
+        .expect("configure");
+    driver.start_blocking(1_000).expect("start");
     esp8266_hal::logger::write_bytes(b"wifi core started");
     esp8266_hal::logger::write_newline();
     let connect_timeout_ms = WIFI_CONNECT_TIMEOUT_MS
         .and_then(parse_u32_literal)
         .unwrap_or(60_000);
     {
-        let mut sta = driver.sta();
+        let sta = &mut driver;
         if let Err(error) = sta.connect_blocking(connect_timeout_ms) {
             esp8266_hal::logger::write_bytes(b"wifi-connect-error=");
-            esp8266_hal::logger::write_bytes(driver_error_name(error).as_bytes());
+            support::log_debug(&error);
             esp8266_hal::logger::write_bytes(b" reason=");
-            esp8266_hal::logger::write_dec_u32(
-                resources.last_disconnect_reason().unwrap_or(0) as u32
-            );
+            esp8266_hal::logger::write_dec_u32(driver.last_disconnect_reason().unwrap_or(0) as u32);
             esp8266_hal::logger::write_newline();
             esp8266_hal::logger::write_bytes(b"wifi core connect err");
             esp8266_hal::logger::write_newline();
@@ -77,8 +78,7 @@ fn main() -> ! {
     esp8266_hal::logger::write_bytes(b"wifi core associated");
     esp8266_hal::logger::write_newline();
 
-    let link = driver.sta_link().expect("sta link");
-    let _mac = link.mac_address().expect("mac");
+    let link = interfaces.station;
     let _state = link.link_state();
 
     esp8266_hal::logger::write_bytes(b"wifi core connected");
@@ -109,22 +109,4 @@ fn parse_u32_literal(value: &str) -> Option<u32> {
         result = result.checked_mul(10)?.checked_add((byte - b'0') as u32)?;
     }
     Some(result)
-}
-
-fn driver_error_name(error: esp8266_hal::wifi::DriverError) -> &'static str {
-    match error {
-        esp8266_hal::wifi::DriverError::Timeout => "timeout",
-        esp8266_hal::wifi::DriverError::StaStartTimeout => "sta-start-timeout",
-        esp8266_hal::wifi::DriverError::Disconnected => "disconnected",
-        esp8266_hal::wifi::DriverError::EventOverflow => "event-overflow",
-        esp8266_hal::wifi::DriverError::PacketOverflow => "packet-overflow",
-        esp8266_hal::wifi::DriverError::PeerOverflow => "peer-overflow",
-        esp8266_hal::wifi::DriverError::PayloadTooLong => "payload-too-long",
-        esp8266_hal::wifi::DriverError::InvalidFrameSize => "invalid-frame-size",
-        esp8266_hal::wifi::DriverError::OutOfMemory => "out-of-memory",
-        esp8266_hal::wifi::DriverError::NotStarted => "not-started",
-        esp8266_hal::wifi::DriverError::WouldBlock => "would-block",
-        esp8266_hal::wifi::DriverError::BackendRejected => "backend-rejected",
-        esp8266_hal::wifi::DriverError::BackendError(_) => "backend-error",
-    }
 }

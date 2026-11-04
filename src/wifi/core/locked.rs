@@ -14,11 +14,6 @@ impl<T> Locked<T> {
     pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         critical_section::with(|_| unsafe { f(&mut *self.inner.get()) })
     }
-
-    #[cfg(feature = "wifi-esp-now")]
-    pub fn with_ref<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        critical_section::with(|_| unsafe { f(&*self.inner.get()) })
-    }
 }
 
 // SAFETY: Access is serialized through `critical_section::with`.

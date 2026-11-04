@@ -3,9 +3,13 @@
 
 use panic_halt as _;
 
+mod support;
+use esp8266_hal::timer::TimerExt;
+use support::log_line;
+
 use esp8266_hal::wifi::{
-    Channel, ClientConfig, EnterpriseIdentity, EnterprisePassword, EnterpriseUsername, InitConfig,
-    LinkState, Ssid, StationCredential, WifiDriver, WifiResources, Wpa2EnterpriseClientCertificate,
+    Channel, ClientConfig, Configuration, Controller, EnterpriseIdentity, EnterprisePassword,
+    EnterpriseUsername, InitConfig, Ssid, StationCredential, Wifi, Wpa2EnterpriseClientCertificate,
     Wpa2EnterpriseCredentials,
 };
 use static_cell::StaticCell;
@@ -35,8 +39,6 @@ const EAP_EXPECT_FAILURE: bool = match option_env!("ESP8266_HAL_EAP_EXPECT_FAILU
     None => false,
 };
 const EAP_DISABLE_TIME_CHECK: Option<&str> = option_env!("ESP8266_HAL_EAP_DISABLE_TIME_CHECK");
-
-type EapResources = WifiResources<0, 0>;
 
 #[cfg(esp8266_hal_eap_ca_cert_pem_nul_file)]
 const EAP_CA_CERT_PEM_NUL: Option<&[u8]> =
@@ -83,33 +85,33 @@ const EAP_PRIVATE_KEY_DER: Option<&[u8]> =
 #[cfg(not(esp8266_hal_eap_private_key_der_file))]
 const EAP_PRIVATE_KEY_DER: Option<&[u8]> = None;
 
-static RESOURCES: StaticCell<EapResources> = StaticCell::new();
+static WIFI: StaticCell<Wifi> = StaticCell::new();
 
 #[esp8266_hal::main]
 fn main() -> ! {
+    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let (_, timer2) = peripherals.TIMER.timers();
+    let runtime = support::init(timer2);
     log_line(b"wifi_eap start");
 
-    let resources = RESOURCES.init_with(WifiResources::new);
-    log_line(b"wifi eap resources");
-
-    let driver = WifiDriver::new(resources);
-    log_line(b"wifi eap before init");
-    let init_config = InitConfig::new(14, 4, 4).expect("init config");
-    let driver = match driver.initialize(init_config) {
-        Ok(driver) => {
-            log_line(b"wifi eap initialized");
-            driver
+    let mut init = InitConfig::new(14, 4, 4).expect("init config");
+    init.queues.station_rx = 0;
+    let wifi = WIFI.init(Wifi::new(runtime, init).expect("wifi init"));
+    let (mut driver, interfaces) = wifi.split();
+    esp8266_hal::logger::write_bytes(b"wifi eap station mac=");
+    for (index, byte) in interfaces.station.mac_address().into_iter().enumerate() {
+        if index != 0 {
+            esp8266_hal::logger::write_byte(b':');
         }
-        Err(error) => {
-            log_init_error(b"wifi eap init err", error);
-            loop_delay();
-        }
-    };
+        esp8266_hal::logger::write_hex_u8(byte);
+    }
+    esp8266_hal::logger::write_newline();
+    log_line(b"wifi eap initialized");
 
     let mut credentials = Wpa2EnterpriseCredentials::new(
-        EnterpriseIdentity::new(EAP_IDENTITY.trim()).expect("eap identity"),
-        EnterpriseUsername::new(EAP_USERNAME.trim()).expect("eap username"),
-        EnterprisePassword::new(EAP_PASSWORD.trim()).expect("eap password"),
+        EnterpriseIdentity::new(EAP_IDENTITY).expect("eap identity"),
+        EnterpriseUsername::new(EAP_USERNAME).expect("eap username"),
+        EnterprisePassword::new(EAP_PASSWORD).expect("eap password"),
     )
     .with_disable_time_check(env_bool(EAP_DISABLE_TIME_CHECK, true));
     if let Some(ca_cert) = optional_der_bytes(EAP_CA_CERT_DER, b"wifi eap ca cert der invalid") {
@@ -133,7 +135,7 @@ fn main() -> ! {
         }
     }
     let mut config = ClientConfig::new(
-        Ssid::try_from(EAP_SSID.trim()).expect("eap ssid"),
+        Ssid::try_from(EAP_SSID).expect("eap ssid"),
         StationCredential::enterprise(&credentials),
     );
     if let Some(channel) =
@@ -142,65 +144,28 @@ fn main() -> ! {
         config = config.with_channel(channel);
     }
 
-    let driver = match driver.configure_sta(config) {
-        Ok(driver) => {
-            log_line(b"wifi eap configured");
-            driver
-        }
-        Err(error) => {
-            log_driver_error(b"wifi eap configure err", error, resources);
-            loop_delay();
-        }
-    };
-
-    let mut driver = match driver.start() {
-        Ok(driver) => {
-            log_line(b"wifi eap started");
-            driver
-        }
-        Err(error) => {
-            log_driver_error(b"wifi eap start err", error, resources);
-            loop_delay();
-        }
-    };
-
-    {
-        log_line(b"wifi eap connecting");
-        let mut sta = driver.sta();
-        if let Err(error) = sta.connect() {
-            log_driver_error(
-                b"wifi eap connect err",
-                driver_error_from_connect(error),
-                resources,
-            );
-            if EAP_EXPECT_FAILURE {
-                log_line(b"eap-negative-ok");
-            }
-            loop_delay();
-        }
-
-        let mut associated = false;
-        for _ in 0..120 {
-            if resources.link_state() == LinkState::Up {
-                associated = true;
-                break;
-            }
-
-            esp8266_hal::wifi::delay_ticks(100);
-        }
-
-        if !associated {
-            let _ = sta.disconnect();
-            log_driver_error(
-                b"wifi eap connect err",
-                esp8266_hal::wifi::DriverError::Timeout,
-                resources,
-            );
-            if EAP_EXPECT_FAILURE {
-                log_line(b"eap-negative-ok");
-            }
-            loop_delay();
-        }
+    if let Err(error) = driver.set_configuration(&Configuration::Station(config)) {
+        log_driver_error(b"wifi eap configure err", error, &driver);
+        loop_delay();
+    }
+    log_line(b"wifi eap configured");
+    if let Err(error) = driver.start_blocking(1_000) {
+        log_driver_error(b"wifi eap start err", error, &driver);
+        loop_delay();
+    }
+    log_line(b"wifi eap started");
+    log_line(b"wifi eap connecting");
+    if let Err(error) = driver.connect_blocking(60_000) {
+        // The SDK reports disconnection, not whether an inner EAP password caused it.
+        let marker: &[u8] = if EAP_EXPECT_FAILURE
+            && matches!(&error, esp8266_hal::wifi::DriverError::Disconnected { .. })
+        {
+            b"eap-negative-disconnected"
+        } else {
+            b"wifi eap connect err"
+        };
+        log_driver_error(marker, error, &driver);
+        loop_delay();
     }
 
     if EAP_EXPECT_FAILURE {
@@ -209,91 +174,29 @@ fn main() -> ! {
     }
 
     log_line(b"wifi eap associated");
-    let link = driver.sta_link().expect("sta link");
-    let _mac = link.mac_address().expect("mac");
+    let link = interfaces.station;
     let _state = link.link_state();
     log_line(b"eap-ok");
 
     loop_delay();
 }
 
-fn log_line(message: &[u8]) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_newline();
-}
-
 fn log_driver_error(
     message: &[u8],
     error: esp8266_hal::wifi::DriverError,
-    resources: &EapResources,
+    driver: &Controller<'_>,
 ) {
     esp8266_hal::logger::write_bytes(b"wifi eap error detail error=");
-    esp8266_hal::logger::write_bytes(driver_error_name(&error));
-    if let esp8266_hal::wifi::DriverError::BackendError(code) = error {
-        esp8266_hal::logger::write_bytes(b" code=");
-        write_i32(code);
-    }
+    support::log_debug(&error);
     esp8266_hal::logger::write_bytes(b" disconnect=");
-    esp8266_hal::logger::write_dec_u32(resources.last_disconnect_reason().unwrap_or(0) as u32);
+    esp8266_hal::logger::write_dec_u32(driver.last_disconnect_reason().unwrap_or(0) as u32);
     esp8266_hal::logger::write_newline();
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_newline();
-}
-
-fn log_init_error(message: &[u8], error: esp8266_hal::wifi::InitError) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_bytes(b" error=");
-    esp8266_hal::logger::write_bytes(match error {
-        esp8266_hal::wifi::InitError::AlreadyInitialized => b"already-initialized",
-        esp8266_hal::wifi::InitError::BackendUnavailable => b"backend-unavailable",
-    });
-    esp8266_hal::logger::write_newline();
-}
-
-fn driver_error_name(error: &esp8266_hal::wifi::DriverError) -> &'static [u8] {
-    match error {
-        &esp8266_hal::wifi::DriverError::Timeout => b"timeout",
-        &esp8266_hal::wifi::DriverError::StaStartTimeout => b"sta-start-timeout",
-        &esp8266_hal::wifi::DriverError::Disconnected => b"disconnected",
-        &esp8266_hal::wifi::DriverError::EventOverflow => b"event-overflow",
-        &esp8266_hal::wifi::DriverError::PacketOverflow => b"packet-overflow",
-        &esp8266_hal::wifi::DriverError::PeerOverflow => b"peer-overflow",
-        &esp8266_hal::wifi::DriverError::PayloadTooLong => b"payload-too-long",
-        &esp8266_hal::wifi::DriverError::InvalidFrameSize => b"invalid-frame-size",
-        &esp8266_hal::wifi::DriverError::OutOfMemory => b"out-of-memory",
-        &esp8266_hal::wifi::DriverError::NotStarted => b"not-started",
-        &esp8266_hal::wifi::DriverError::WouldBlock => b"would-block",
-        &esp8266_hal::wifi::DriverError::BackendRejected => b"backend-rejected",
-        &esp8266_hal::wifi::DriverError::BackendError(_) => b"backend-error",
-    }
-}
-
-fn driver_error_from_connect(
-    error: esp8266_hal::wifi::ConnectError,
-) -> esp8266_hal::wifi::DriverError {
-    match error {
-        esp8266_hal::wifi::ConnectError::Timeout => esp8266_hal::wifi::DriverError::Timeout,
-        esp8266_hal::wifi::ConnectError::Disconnected => {
-            esp8266_hal::wifi::DriverError::Disconnected
-        }
-        esp8266_hal::wifi::ConnectError::BackendRejected => {
-            esp8266_hal::wifi::DriverError::BackendRejected
-        }
-    }
-}
-
-fn write_i32(value: i32) {
-    if value < 0 {
-        esp8266_hal::logger::write_byte(b'-');
-        esp8266_hal::logger::write_dec_u32(value.unsigned_abs());
-    } else {
-        esp8266_hal::logger::write_dec_u32(value as u32);
-    }
+    log_line(message);
 }
 
 fn parse_u8_literal(value: &str) -> Option<u8> {
     let mut result = 0u8;
-    for byte in value.trim().bytes() {
+    for byte in value.trim_ascii().bytes() {
         if !byte.is_ascii_digit() {
             return None;
         }
@@ -371,7 +274,7 @@ fn no_client_certificate_material() -> bool {
 }
 
 fn env_bool(value: Option<&str>, default: bool) -> bool {
-    match value.map(str::trim) {
+    match value.map(str::trim_ascii) {
         Some("0") | Some("false") | Some("no") | Some("off") => false,
         Some("1") | Some("true") | Some("yes") | Some("on") => true,
         _ => default,

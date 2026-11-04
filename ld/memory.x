@@ -1,32 +1,21 @@
-/* This memory map assumes the flash cache is on; 
-   the blocks used are excluded from the various memory ranges 
-   
-   see: https://github.com/espressif/esp-idf/blob/master/components/soc/src/esp32/soc_memory_layout.c
-   for details
-   */
-
-/* override entry point */
+/* ESP8266: 96 KiB of DRAM and 32 KiB of instruction RAM with cache enabled.
+ * The ROM boot stack is inherited by xtensa-lx-rt. Reserve its upper 8 KiB
+ * permanently; this linker budget does not move or reclaim the active stack.
+ */
 ENTRY(ESP8266Reset)
 
-/* define stack size for both cores */
 STACK_SIZE = 8k;
+DRAM_END = 0x40000000;
+_heap_end = DRAM_END - STACK_SIZE;
 
-/* Specify main memory areas */
 MEMORY
 {
-  reserved_cache_seg     : ORIGIN = 0x40070000, len = 64k /* SRAM0; reserved for usage as flash cache*/
-  vectors_seg ( RX )     : ORIGIN = 0x40100000, len =  0x100 /* SRAM0 */
-  iram_seg ( RX )        : ORIGIN = 0x40100100, len = 0x8000 - 0x0100 /* SRAM0 */
-
-  reserved_for_rom_seg   : ORIGIN = 0x3FFAE000, len = 8k /* SRAM2; reserved for usage by the ROM */
-  dram_seg ( RW )        : ORIGIN = 0x3FFE8000, len = 0x14000 /* SRAM2+1; first 64kB used by BT if enable */
-  reserved_for_boot_seg  : ORIGIN = 0x3FFDC200, len = 144k /* SRAM1; reserved for static ROM usage; can be used for heap */
-
-  irom_seg ( RX )        : ORIGIN = 0x40210000, len = 0xfeff0
-  drom_seg ( R )         : ORIGIN = 0x3F400000, len = 4M - 0x20
-
-  /* RTC memory */
-  rtc_seg(RW)  : ORIGIN = 0x60001000, len = 768
+  vectors_seg (RX) : ORIGIN = 0x40100000, LENGTH = 0x100
+  iram_seg (RX)    : ORIGIN = 0x40100100, LENGTH = 0x7f00
+  dram_seg (RW)    : ORIGIN = 0x3ffe8000, LENGTH = 0x18000 - STACK_SIZE
+  irom_seg (RX)    : ORIGIN = 0x40210000, LENGTH = 0xf0000
+  /* 0x60001000..0x60001200 belongs to the SDK/ROM. */
+  rtc_seg (RW)     : ORIGIN = 0x60001200, LENGTH = 0x200
 }
 
 /* map generic regions to output sections */
@@ -62,31 +51,16 @@ SECTIONS {
   } > rtc_seg
 }
 
-_heap_end = ABSOLUTE(ORIGIN(dram_seg))+LENGTH(dram_seg)+LENGTH(reserved_for_boot_seg) - 2*STACK_SIZE;
-_text_heap_end = ABSOLUTE(ORIGIN(iram_seg)+LENGTH(iram_seg));
+ASSERT(_heap_start <= _heap_end, "Static DRAM overlaps the reserved application stack");
+_text_heap_end = ORIGIN(iram_seg) + LENGTH(iram_seg);
 
-_stack_start_cpu1 = _heap_end;
-_stack_end_cpu1 = _stack_start_cpu1 + STACK_SIZE;
-_stack_start_cpu0 = _stack_end_cpu1;
-_stack_end_cpu0 = _stack_start_cpu0 + STACK_SIZE;
-
-EXTERN(DefaultHandler);
-
-/* interrupt handlers */
-PROVIDE(__slc_interrupt = __default_interrupt);
-PROVIDE(__spi_interrupt = __default_interrupt);
-PROVIDE(__gpio_interrupt = __default_interrupt);
-PROVIDE(__uart_interrupt = __default_interrupt);
-PROVIDE(__ccompare_interrupt = __default_interrupt);
-PROVIDE(__soft_interrupt = __default_interrupt);
-PROVIDE(__wdt_interrupt = __default_interrupt);
-PROVIDE(__timer1_interrupt = __default_interrupt);
-
-PROVIDE(__slc_hal_interrupt = __default_interrupt);
-PROVIDE(__spi_hal_interrupt = __default_interrupt);
-PROVIDE(__gpio_hal_interrupt = __default_interrupt);
-PROVIDE(__uart_hal_interrupt = __default_interrupt);
-PROVIDE(__ccompare_hal_interrupt = __default_interrupt);
-PROVIDE(__soft_hal_interrupt = __default_interrupt);
-PROVIDE(__wdt_hal_interrupt = __default_interrupt);
-PROVIDE(__timer1_hal_interrupt = __default_interrupt);
+/* Application handlers have extern C fn() ABI, separate from the runtime's
+ * exception default handler that accepts an interrupt level and context. */
+PROVIDE(__slc_interrupt = __esp8266_hal_default_interrupt);
+PROVIDE(__spi_interrupt = __esp8266_hal_default_interrupt);
+PROVIDE(__gpio_interrupt = __esp8266_hal_default_interrupt);
+PROVIDE(__uart_interrupt = __esp8266_hal_default_interrupt);
+PROVIDE(__ccompare_interrupt = __esp8266_hal_default_interrupt);
+PROVIDE(__soft_interrupt = __esp8266_hal_default_interrupt);
+PROVIDE(__wdt_interrupt = __esp8266_hal_default_interrupt);
+PROVIDE(__timer1_interrupt = __esp8266_hal_default_interrupt);

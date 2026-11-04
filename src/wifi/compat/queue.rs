@@ -268,15 +268,40 @@ impl RawQueue {
 // ---------------------------------------------------------------------------
 
 /// Internal: allocate a queue with given type.
-unsafe fn create_queue(cap: usize, item_size: usize, qtype: u8) -> *mut c_void {
+pub(crate) const fn allocation_bytes() -> usize {
+    core::mem::size_of::<RawQueue>()
+}
+
+pub(crate) unsafe fn create_pp_queue() -> *mut c_void {
+    unsafe { create_queue(75, 8, QUEUE_TYPE_BASE, true) }
+}
+
+unsafe fn create_queue(cap: usize, item_size: usize, qtype: u8, pp_queue: bool) -> *mut c_void {
     unsafe {
-        let q = memory::malloc(core::mem::size_of::<RawQueue>()) as *mut RawQueue;
+        let reserved = if pp_queue {
+            memory::take_init_allocation(memory::InitAllocation::PpQueue, allocation_bytes())
+        } else {
+            None
+        };
+        let q = reserved
+            .unwrap_or_else(|| memory::malloc(allocation_bytes()))
+            .cast::<RawQueue>();
         if q.is_null() {
             return core::ptr::null_mut();
         }
 
         let storage = if item_size > 0 && cap > 0 {
-            let buf = memory::malloc(cap * item_size) as *mut u8;
+            let reserved = if pp_queue {
+                memory::take_init_allocation(
+                    memory::InitAllocation::PpQueueStorage,
+                    cap * item_size,
+                )
+            } else {
+                None
+            };
+            let buf = reserved
+                .unwrap_or_else(|| memory::malloc(cap * item_size))
+                .cast::<u8>();
             if buf.is_null() {
                 memory::free(q as *mut c_void);
                 return core::ptr::null_mut();
@@ -310,14 +335,12 @@ unsafe fn create_queue(cap: usize, item_size: usize, qtype: u8) -> *mut c_void {
 #[no_mangle]
 pub unsafe extern "C" fn xQueueCreate(queue_len: u32, item_size: u32) -> *mut c_void {
     unsafe {
-        if queue_len == 8 {
-            crate::logger::write_byte(b'L');
-        }
-        let q = create_queue(queue_len as usize, item_size as usize, QUEUE_TYPE_BASE);
-        if queue_len == 8 {
-            crate::logger::write_byte(if q.is_null() { b'!' } else { b'l' });
-        }
-        q
+        create_queue(
+            queue_len as usize,
+            item_size as usize,
+            QUEUE_TYPE_BASE,
+            false,
+        )
     }
 }
 
@@ -328,25 +351,19 @@ pub unsafe extern "C" fn xQueueGenericCreate(
     item_size: u32,
     queue_type: u8,
 ) -> *mut c_void {
-    unsafe { create_queue(queue_len as usize, item_size as usize, queue_type) }
+    unsafe { create_queue(queue_len as usize, item_size as usize, queue_type, false) }
 }
 
 /// `xQueueCreateMutex` — create a mutex (queue of length 1, item_size 0).
 #[no_mangle]
 pub unsafe extern "C" fn xQueueCreateMutex(mutex_type: u8) -> *mut c_void {
     unsafe {
-        if mutex_type == QUEUE_TYPE_RECURSIVE_MUTEX {
-            crate::logger::write_byte(b'U');
-        }
-        let q = create_queue(1, 0, mutex_type);
+        let q = create_queue(1, 0, mutex_type, false);
         if !q.is_null() {
             // Mutex starts "given" (count=1 = available).
             let rq = &mut *(q as *mut RawQueue);
             rq.count = 1;
             rq.mutex_holder = usize::MAX;
-        }
-        if mutex_type == QUEUE_TYPE_RECURSIVE_MUTEX {
-            crate::logger::write_byte(if q.is_null() { b'!' } else { b'u' });
         }
         q
     }
@@ -356,7 +373,7 @@ pub unsafe extern "C" fn xQueueCreateMutex(mutex_type: u8) -> *mut c_void {
 #[no_mangle]
 pub unsafe extern "C" fn xQueueCreateCountingSemaphore(max: u32, init: u32) -> *mut c_void {
     unsafe {
-        let q = create_queue(max as usize, 0, QUEUE_TYPE_COUNTING_SEMAPHORE);
+        let q = create_queue(max as usize, 0, QUEUE_TYPE_COUNTING_SEMAPHORE, false);
         if !q.is_null() {
             let rq = &mut *(q as *mut RawQueue);
             rq.count = init as usize;

@@ -11,13 +11,14 @@ the pinned Xtensa GCC linker driver required by the ESP8266 Rust target.
 - SDK commit: `da7ce37be424d71874241ca9f17cf8da0e3cdb70`
 - Driver source tree used to derive this snapshot:
   `2624d1c959f71b98ff93c4f611f987a9c3d9fc71`
-- Generated: 2026-07-22
+- Baseline snapshot generated: 2026-07-22
+- Derived archives rebuilt: 2026-11-04
 - C toolchain: `xtensa-lx106-elf-gcc 8.4.0`, crosstool-NG
   `esp-2020r3-49-gd5524c1`
 - Wi-Fi bindings generator: `rust-bindgen 0.70.1`
 - lwIP bindings generator: `rust-bindgen 0.72.1`
 
-The derived archives were produced once from the pinned SDK/toolchain with all
+The derived archives are built out of band from the pinned SDK/toolchain with all
 Wi-Fi features enabled, then normalized with deterministic archive headers:
 
 ```text
@@ -37,6 +38,21 @@ the Rust scheduler as narrowly scoped inline assembly. `patched-sources/`
 contains the canonical WPA/WPS/mbedTLS translation units and helper inputs used
 to build the three derived archives. It is provenance material and is not
 compiled during a normal build.
+
+The canonical SDK configuration keeps the SDK-default optional Camellia,
+mbedTLS DES, and Blowfish algorithms disabled. TLS retains AES with CBC, CCM,
+and GCM plus RSA, ECDHE-RSA, and ECDHE-ECDSA key exchanges; optional Camellia
+and 3DES TLS compatibility is omitted. WPA's separate DES implementation
+continues to support MSCHAPv2. The canonical `sdkconfig.h` is copied into the
+generator output before native compilation, alongside the patched sources.
+
+The canonical TLS backend accepts a null connection during teardown. EAP
+initialization failure can leave or reset the connection pointer to null before
+shared cleanup runs; the guard preserves that failure path without a native
+null dereference. It does not change the original initialization error.
+TLS and EAP handshake allocations use the application-provided allocator;
+temporary input and output buffers are released and restored around
+cryptographic work to reduce peak memory use.
 
 The closed ESP8266 archives and linker scripts are byte-for-byte copies from
 the pinned SDK's `components/esp8266/{lib,ld}` directories. `libc.a` and
@@ -62,6 +78,9 @@ Two checked-in patches make the derivation auditable:
   allocation-context hooks, debug printing, and direct-UART WPS tracing, and
   adds the required modification notices. The notices use `#line` so they do
   not perturb the source line identities that reach object metadata.
+  For audit reconstruction, apply it in the historical generator output
+  directory with `patch --fuzz=0 -p1`; Git requires `git apply --unidiff-zero`
+  for its zero-context hunks.
 - `generator-rebuild.patch` applies to driver commit `2624d1c`. It adds stable
   `-ffile-prefix-map`/`-fmacro-prefix-map` values and makes each generated
   translation unit prefer the canonical file of the same name from
@@ -94,13 +113,22 @@ env -u ESP8266_HAL_EAP_TRACE \
 
 The build script finishes the three archives before Cargo compiles the tiny
 sys-crate library, so a later target-core diagnostic does not invalidate the
-archive output. Verify the ten canonical generated inputs byte for byte, then
+archive output. Verify the twelve canonical generated inputs byte for byte, then
 remove the obsolete `ap_netif_bridge` and generated `sdk_stubs` members from
 `libesp8266_sdk.a`; those symbols are now provided by Rust. Copy the three
 derived archives into `libs/`, run `./normalize-archives.sh`, and regenerate
 `SHA256SUMS`. The upstream closed archives, newlib archives, linker scripts,
 and generated bindings are direct copies from the pinned inputs described
 above.
+
+For changes confined to canonical C translation units, use the same reproduction
+procedure, then import only their rebuilt objects into the corresponding archives.
+Find each existing member by its source-name suffix with `ar t` and preserve
+that member name when replacing it with `ar rD`; rebuild the symbol index with
+`ar sD`. Preserve member order and compare all unaffected members byte for byte.
+Update `post-generator-normalization.patch` to reconstruct the corrected canonical
+sources, normalize the archives, and regenerate `SHA256SUMS`. Configuration changes
+require rebuilding and importing all three derived archives.
 
 `normalize-archives.sh` preserves member order while setting archive member
 timestamps, owners, groups, and modes deterministically. The compiler prefix

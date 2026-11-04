@@ -1,7 +1,7 @@
 //! Minimal UART0 logging via direct FIFO register writes.
 //!
-//! The ROM bootloader already configures UART0 at 74880 baud, so this works
-//! without any pin setup. Open your serial monitor at **74880 baud**.
+//! Uses the current UART0 pin and baud configuration. Configure the UART and
+//! serial monitor for the application; ROM boot messages use a separate baud rate.
 //!
 //! # Usage
 //!

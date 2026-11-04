@@ -7,6 +7,7 @@ name = "esp8266-hal"
 version = "0.6.0"
 authors = ["Jesse Braham <jesse@beta7.io>", "Robin Appelman <robin@icewind.nl>"]
 edition = "2021"
+rust-version = "1.80"
 description = "HAL for ESP8266 microcontrollers"
 repository = "https://github.com/esp-rs/esp8266-hal"
 license = "MIT OR Apache-2.0"
@@ -14,10 +15,12 @@ autoexamples = false
 include = [
   "/src/**",
   "/examples/*.rs",
+  "/examples/support/**",
   "/tests/*.rs",
   "/ld/**",
   "/build.rs",
   "/README.md",
+  "/docs/**",
   "/LICENSE-APACHE",
   "/LICENSE-MIT",
 ]
@@ -29,16 +32,16 @@ categories = ["embedded", "hardware-support", "no-std"]
 embedded-hal = { version = "0.2", features = ["unproven"] }
 esp8266 = { version = "0.7", path = "./esp8266", default-features = false, features = ["critical-section"] }
 nb = "1.0"
-paste = { version = "1.0", optional = true }
 void = { version = "1.0", default-features = false }
 
 esp8266-hal-proc-macros = { path = "procmacros", version = "=0.2.0", default-features = false }
 
-# WiFi dependencies (optional, enabled by `wifi` feature)
+# Wi-Fi remains optional: upstream allocation containers require an application
+# global allocator even when the radio is unused. Runtime initialization stays explicit.
 esp8266-wifi-sys = { version = "=0.1.0", path = "esp8266-wifi-sys", default-features = false, optional = true }
 portable-atomic = { version = "1", default-features = false, optional = true }
 heapless = { version = "0.8", optional = true }
-esp-alloc = { version = "=0.4.0", optional = true }
+allocator-api2 = { version = "=0.2.18", default-features = false, features = ["alloc"], optional = true }
 smoltcp = { version = "0.12", default-features = false, features = [
   "medium-ethernet",
   "proto-ipv4",
@@ -52,10 +55,9 @@ embassy-time = { version = "=0.3.2", default-features = false, features = [
 ], optional = true }
 embassy-time-driver = { version = "=0.1.0", default-features = false, optional = true }
 embassy-time-queue-driver = { version = "=0.1.0", default-features = false, optional = true }
-critical-section = { version = "1.2", features = ["restore-state-u32"] }
+critical-section = { version = "1.2", features = ["restore-state-u64"] }
 embassy-net-driver-channel = { version = "=0.3.0", optional = true }
 embassy-futures = { version = "=0.1.1", optional = true }
-static_cell = { version = "2", optional = true }
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 portable-atomic = { version = "1", default-features = false, features = [
@@ -66,6 +68,8 @@ xtensa-lx-rt = { version = "0.12", features = ["esp8266"], optional = true }
 
 [dev-dependencies]
 panic-halt = "1.0"
+esp-alloc = "=0.4.0"
+static_cell = "2"
 embassy-net = { version = "=0.5.0", default-features = false, features = [
   "proto-ipv4",
   "medium-ethernet",
@@ -78,6 +82,9 @@ embassy-futures = "0.1"
 
 [target.'cfg(not(target_arch = "xtensa"))'.dev-dependencies]
 proptest = { version = "=1.6.0", default-features = false, features = ["std"] }
+
+[target.'cfg(target_arch = "xtensa")'.dev-dependencies]
+portable-atomic = { version = "1", default-features = false, features = ["unsafe-assume-single-core"] }
 
 [[example]]
 name = "blinky"
@@ -111,7 +118,7 @@ required-features = ["wifi-embassy-net"]
 
 [[example]]
 name = "wifi_core_connect"
-required-features = ["wifi", "rt", "interrupt"]
+required-features = ["wifi"]
 
 [[example]]
 name = "wifi_core_dhcp_probe"
@@ -119,62 +126,63 @@ required-features = ["wifi-embassy-net"]
 
 [[example]]
 name = "raw_scan"
-required-features = ["wifi", "rt", "interrupt"]
+required-features = ["wifi"]
 
 [[example]]
 name = "wifi_ap"
-required-features = ["wifi", "rt", "interrupt"]
+required-features = ["wifi-smoltcp", "embassy"]
 
 [[example]]
 name = "wifi_ap_sta"
-required-features = ["wifi-embassy-net", "rt", "interrupt"]
+required-features = ["wifi-embassy-net", "wifi-smoltcp"]
 
 [[example]]
 name = "wifi_promisc"
-required-features = ["wifi-promiscuous", "rt", "interrupt"]
+required-features = ["wifi-promiscuous", "embassy"]
 
 [[example]]
 name = "wifi_esp_now_tx"
-required-features = ["wifi-esp-now", "rt", "interrupt"]
+required-features = ["wifi-esp-now", "embassy"]
 
 [[example]]
 name = "wifi_esp_now_rx"
-required-features = ["wifi-esp-now", "rt", "interrupt"]
+required-features = ["wifi-esp-now", "embassy"]
 
 [[example]]
 name = "wifi_wps"
-required-features = ["wifi-wps", "rt", "interrupt"]
+required-features = ["wifi-wps", "embassy"]
 
 [[example]]
 name = "wifi_smartconfig"
-required-features = ["wifi-smartconfig", "rt", "interrupt"]
+required-features = ["wifi-smartconfig", "wifi-smoltcp"]
 
 [[example]]
 name = "wifi_eap"
-required-features = ["wifi-enterprise", "rt", "interrupt"]
+required-features = ["wifi-enterprise"]
 
 [features]
 default = ["interrupt", "rt"]
-interrupt = ["paste"]
+interrupt = []
 rt = ["dep:xtensa-lx-rt"]
-wifi-core = [
+wifi = [
+  "rt",
+  "interrupt",
   "dep:portable-atomic",
   "dep:heapless",
-]
-wifi = [
-  "wifi-core",
+  "dep:allocator-api2",
   "dep:esp8266-wifi-sys",
-  "dep:esp-alloc",
-  "dep:smoltcp",
+]
+embassy = [
+  "wifi",
   "dep:embassy-executor",
   "dep:embassy-time",
   "dep:embassy-time-driver",
   "dep:embassy-time-queue-driver",
-  "dep:static_cell",
-  "esp8266-hal-proc-macros/wifi",
 ]
+wifi-smoltcp = ["wifi", "dep:smoltcp"]
 wifi-embassy-net = [
-  "wifi",
+  "embassy",
+  "dep:smoltcp",
   "dep:embassy-net-driver-channel",
   "dep:embassy-futures",
 ]
@@ -198,5 +206,5 @@ lto = "thin"
 # 1.80.0.0 toolchain when compiling the larger embassy-net examples. Thin LTO
 # preserves cross-CGU optimization while keeping release builds reliable.
 # codegen-units > 1 remains necessary on this toolchain, and the resulting
-# .bss overhead is acceptable given the 80 KB DRAM budget.
+# .bss overhead must fit the linker-enforced DRAM and stack budgets.
 codegen-units = 8

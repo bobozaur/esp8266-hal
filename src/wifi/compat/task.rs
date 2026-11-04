@@ -25,6 +25,7 @@ use super::memory;
 /// SmartConfig, and WPA2 worker tasks. One final slot lets the idle task reap
 /// a just-deleted feature worker before another one starts.
 const MAX_TASKS: usize = 10;
+pub(crate) const PP_TASK_STACK_BYTES: u16 = 2816;
 
 /// Maximum priority levels. Must match `configMAX_PRIORITIES` (15) that the
 /// SDK blob expects. The blob creates tasks at priorities 8, 10, and 12;
@@ -363,45 +364,24 @@ unsafe fn consider_ready_candidate(idx: usize, best_idx: &mut usize, best_prio: 
     }
 }
 
-fn init_stack_common(stack_top: *mut u8, pc: u32, a0: u32, a2: u32) -> *mut u8 {
-    unsafe {
-        let frame_top = stack_top.add(4) as usize;
-        let sp = ((frame_top - XT_STK_FRMSZ) & !0xF) as *mut u32;
-
-        core::ptr::write_bytes(sp as *mut u8, 0, XT_STK_FRMSZ);
-
-        let set = |offset: usize, val: u32| {
-            sp.add(offset >> 2).write(val);
-        };
-
-        set(XT_STK_PC, pc);
-        set(XT_STK_A0, a0);
-        set(XT_STK_A1, sp as u32 + XT_STK_FRMSZ as u32);
-        set(XT_STK_A2, a2);
-        set(XT_STK_PS, PS_UM | PS_EXCM);
-
-        sp as *mut u8
-    }
-}
-
-/// Build an initial xtensa-lx-rt exception frame for a direct entrypoint.
-pub(crate) unsafe fn init_stack(
-    stack_top: *mut u8,
-    entry: unsafe extern "C" fn(*mut c_void),
-    param: *mut c_void,
-) -> *mut u8 {
-    init_stack_common(stack_top, entry as usize as u32, 0, param as u32)
-}
-
-/// Build an initial frame for a compat-created task using the SDK's direct
-/// entry contract: first restore returns straight into the task entrypoint with
-/// `A2 = param` and `A0 = 0`.
+/// Build the HAL interrupt frame used when a compat-created task first runs.
 pub(crate) unsafe fn init_task_stack(
     stack_top: *mut u8,
     entry: unsafe extern "C" fn(*mut c_void),
     param: *mut c_void,
 ) -> *mut u8 {
-    unsafe { init_stack(stack_top, entry, param) }
+    unsafe {
+        let frame_top = stack_top.add(4) as usize;
+        let sp = ((frame_top - XT_STK_FRMSZ) & !0xF) as *mut u32;
+        core::ptr::write_bytes(sp as *mut u8, 0, XT_STK_FRMSZ);
+        let set = |offset: usize, val: u32| sp.add(offset >> 2).write(val);
+        set(XT_STK_PC, entry as usize as u32);
+        set(XT_STK_A0, 0);
+        set(XT_STK_A1, sp as u32 + XT_STK_FRMSZ as u32);
+        set(XT_STK_A2, param as u32);
+        set(XT_STK_PS, PS_UM | PS_EXCM);
+        sp.cast()
+    }
 }
 
 /// Copy the ISR frame into the current task's per-task save buffer.
@@ -550,59 +530,31 @@ pub(crate) unsafe fn allocate_main_task() {
     }
 }
 
-/// Retire the current compat-only external task registration.
-///
-/// This is used for the temporary boot-thread slot created by
-/// `allocate_main_task()`: it has no owned heap stack and exists only so the
-/// compat scheduler can switch away from the caller once `uiT` has been
-/// created. Unlike a normal FreeRTOS task, there is nothing for the idle task
-/// to reclaim later.
-unsafe fn retire_current_unowned_task_inner(request_switch: bool) {
-    unsafe {
-        critical::vPortEnterCritical();
-
-        let idx = CURRENT_TASK;
-        if idx < MAX_TASKS && TASKS[idx].stack_base.is_null() && TASKS[idx].stack_size == 0 {
-            clear_pending_ready_locked(idx);
-            TASKS[idx].state = TaskState::Free;
-            TASKS[idx].delay_until = 0;
-            TASKS[idx].priority = 0;
-            TASKS[idx].base_priority = 0;
-            TASKS[idx].stack_top = core::ptr::null_mut();
-            TASKS[idx].name = [0; 16];
-            TASKS[idx].tls = [core::ptr::null_mut(); TLS_SLOTS];
-            TASKS[idx].mutex_held_count = 0;
-            TASKS[idx].entry = None;
-            TASKS[idx].param = core::ptr::null_mut();
-            TASK_EVENT_WAIT_BITS[idx] = 0;
-            TASK_EVENT_WAIT_MATCHED[idx] = false;
-            PENDING_READY[idx] = false;
-            TASK_IS_IDLE[idx] = false;
-            STACK_CANARY_REPORTED[idx] = false;
-        }
-
-        critical::vPortExitCritical();
-        if request_switch {
-            super::port::PendSV(1);
-        }
-    }
-}
-
-pub(crate) unsafe fn retire_current_unowned_task_for_first_switch() {
-    unsafe { retire_current_unowned_task_inner(false) }
-}
-
-/// Create the idle task. Called once from `xPortStartScheduler`.
-pub(crate) unsafe fn create_idle_task() {
+/// Create the idle task during explicit runtime preparation.
+pub(crate) unsafe fn create_idle_task() -> i32 {
     unsafe {
         xTaskCreate(
             idle_task,
             b"IDLE\0".as_ptr() as *const _,
-            512,
+            // Match CONFIG_FREERTOS_IDLE_TASK_STACKSIZE in the pinned SDK.
+            // Native idle sleep/time calls need this budget in addition to
+            // the HAL interrupt-frame delta added by create_task.
+            1024,
             core::ptr::null_mut(),
             0, // lowest priority
             core::ptr::null_mut(),
-        );
+        )
+    }
+}
+
+/// Undo startup allocations before the tick or software ISR is activated.
+pub(crate) unsafe fn rollback_startup() {
+    unsafe {
+        for index in 0..MAX_TASKS {
+            destroy_task_slot(index);
+        }
+        pxCurrentTCB = core::ptr::null_mut();
+        CURRENT_TASK = 0;
     }
 }
 
@@ -621,6 +573,33 @@ pub unsafe extern "C" fn xTaskCreate(
     created_task: *mut *mut c_void,
 ) -> i32 {
     unsafe {
+        create_task(
+            task_code,
+            name,
+            stack_depth,
+            parameters,
+            priority,
+            created_task,
+            false,
+        )
+    }
+}
+
+pub(crate) const fn stack_allocation_bytes(requested: u16) -> usize {
+    requested as usize + COMPAT_STACK_FRAME_DELTA
+}
+
+// Only the audited native PP task consumes its pre-reserved stack.
+pub(crate) unsafe fn create_task(
+    task_code: unsafe extern "C" fn(*mut c_void),
+    name: *const c_char,
+    stack_depth: u16,
+    parameters: *mut c_void,
+    priority: u32,
+    created_task: *mut *mut c_void,
+    pp_task: bool,
+) -> i32 {
+    unsafe {
         let mut should_yield = false;
         critical::vPortEnterCritical();
 
@@ -636,9 +615,15 @@ pub unsafe extern "C" fn xTaskCreate(
         // depths are already byte-counted. Preserve SDK-equivalent usable
         // stack by allocating the requested bytes plus the larger live
         // xtensa-lx-rt frame delta.
-        let requested_stack_bytes = stack_depth as usize;
-        let stack_bytes = requested_stack_bytes + COMPAT_STACK_FRAME_DELTA;
-        let stack_base = memory::malloc(stack_bytes) as *mut u8;
+        let stack_bytes = stack_allocation_bytes(stack_depth);
+        let reserved = if pp_task {
+            memory::take_init_allocation(memory::InitAllocation::PpStack, stack_bytes)
+        } else {
+            None
+        };
+        let stack_base = reserved
+            .unwrap_or_else(|| memory::malloc(stack_bytes))
+            .cast::<u8>();
         if stack_base.is_null() {
             critical::vPortExitCritical();
             return ERR_NO_MEM;
@@ -1137,16 +1122,6 @@ unsafe fn x_task_increment_tick_impl() -> i32 {
         let wake_switch = wake_timed_out_tasks_locked(current_prio);
         let mut switch_needed = wake_switch;
 
-        // Process software timers
-        super::timer::process_timers(TICK_COUNT);
-
-        // SDK `xTaskIncrementTick()` only does RTOS tick bookkeeping. Keep
-        // embassy alarm polling on real tick-ISR calls, but skip it when
-        // `xTaskResumeAll()` unwinds pended ticks on an arbitrary task stack.
-        if super::port::xPortInIsrContext() != 0 {
-            crate::wifi::timer_driver::poll_alarms();
-        }
-
         if !switch_needed
             && CURRENT_TASK < MAX_TASKS
             && ready_or_running_count_at_priority(current_prio) > 1
@@ -1193,7 +1168,6 @@ unsafe fn wake_timed_out_tasks_locked(current_prio: u32) -> bool {
 pub unsafe extern "C" fn vTaskStepTick(ticks: u32) {
     unsafe {
         TICK_COUNT += ticks as u64;
-        super::port::esp_increase_tick_cnt(ticks);
     }
 }
 
@@ -1213,8 +1187,7 @@ pub unsafe extern "C" fn xTaskGetTickCount() -> u32 {
 
 /// `vTaskSwitchContext` — select the highest-priority ready task.
 ///
-/// Called after an ISR requests a context switch and from
-/// `xPortStartScheduler`.
+/// Called after an ISR requests a context switch.
 #[no_mangle]
 #[ram]
 pub unsafe extern "C" fn vTaskSwitchContext() {
@@ -1299,6 +1272,7 @@ pub unsafe extern "C" fn vTaskSwitchContext() {
 /// Block the current task until `deadline` tick (0 = no timeout, i.e.
 /// infinite). The task is set to Blocked; the caller must trigger a
 /// context switch after calling this.
+#[cfg(feature = "embassy")]
 pub(crate) unsafe fn block_current_task(deadline: u64) {
     unsafe {
         clear_pending_ready_locked(CURRENT_TASK);

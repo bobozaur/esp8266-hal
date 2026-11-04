@@ -1,4 +1,4 @@
-//! ESP-NOW RX validation example using the typestate WiFi core.
+//! ESP-NOW RX validation example using the Wi-Fi controller.
 
 #![no_std]
 #![no_main]
@@ -6,7 +6,11 @@
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 
-use esp8266_hal::wifi::{Channel, EspNowPeerConfig, InitConfig, WifiDriver, WifiResources};
+mod support;
+use esp8266_hal::timer::TimerExt;
+use support::log_line;
+
+use esp8266_hal::wifi::{Channel, EspNowPeerConfig, InitConfig, Wifi};
 use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
@@ -15,16 +19,9 @@ const ESP_NOW_PEER_CAPACITY: usize = if option_env!("ESP8266_HAL_ESPNOW_PEER").i
 } else {
     0
 };
-type EspNowResources = WifiResources<8, 4, ESP_NOW_PEER_CAPACITY, 2, 0>;
 
-static WIFI_RESOURCES: StaticCell<EspNowResources> = StaticCell::new();
+static WIFI: StaticCell<Wifi> = StaticCell::new();
 const ESP_NOW_PMK: [u8; 16] = [0x24; 16];
-
-#[inline(always)]
-fn log_line(message: &[u8]) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_newline();
-}
 
 fn log_peer(peer_addr: &[u8; 6]) {
     esp8266_hal::logger::write_bytes(b"esp-now rx peer=");
@@ -82,17 +79,34 @@ fn encrypted_peer_enabled() -> bool {
 }
 
 #[esp8266_hal::main]
-async fn main(_spawner: Spawner) {
+fn main() -> ! {
+    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let (_, timer2) = peripherals.TIMER.timers();
+    let runtime = support::init(timer2);
+    static EXECUTOR: StaticCell<esp8266_hal::wifi::executor::Executor> = StaticCell::new();
+    EXECUTOR
+        .init(esp8266_hal::wifi::executor::Executor::new())
+        .run(runtime, |spawner| {
+            spawner.must_spawn(app_main(spawner, runtime));
+        })
+}
+
+#[embassy_executor::task]
+async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtime) {
     log_line(b"wifi_esp_now_rx start");
 
-    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let driver = WifiDriver::new(resources)
-        .initialize(InitConfig::new(14, 4, 4).expect("init config"))
-        .expect("wifi init");
+    let mut init = InitConfig::new(14, 4, 4).expect("init config");
+    init.queues.esp_now_peers = ESP_NOW_PEER_CAPACITY;
+    init.queues.esp_now_rx = 2;
+    let wifi = WIFI.init(Wifi::new(runtime, init).expect("wifi init"));
+    let (mut driver, _) = wifi.split();
     log_line(b"wifi init ok");
 
-    let mut driver = match driver.enable_sta().and_then(|driver| driver.start()) {
-        Ok(driver) => driver,
+    match driver
+        .enable_station()
+        .and_then(|()| driver.start_blocking(1_000))
+    {
+        Ok(()) => {}
         Err(_error) => {
             log_line(b"esp-now start err");
             loop {
@@ -136,7 +150,9 @@ async fn main(_spawner: Spawner) {
         }
     }
 
-    if let Some(peer) = option_env!("ESP8266_HAL_ESPNOW_PEER").and_then(parse_peer_addr) {
+    let expected_peer = option_env!("ESP8266_HAL_ESPNOW_PEER")
+        .map(|value| parse_peer_addr(value).expect("esp-now peer address"));
+    if let Some(peer) = expected_peer {
         let peer_config = if encrypted_peer_enabled() {
             log_line(b"esp-now rx peer encrypted");
             EspNowPeerConfig::encrypted(peer, [0x42; 16])
@@ -161,7 +177,11 @@ async fn main(_spawner: Spawner) {
             esp8266_hal::logger::write_bytes(b"esp-now rx len=");
             esp8266_hal::logger::write_dec_u32(frame.payload().len() as u32);
             esp8266_hal::logger::write_newline();
-            log_line(b"esp-now-rx-ok");
+            if frame.payload() == b"esp8266-hal-esp-now"
+                && expected_peer.map_or(true, |peer| frame.peer_addr() == &peer)
+            {
+                log_line(b"esp-now-rx-ok");
+            }
         }
         Timer::after(Duration::from_millis(20)).await;
     }

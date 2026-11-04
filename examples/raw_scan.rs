@@ -3,57 +3,42 @@
 
 use panic_halt as _;
 
-use esp8266_hal::wifi::{
-    AccessPointRecord, DriverError, InitConfig, InitError, ScanOptions, ScanTimings, WifiDriver,
-    WifiResources,
-};
+mod support;
+use esp8266_hal::timer::TimerExt;
+use support::log_line;
+
+use esp8266_hal::wifi::{AccessPointRecord, InitConfig, ScanOptions, ScanTimings, Wifi};
 use static_cell::StaticCell;
 
-static RESOURCES: StaticCell<WifiResources<8, 4>> = StaticCell::new();
-static SCAN_RECORDS: StaticCell<heapless::Vec<AccessPointRecord, 16>> = StaticCell::new();
-
-#[inline(always)]
-fn log_line(message: &[u8]) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_newline();
-}
+static WIFI: StaticCell<Wifi> = StaticCell::new();
 
 #[esp8266_hal::main]
 fn main() -> ! {
+    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let (_, timer2) = peripherals.TIMER.timers();
+    let runtime = support::init(timer2);
     log_line(b"wifi_core_scan start");
 
-    let resources = RESOURCES.init_with(WifiResources::new);
-    let driver = match WifiDriver::new(resources).initialize(InitConfig::default()) {
-        Ok(driver) => driver,
-        Err(error) => {
-            esp8266_hal::logger::write_bytes(b"wifi core scan init error ");
-            esp8266_hal::logger::write_bytes(init_error_name(error).as_bytes());
-            esp8266_hal::logger::write_newline();
-            loop {
-                esp8266_hal::wifi::delay_ticks(100);
-            }
-        }
-    };
+    let wifi = WIFI.init(Wifi::new(runtime, InitConfig::default()).expect("wifi init"));
+    let (mut driver, _) = wifi.split();
     log_line(b"wifi core scan initialized");
 
-    let mut driver = driver
-        .enable_sta()
-        .expect("configure")
-        .start()
-        .expect("start");
+    driver.enable_station().expect("configure");
+    driver.start_blocking(1_000).expect("start");
     log_line(b"wifi core scan started");
 
     let options = ScanOptions::all()
         .show_hidden(true)
         .timings(ScanTimings::active(200, 500));
 
-    let records = SCAN_RECORDS.init(heapless::Vec::new());
-    match driver.scan_blocking_into(&options, records) {
-        Ok(()) => {
+    let mut records: [AccessPointRecord; 16] =
+        core::array::from_fn(|_| AccessPointRecord::default());
+    match driver.scan_blocking(&options, &mut records, 15_000) {
+        Ok(count) => {
             esp8266_hal::logger::write_bytes(b"wifi core scan done count=");
-            esp8266_hal::logger::write_dec_u32(records.len() as u32);
+            esp8266_hal::logger::write_dec_u32(count as u32);
             esp8266_hal::logger::write_newline();
-            for record in records.iter() {
+            for record in records[..count].iter() {
                 esp8266_hal::logger::write_bytes(b"ap ssid=");
                 esp8266_hal::logger::write_bytes(record.ssid());
                 esp8266_hal::logger::write_bytes(b" bssid=");
@@ -82,37 +67,12 @@ fn main() -> ! {
         }
         Err(error) => {
             esp8266_hal::logger::write_bytes(b"wifi core scan error ");
-            esp8266_hal::logger::write_bytes(driver_error_name(error).as_bytes());
+            support::log_debug(&error);
             esp8266_hal::logger::write_newline();
         }
     }
 
     loop {
         esp8266_hal::wifi::delay_ticks(100);
-    }
-}
-
-fn init_error_name(error: InitError) -> &'static str {
-    match error {
-        InitError::AlreadyInitialized => "already-initialized",
-        InitError::BackendUnavailable => "backend-unavailable",
-    }
-}
-
-fn driver_error_name(error: DriverError) -> &'static str {
-    match error {
-        DriverError::Timeout => "timeout",
-        DriverError::StaStartTimeout => "sta-start-timeout",
-        DriverError::Disconnected => "disconnected",
-        DriverError::EventOverflow => "event-overflow",
-        DriverError::PacketOverflow => "packet-overflow",
-        DriverError::PeerOverflow => "peer-overflow",
-        DriverError::PayloadTooLong => "payload-too-long",
-        DriverError::InvalidFrameSize => "invalid-frame-size",
-        DriverError::OutOfMemory => "out-of-memory",
-        DriverError::NotStarted => "not-started",
-        DriverError::WouldBlock => "would-block",
-        DriverError::BackendRejected => "backend-rejected",
-        DriverError::BackendError(_) => "backend-error",
     }
 }

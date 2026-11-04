@@ -2,6 +2,10 @@ diff --git a/esp8266-wifi-sys/build.rs b/esp8266-wifi-sys/build.rs
 index 7ce09d3..8e679df 100644
 --- a/esp8266-wifi-sys/build.rs
 +++ b/esp8266-wifi-sys/build.rs
+@@ -41,2 +41,3 @@ fn main() {
+     generate_sdkconfig(&sdkconfig_h);
++    let _ = prefer_canonical(sdkconfig_h);
+     let _ = fs::remove_file(out_dir.join("esp_wifi_driver.h"));
 @@ -571,6 +571,17 @@ fn init_cc_build(build: &mut cc::Build, gcc: Option<&str>, include_paths: &[Path
          .extra_warnings(false)
          .flag("-mlongcalls");

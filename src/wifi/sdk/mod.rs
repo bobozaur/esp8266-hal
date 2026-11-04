@@ -14,7 +14,6 @@
 //! | `esp_wifi.c` | [`wifi_init`] | WiFi init, TX path |
 
 pub mod cache; // replaces spi_flash_raw.c — IRAM cache control
-pub mod delay; // FRC2-based ets_delay_us replacement
 pub mod nvs; // fixed-size volatile replacement for the IDF NVS component
 pub mod phy_init; // replaces phy_init.c
 pub mod runtime; // remaining SDK runtime ABI adapters

@@ -17,7 +17,7 @@ use regex::bytes::Regex;
 use crate::esp32_companion;
 
 const TARGET: &str = "xtensa-esp8266-none-elf";
-const BUILD_STD: &str = "-Zbuild-std=core";
+const BUILD_STD: &str = "-Zbuild-std=core,alloc";
 const DEFAULT_UART_BAUD: u32 = 115_200;
 const DEFAULT_FLASH_BAUD: u32 = 460_800;
 const DEFAULT_SERIAL_PORT: &str = "/dev/ttyUSB0";
@@ -224,6 +224,10 @@ impl SmartConfigSenderKind {
             Self::CompanionSta => "companion-sta",
             Self::CompanionAp => "companion-ap",
         }
+    }
+
+    const fn needs_companion(self) -> bool {
+        !matches!(self, Self::RouterLocal)
     }
 
     const fn needs_router_ap(self) -> bool {
@@ -529,17 +533,18 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "eap_wrong_password",
-        description: "fail closed when WPA2 Enterprise credentials are rejected by RADIUS",
+        description: "observe DUT-correlated RADIUS rejection with a wrong password configured; password-cause qualification also requires a positive control and server inner-method evidence",
         example: Some("wifi_eap"),
         features: &["interrupt", "rt", "wifi-enterprise"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(150),
-            success_markers: &["eap-negative-ok"],
+            success_markers: &["eap-negative-disconnected"],
             failure_markers: &[
                 "wifi eap configure err",
                 "wifi eap start err",
+                "wifi eap connect err",
                 "wifi eap associated",
                 "eap-ok",
                 "eap-negative-unexpected-success",
@@ -573,7 +578,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_station_list_companion",
         description: "join the soft-AP with the ESP32 companion and validate station list/deauth",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi"],
+        features: &["wifi-smoltcp", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -582,7 +587,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_rejoin_companion",
         description: "rejoin the soft-AP with the ESP32 companion after DUT-initiated deauth",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi"],
+        features: &["wifi-smoltcp", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -591,7 +596,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_attach_companion",
         description: "join the soft-AP after attaching the AP RX path without embassy-net",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi"],
+        features: &["wifi-smoltcp", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -600,7 +605,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_net_attach_companion",
         description: "join the soft-AP after creating the AP network runtime but before entering the DHCP loop",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi"],
+        features: &["wifi-smoltcp", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -609,7 +614,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_dhcp_bind_companion",
         description: "join the soft-AP after binding the Rust DHCP socket but before entering the DHCP poll loop",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi"],
+        features: &["wifi-smoltcp", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -618,7 +623,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_dhcp_companion",
         description: "join the soft-AP with the ESP32 companion and validate Rust DHCP service",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi"],
+        features: &["wifi-smoltcp", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -636,7 +641,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_unicast_companion",
         description: "exchange ESP-NOW unicast payloads with the ESP32 companion",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-esp-now"],
+        features: &["wifi-esp-now", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -645,7 +650,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_encrypted_companion",
         description: "exchange encrypted ESP-NOW payloads with the ESP32 companion",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-esp-now"],
+        features: &["wifi-esp-now", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -654,7 +659,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_bad_key_companion",
         description: "validate encrypted ESP-NOW failure cases with the ESP32 companion",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-esp-now"],
+        features: &["wifi-esp-now", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -663,7 +668,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "promisc_data_companion",
         description: "validate promiscuous data capture with repeatable ESP32 companion traffic",
         example: Some("wifi_promisc"),
-        features: &["interrupt", "rt", "wifi-promiscuous"],
+        features: &["wifi-promiscuous", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
@@ -672,7 +677,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_start",
         description: "start the soft-AP and validate a client join path",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi"],
+        features: &["wifi-smoltcp", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -685,7 +690,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_station_list",
         description: "join the soft-AP with a client, enumerate it, and deauth all stations",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi"],
+        features: &["wifi-smoltcp", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -704,7 +709,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "ap_dhcp",
         description: "join the soft-AP with a client and validate Rust DHCP lease service",
         example: Some("wifi_ap"),
-        features: &["interrupt", "rt", "wifi"],
+        features: &["wifi-smoltcp", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -747,7 +752,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "wps",
         description: "complete WPS PBC enrollment on supported router hardware",
         example: Some("wifi_wps"),
-        features: &["interrupt", "rt", "wifi-wps"],
+        features: &["wifi-wps", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -768,7 +773,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "wps_pin",
         description: "complete WPS fixed-PIN enrollment on supported router hardware",
         example: Some("wifi_wps"),
-        features: &["interrupt", "rt", "wifi-wps"],
+        features: &["wifi-wps", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -789,7 +794,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "smartconfig",
         description: "complete SmartConfig provisioning from an ESPTouch-compatible sender",
         example: Some("wifi_smartconfig"),
-        features: &["interrupt", "rt", "wifi-smartconfig"],
+        features: &["wifi-smartconfig", "wifi-smoltcp"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -818,7 +823,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_unicast",
         description: "exchange ESP-NOW unicast payloads between two boards",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-esp-now"],
+        features: &["wifi-esp-now", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -842,7 +847,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_broadcast",
         description: "send ESP-NOW broadcast payloads from one board and validate SDK send path",
         example: Some("wifi_esp_now_tx"),
-        features: &["interrupt", "rt", "wifi-esp-now"],
+        features: &["wifi-esp-now", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -866,7 +871,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "esp_now_encrypted",
         description: "exchange encrypted ESP-NOW payloads between two boards",
         example: Some("wifi_esp_now_rx"),
-        features: &["interrupt", "rt", "wifi-esp-now"],
+        features: &["wifi-esp-now", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -890,7 +895,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "promisc_capture",
         description: "capture management/data/control frames in promiscuous mode",
         example: Some("wifi_promisc"),
-        features: &["interrupt", "rt", "wifi-promiscuous"],
+        features: &["wifi-promiscuous", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -913,7 +918,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "promisc_filters",
         description: "validate promiscuous packet and control filters",
         example: Some("wifi_promisc"),
-        features: &["interrupt", "rt", "wifi-promiscuous"],
+        features: &["wifi-promiscuous", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -936,7 +941,7 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         name: "promisc_control_filters",
         description: "validate promiscuous control-frame capture with RF traffic",
         example: Some("wifi_promisc"),
-        features: &["interrupt", "rt", "wifi-promiscuous"],
+        features: &["wifi-promiscuous", "embassy"],
         profile: "release",
         state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
@@ -2612,6 +2617,9 @@ fn start_eap_tcpdump(run_dir: &Path, router_host: &str) -> Option<Child> {
 }
 
 fn verify_eap_access_reject(run_dir: &Path) -> Result<()> {
+    let uart =
+        fs::read(run_dir.join("uart.log")).context("negative EAP result lacks its UART log")?;
+    let dut_mac = eap_station_mac(&String::from_utf8_lossy(&uart))?;
     let capture_path = run_dir.join("eap-radius-tcpdump.log");
     let capture = fs::read_to_string(&capture_path).with_context(|| {
         format!(
@@ -2620,20 +2628,93 @@ fn verify_eap_access_reject(run_dir: &Path) -> Result<()> {
         )
     })?;
 
-    if !contains_radius_access_reject(&capture) {
+    if !contains_radius_access_reject(&capture, dut_mac) {
         bail!(
-            "negative EAP result lacks RADIUS Access-Reject evidence; see {}",
+            "negative EAP result lacks a DUT-correlated RADIUS Access-Reject; see {}",
             capture_path.display()
         );
     }
 
-    append_manifest_line(run_dir, "eap_negative_evidence", "radius-access-reject")
+    append_manifest_line(run_dir, "eap_dut_mac", &format_colon_mac(dut_mac))?;
+    append_manifest_line(
+        run_dir,
+        "eap_negative_evidence",
+        "dut-correlated-radius-reject-with-wrong-password-configured",
+    )?;
+    append_manifest_line(
+        run_dir,
+        "eap_password_cause_qualification",
+        "requires-correct-password-positive-control-and-server-inner-method-evidence",
+    )?;
+    record_eap_diagnostic_note(
+        run_dir,
+        "DUT-correlated rejection observed with wrong password configured. Password-specific qualification additionally requires a correct-password positive control and server evidence of the inner EAP method and rejection cause.",
+    )
 }
 
-fn contains_radius_access_reject(capture: &str) -> bool {
-    let capture = capture.to_ascii_lowercase();
-    capture.contains("radius")
-        && (capture.contains("access-reject") || capture.contains("access reject"))
+fn eap_station_mac(output: &str) -> Result<[u8; 6]> {
+    let value = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("wifi eap station mac="))
+        .and_then(|value| value.split_whitespace().next())
+        .context("EAP UART did not report a station MAC")?;
+    let mac = parse_colon_mac(value)?;
+    if mac == [0; 6] || mac[0] & 1 != 0 {
+        bail!("EAP UART reported a non-unicast station MAC")
+    }
+    Ok(mac)
+}
+
+fn contains_radius_access_reject(capture: &str, dut_mac: [u8; 6]) -> bool {
+    // tcpdump -nn -vv starts each packet at column zero and indents its decode.
+    let packets = Regex::new(r"(?m)^\S[^\n]*(?:\n[ \t][^\n]*)*").unwrap();
+    let endpoints =
+        Regex::new(r"([0-9a-fA-F:.]+\.\d+) > ([0-9a-fA-F:.]+\.\d+):[^\n]*RADIUS,").unwrap();
+    let response = Regex::new(
+        r"(Access-Request|Access-Reject|Access-Accept|Access-Challenge) \(\d+\), id: 0x([0-9a-fA-F]{1,2})(?:,|\s|$)",
+    )
+    .unwrap();
+    let station =
+        Regex::new(r"Calling-Station-Id Attribute \(31\), length: \d+, Value: ([0-9a-fA-F:-]+)")
+            .unwrap();
+    let authenticator = Regex::new(r"Authenticator: ([0-9a-fA-F]{32})(?:\s|$)").unwrap();
+    let mut requests = std::collections::HashMap::new();
+    for packet in packets.find_iter(capture.as_bytes()) {
+        let packet = packet.as_bytes();
+        let (Some(flow), Some(radius)) = (endpoints.captures(packet), response.captures(packet))
+        else {
+            continue;
+        };
+        let source = flow.get(1).unwrap().as_bytes();
+        let destination = flow.get(2).unwrap().as_bytes();
+        let id = u8::from_str_radix(std::str::from_utf8(&radius[2]).unwrap(), 16).unwrap();
+        if &radius[1] == b"Access-Request" {
+            let is_dut = station
+                .captures(packet)
+                .and_then(|value| std::str::from_utf8(&value[1]).ok().map(str::to_owned))
+                .and_then(|value| parse_colon_mac(&value.replace('-', ":")).ok())
+                == Some(dut_mac);
+            let auth = authenticator
+                .captures(packet)
+                .and_then(|value| value.get(1).map(|matched| matched.as_bytes()));
+            let is_dut = is_dut && auth.is_some();
+            // Only an identical request retransmission preserves attribution. Any
+            // outstanding reuse stays ambiguous until its response consumes the key.
+            requests
+                .entry((source, destination, id))
+                .and_modify(|pending: &mut (Option<&[u8]>, bool)| {
+                    pending.1 &= is_dut && pending.0 == auth;
+                })
+                .or_insert((auth, is_dut));
+        } else if requests
+            .remove(&(destination, source, id))
+            .is_some_and(|(_, is_dut)| is_dut)
+            && &radius[1] == b"Access-Reject"
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn stop_eap_tcpdump(run_dir: &Path, tcpdump: Option<Child>) {
@@ -2846,9 +2927,17 @@ fn run_smartconfig_router_scenario(
         .ok_or_else(|| anyhow!("scenario `{}` has no example", scenario.name))?;
     let run_dir = prepare_run_dir(root, scenario.name)?;
     write_manifest(&run_dir, scenario, serial_port)?;
-    let companion = probe_companion_rig(companion_port)?;
-    append_companion_manifest(&run_dir, &companion)?;
     let sender = SmartConfigSenderKind::from_env()?;
+    let mut companion = if sender.needs_companion() {
+        let rig = probe_companion_rig(companion_port)?;
+        append_companion_manifest(&run_dir, &rig)?;
+        let mut log = open_companion_log(&run_dir)?;
+        let mut commands = esp32_companion::CommandSession::open(companion_port)?;
+        ensure_companion_session_ready(&mut log, &mut commands)?;
+        Some((log, commands))
+    } else {
+        None
+    };
     let build_env = sender.build_env();
 
     build_example(&run_dir, example, scenario, &build_env)?;
@@ -2874,8 +2963,10 @@ fn run_smartconfig_router_scenario(
         "smartconfig_start_after_scan",
         if start_after_scan { "1" } else { "0" },
     )?;
-    ensure_companion_command_token("smartconfig ssid", &fixture.ssid)?;
-    ensure_companion_command_token("smartconfig passphrase", &fixture.passphrase)?;
+    if sender.needs_companion() {
+        ensure_companion_command_token("smartconfig ssid", &fixture.ssid)?;
+        ensure_companion_command_token("smartconfig passphrase", &fixture.passphrase)?;
+    }
 
     let bssid = if sender.needs_router_ap() {
         match configure_router_smartconfig_fixture(&run_dir, &fixture) {
@@ -2888,11 +2979,11 @@ fn run_smartconfig_router_scenario(
     } else {
         [0; 6]
     };
-    let mut companion_log = open_companion_log(&run_dir)?;
-    let mut companion_commands = esp32_companion::CommandSession::open(companion_port)?;
-    ensure_companion_session_ready(&mut companion_log, &mut companion_commands)?;
     if sender == SmartConfigSenderKind::CompanionAp {
-        prestart_companion_smartconfig_ap(&fixture, &mut companion_log, &mut companion_commands)?;
+        let (log, commands) = companion
+            .as_mut()
+            .expect("companion AP requires its session");
+        prestart_companion_smartconfig_ap(&fixture, log, commands)?;
         append_manifest_line(&run_dir, "smartconfig_companion_ap_prestarted", "1")?;
         append_manifest_line(
             &run_dir,
@@ -2913,8 +3004,7 @@ fn run_smartconfig_router_scenario(
             success_markers,
             failure_markers,
             &fixture,
-            &mut companion_log,
-            &mut companion_commands,
+            companion,
             sender,
             bssid,
             start_after_scan,
@@ -3093,8 +3183,7 @@ fn watch_smartconfig_uart(
     success_markers: &[&str],
     failure_markers: &[&str],
     fixture: &RouterSmartConfigFixture,
-    companion_log: &mut File,
-    companion_commands: &mut esp32_companion::CommandSession,
+    companion: Option<(File, esp32_companion::CommandSession)>,
     sender: SmartConfigSenderKind,
     bssid: [u8; 6],
     start_after_scan: bool,
@@ -3110,8 +3199,7 @@ fn watch_smartconfig_uart(
     let bssid_text = format_colon_mac(bssid);
 
     thread::scope(|scope| -> Result<()> {
-        let mut companion_log = Some(companion_log);
-        let mut companion_commands = Some(companion_commands);
+        let mut companion = companion;
         let mut sender_handle = None;
 
         while start.elapsed() < timeout {
@@ -3151,25 +3239,31 @@ fn watch_smartconfig_uart(
                         "smartconfig ready"
                     };
                     if !provision_started && text.contains(trigger) {
+                        let dut_mac = smartconfig_station_mac(&text)?;
+                        append_manifest_line(
+                            run_dir,
+                            "smartconfig_dut_mac",
+                            &format_colon_mac(dut_mac),
+                        )?;
                         let run_dir = run_dir.to_path_buf();
                         let bssid_text = bssid_text.clone();
-                        let companion_log = companion_log.take().expect("companion log available");
-                        let companion_commands = companion_commands
-                            .take()
-                            .expect("companion command session available");
+                        let companion = companion.take();
                         sender_handle = Some(scope.spawn(move || {
                             run_smartconfig_sender(
                                 &run_dir,
                                 fixture,
-                                companion_log,
-                                companion_commands,
+                                companion,
                                 sender,
                                 &bssid_text,
+                                dut_mac,
                             )
                         }));
                         provision_started = true;
                     }
                     if success_markers.iter().any(|marker| text.contains(*marker)) {
+                        if !provision_started {
+                            bail!("SmartConfig UART success arrived before sender startup; no DUT-correlated ACK was validated");
+                        }
                         if let Some(handle) = sender_handle.take() {
                             handle
                                 .join()
@@ -3200,25 +3294,31 @@ fn watch_smartconfig_uart(
 fn run_smartconfig_sender(
     run_dir: &Path,
     fixture: &RouterSmartConfigFixture,
-    companion_log: &mut File,
-    companion_commands: &mut esp32_companion::CommandSession,
+    companion: Option<(File, esp32_companion::CommandSession)>,
     sender: SmartConfigSenderKind,
     bssid_text: &str,
+    dut_mac: [u8; 6],
 ) -> Result<()> {
-    match sender {
-        SmartConfigSenderKind::CompanionSta => run_companion_smartconfig_sta_sender(
-            fixture,
-            companion_log,
-            companion_commands,
-            bssid_text,
-        ),
+    let report = match sender {
+        SmartConfigSenderKind::CompanionSta => {
+            let (mut log, mut commands) = companion.context("missing SmartConfig STA companion")?;
+            run_companion_smartconfig_sta_sender(fixture, &mut log, &mut commands, bssid_text)
+        }
         SmartConfigSenderKind::CompanionAp => {
-            run_companion_smartconfig_ap_sender(fixture, companion_log, companion_commands)
+            let (mut log, mut commands) = companion.context("missing SmartConfig AP companion")?;
+            run_companion_smartconfig_ap_sender(fixture, &mut log, &mut commands)
         }
         SmartConfigSenderKind::RouterLocal => {
             run_router_smartconfig_sender(run_dir, fixture, bssid_text)
         }
-    }
+    }?;
+    let password_len = if fixture.passphrase == "open" {
+        0
+    } else {
+        fixture.passphrase.len()
+    };
+    let token = u8::try_from(9 + fixture.ssid.len() + password_len)?;
+    validate_smartconfig_ack(&report, dut_mac, token)
 }
 
 fn smartconfig_sender_passphrase(fixture: &RouterSmartConfigFixture) -> &str {
@@ -3234,7 +3334,7 @@ fn run_companion_smartconfig_sta_sender(
     companion_log: &mut File,
     companion_commands: &mut esp32_companion::CommandSession,
     bssid_text: &str,
-) -> Result<()> {
+) -> Result<String> {
     if fixture.passphrase.is_empty() {
         bail!(
             "companion-sta SmartConfig sender cannot encode an empty passphrase with the current companion CLI; use router-local or set ESP8266_HAL_SMARTCONFIG_PASSWORD"
@@ -3251,14 +3351,14 @@ fn run_companion_smartconfig_sta_sender(
         Duration::from_secs(160),
     )?;
     ensure_ok_response(&response, "SMARTCONFIG_STA_PROVISION")?;
-    Ok(())
+    Ok(response)
 }
 
 fn run_companion_smartconfig_ap_sender(
     fixture: &RouterSmartConfigFixture,
     companion_log: &mut File,
     companion_commands: &mut esp32_companion::CommandSession,
-) -> Result<()> {
+) -> Result<String> {
     let passphrase = smartconfig_sender_passphrase(fixture);
     let response = companion_session_command(
         companion_log,
@@ -3270,7 +3370,7 @@ fn run_companion_smartconfig_ap_sender(
         Duration::from_secs(160),
     )?;
     ensure_ok_response(&response, "SMARTCONFIG_AP_PROVISION")?;
-    Ok(())
+    Ok(response)
 }
 
 fn prestart_companion_smartconfig_ap(
@@ -3297,41 +3397,83 @@ fn run_router_smartconfig_sender(
     run_dir: &Path,
     fixture: &RouterSmartConfigFixture,
     bssid_text: &str,
-) -> Result<()> {
+) -> Result<String> {
     let sender = env::var("ESP8266_HAL_SMARTCONFIG_ROUTER_SENDER")
         .unwrap_or_else(|_| "/tmp/router_esptouch_sender".to_owned());
     let iface =
         env::var("ESP8266_HAL_SMARTCONFIG_ROUTER_IFACE").unwrap_or_else(|_| "br-lan".to_owned());
     let timeout_ms =
         env::var("ESP8266_HAL_SMARTCONFIG_SEND_TIMEOUT_MS").unwrap_or_else(|_| "90000".to_owned());
-    let sender = shell_quote(&sender);
-    let iface = shell_quote(&iface);
-    let ssid = shell_quote(&fixture.ssid);
-    let passphrase = shell_quote(&fixture.passphrase);
-    let bssid = shell_quote(bssid_text);
-    let phone_ip = shell_quote(&fixture.router.host);
-    let timeout_ms = shell_quote(&timeout_ms);
-    let script = format!(
-        r#"set -e
-sender={sender}
-iface={iface}
-ssid={ssid}
-passphrase={passphrase}
-bssid={bssid}
-phone_ip={phone_ip}
-timeout_ms={timeout_ms}
-test -x "$sender"
-set +e
-output="$("$sender" "$iface" "$ssid" "$passphrase" "$bssid" "$phone_ip" "$timeout_ms" 2>&1)"
-status=$?
-set -e
-printf '%s\n' "$output"
-if [ "$status" -ne 0 ] && ! printf '%s\n' "$output" | grep -q '^ERR ack-timeout'; then
-    exit "$status"
-fi
-"#
+    let script = smartconfig_sender_script(
+        &sender,
+        &[
+            &iface,
+            &fixture.ssid,
+            &fixture.passphrase,
+            bssid_text,
+            &fixture.router.host,
+            &timeout_ms,
+        ],
     );
-    smartconfig_router_run(run_dir, fixture, "router-esptouch-send", &script).map(|_| ())
+    smartconfig_router_run(run_dir, fixture, "router-esptouch-send", &script)
+}
+
+// Preserve the sender's exact exit status, including ACK timeout, and keep all
+// configuration values as literal arguments rather than shell syntax.
+fn smartconfig_sender_script(sender: &str, args: &[&str]) -> String {
+    let command = std::iter::once(sender)
+        .chain(args.iter().copied())
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("set -e\n{command}\n")
+}
+
+fn validate_smartconfig_ack(report: &str, dut_mac: [u8; 6], token: u8) -> Result<()> {
+    for line in report
+        .lines()
+        .filter(|line| line.starts_with("ACK ") || line.starts_with("OK SMARTCONFIG_"))
+    {
+        let (Some(hex), Some(source)) = (command_field(line, "hex"), command_field(line, "source"))
+        else {
+            continue;
+        };
+        if hex.len() != 22
+            || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || command_field(line, "valid").is_some_and(|valid| valid != "1")
+        {
+            continue;
+        }
+        let mut ack = [0u8; 11];
+        for (index, byte) in ack.iter_mut().enumerate() {
+            *byte =
+                u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).expect("checked ASCII hex");
+        }
+        let address = Ipv4Addr::new(ack[7], ack[8], ack[9], ack[10]);
+        if ack[0] == token
+            && ack[1..7] == dut_mac
+            && ack[7] != 0
+            && ack[7] != 127
+            && ack[7] < 224
+            && source.parse::<Ipv4Addr>().ok() == Some(address)
+        {
+            return Ok(());
+        }
+    }
+    bail!("SmartConfig sender did not report an ACK matching the DUT MAC, token and source IPv4")
+}
+
+fn smartconfig_station_mac(output: &str) -> Result<[u8; 6]> {
+    let value = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("smartconfig station mac="))
+        .and_then(|value| value.split_whitespace().next())
+        .context("SmartConfig UART did not report a station MAC")?;
+    let mac = parse_colon_mac(value)?;
+    if mac == [0; 6] || mac[0] & 1 != 0 {
+        bail!("SmartConfig UART reported a non-unicast station MAC")
+    }
+    Ok(mac)
 }
 
 fn parse_bssid_from_router_output(output: &str) -> Result<[u8; 6]> {
@@ -6783,25 +6925,27 @@ mod tests {
         fs,
         net::{Ipv4Addr, SocketAddrV4, UdpSocket},
         path::{Path, PathBuf},
+        process::Command,
         sync::Mutex,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
         bounded_companion_command_timeout, build_env_prefix, command_field,
-        contains_radius_access_reject, eap_tcpdump_filter_args, ensure_esp_now_attempt_completed,
-        env_flag_default, esp_now_companion_tx_command, flash_cache_key, flash_images_fingerprint,
-        flash_skip_status_from_value, focused_run_attempt_limit, matrix_secondary_lane_candidate,
-        parse_matrix_options, parse_proc_cmdline, parse_radius_listener_pids,
-        partition_matrix_lanes, path_presence, promisc_raw_kind, radius_default_eap_type,
-        scenario_by_name, scenario_matrix_lane_label, scenario_requires_radius,
-        scenario_resource_labels, scenario_uses_companion_resource, scenario_uses_router,
-        ss_line_has_udp_port, udp_port_status, wrong_channel_hint, EspNowMode, FlashImage,
-        UdpPortStatus, WpsRouterMode, DEFAULT_MATRIX_ATTEMPTS, EAP_CA_CERT_DER_FILE_ENV,
-        EAP_CA_CERT_FILE_ENV, EAP_CA_CERT_PEM_NUL_FILE_ENV, EAP_CLIENT_CERT_DER_FILE_ENV,
-        EAP_CLIENT_CERT_FILE_ENV, EAP_CLIENT_CERT_PEM_NUL_FILE_ENV, EAP_PRIVATE_KEY_DER_FILE_ENV,
-        EAP_PRIVATE_KEY_FILE_ENV, EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV, EAP_RADIUS_CONFIG_ROOT_ENV,
-        EAP_TLS_ROOT_ENV,
+        contains_radius_access_reject, eap_station_mac, eap_tcpdump_filter_args,
+        ensure_esp_now_attempt_completed, env_flag_default, esp_now_companion_tx_command,
+        flash_cache_key, flash_images_fingerprint, flash_skip_status_from_value,
+        focused_run_attempt_limit, matrix_secondary_lane_candidate, parse_matrix_options,
+        parse_proc_cmdline, parse_radius_listener_pids, partition_matrix_lanes, path_presence,
+        promisc_raw_kind, radius_default_eap_type, scenario_by_name, scenario_matrix_lane_label,
+        scenario_requires_radius, scenario_resource_labels, scenario_uses_companion_resource,
+        scenario_uses_router, smartconfig_sender_script, smartconfig_station_mac,
+        ss_line_has_udp_port, udp_port_status, validate_smartconfig_ack, verify_eap_access_reject,
+        wrong_channel_hint, EspNowMode, FlashImage, SmartConfigSenderKind, UdpPortStatus,
+        WpsRouterMode, DEFAULT_MATRIX_ATTEMPTS, EAP_CA_CERT_DER_FILE_ENV, EAP_CA_CERT_FILE_ENV,
+        EAP_CA_CERT_PEM_NUL_FILE_ENV, EAP_CLIENT_CERT_DER_FILE_ENV, EAP_CLIENT_CERT_FILE_ENV,
+        EAP_CLIENT_CERT_PEM_NUL_FILE_ENV, EAP_PRIVATE_KEY_DER_FILE_ENV, EAP_PRIVATE_KEY_FILE_ENV,
+        EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV, EAP_RADIUS_CONFIG_ROOT_ENV, EAP_TLS_ROOT_ENV,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -7084,18 +7228,124 @@ udp UNCONN 0 0 0.0.0.0:9999 0.0.0.0:* users:(("other",pid=42,fd=3))
         );
     }
 
+    // Shape captured from an offline pcap decoded by tcpdump -nn -vv.
+    const EAP_REQUEST: &str = r"12:00:00.000000 IP (tos 0x0, ttl 64, proto UDP (17), length 67)
+    192.0.2.1.40000 > 192.0.2.2.1812: [no cksum] RADIUS, length: 39
+	Access-Request (1), id: 0x25, Authenticator: 00000000000000000000000000000000
+	  Calling-Station-Id Attribute (31), length: 19, Value: 02-00-00-00-00-01
+	    0x0000:  3032 2d30 302d 3030 2d30 302d 3030 2d30
+";
+    const EAP_REJECT: &str = r"12:00:01.000000 IP (tos 0x0, ttl 64, proto UDP (17), length 48)
+    192.0.2.2.1812 > 192.0.2.1.40000: [no cksum] RADIUS, length: 20
+	Access-Reject (3), id: 0x25, Authenticator: 00000000000000000000000000000000
+";
+    const EAP_DUT_MAC: [u8; 6] = [2, 0, 0, 0, 0, 1];
+
     #[test]
-    fn eap_negative_evidence_requires_radius_access_reject() {
+    fn eap_uart_identity_requires_its_fresh_station_line() {
+        assert_eq!(
+            eap_station_mac("boot\nwifi eap station mac=02:00:00:00:00:01\r\n").unwrap(),
+            EAP_DUT_MAC
+        );
+        for uart in [
+            "MAC: 02:00:00:00:00:01",
+            "wifi eap station mac=00:00:00:00:00:00",
+            "wifi eap station mac=01:00:00:00:00:01",
+            "wifi eap station mac=02:00:00:00:00",
+        ] {
+            assert!(eap_station_mac(uart).is_err(), "accepted {uart}");
+        }
+    }
+
+    #[test]
+    fn eap_negative_evidence_correlates_tcpdump_request_and_reject() {
+        let capture = format!("{EAP_REQUEST}{EAP_REJECT}");
+        assert!(contains_radius_access_reject(&capture, EAP_DUT_MAC));
         assert!(contains_radius_access_reject(
-            "IP router.1812 > host.41234: RADIUS, Access-Reject (3), id: 0x4"
+            &capture.replace("02-00-00-00-00-01", "02:00:00:00:00:01"),
+            EAP_DUT_MAC
         ));
-        assert!(contains_radius_access_reject(
-            "radius response\nAccess Reject"
+        assert!(!contains_radius_access_reject(&capture, [2, 0, 0, 0, 0, 2]));
+        assert!(!contains_radius_access_reject(EAP_REJECT, EAP_DUT_MAC));
+        assert!(!contains_radius_access_reject(EAP_REQUEST, EAP_DUT_MAC));
+        assert!(!contains_radius_access_reject(
+            &format!("{EAP_REJECT}{EAP_REQUEST}"),
+            EAP_DUT_MAC
         ));
         assert!(!contains_radius_access_reject(
-            "IP router.1812 > host.41234: RADIUS, Access-Challenge (11)"
+            "RADIUS Access-Reject\neap-negative-disconnected",
+            EAP_DUT_MAC
         ));
-        assert!(!contains_radius_access_reject("eap-negative-ok"));
+    }
+
+    #[test]
+    fn eap_negative_evidence_rejects_wrong_flow_id_and_reused_request() {
+        for reject in [
+            EAP_REJECT.replace("192.0.2.1.40000", "192.0.2.1.40001"),
+            EAP_REJECT.replace("192.0.2.2.1812", "192.0.2.3.1812"),
+            EAP_REJECT.replace("id: 0x25", "id: 0x26"),
+            EAP_REJECT.replace("Access-Reject (3)", "Access-Challenge (11)"),
+        ] {
+            assert!(!contains_radius_access_reject(
+                &format!("{EAP_REQUEST}{reject}"),
+                EAP_DUT_MAC
+            ));
+        }
+        let other_dut = EAP_REQUEST.replace("02-00-00-00-00-01", "02-00-00-00-00-02");
+        for capture in [
+            format!("{EAP_REQUEST}{other_dut}{EAP_REJECT}"),
+            format!("{other_dut}{EAP_REQUEST}{EAP_REJECT}"),
+        ] {
+            assert!(!contains_radius_access_reject(&capture, EAP_DUT_MAC));
+        }
+        let changed_auth = EAP_REQUEST.replace(
+            "Authenticator: 00000000000000000000000000000000",
+            "Authenticator: 00000000000000000000000000000001",
+        );
+        assert!(!contains_radius_access_reject(
+            &format!("{EAP_REQUEST}{changed_auth}{EAP_REJECT}"),
+            EAP_DUT_MAC
+        ));
+        assert!(contains_radius_access_reject(
+            &format!("{EAP_REQUEST}{EAP_REQUEST}{EAP_REJECT}"),
+            EAP_DUT_MAC
+        ));
+        let challenge = EAP_REJECT.replace("Access-Reject (3)", "Access-Challenge (11)");
+        assert!(!contains_radius_access_reject(
+            &format!("{EAP_REQUEST}{challenge}{EAP_REJECT}"),
+            EAP_DUT_MAC
+        ));
+    }
+
+    #[test]
+    fn eap_negative_verifier_uses_uart_identity_and_limits_qualification() {
+        let dir = unique_test_dir("eap-correlated-reject");
+        fs::write(dir.join("manifest.txt"), "").unwrap();
+        fs::write(
+            dir.join("eap-radius-tcpdump.log"),
+            format!("{EAP_REQUEST}{EAP_REJECT}"),
+        )
+        .unwrap();
+        fs::write(dir.join("uart.log"), "eap-negative-disconnected\n").unwrap();
+        assert!(verify_eap_access_reject(&dir).is_err());
+        fs::write(
+            dir.join("uart.log"),
+            "wifi eap station mac=02:00:00:00:00:02\neap-negative-disconnected\n",
+        )
+        .unwrap();
+        assert!(verify_eap_access_reject(&dir).is_err());
+        fs::write(
+            dir.join("uart.log"),
+            b"\xff\xfe ROM boot noise\r\nwifi eap station mac=02:00:00:00:00:01\neap-negative-disconnected\n",
+        )
+        .unwrap();
+        verify_eap_access_reject(&dir).unwrap();
+        let manifest = fs::read_to_string(dir.join("manifest.txt")).unwrap();
+        assert!(manifest.contains("dut-correlated-radius-reject-with-wrong-password-configured"));
+        assert!(manifest.contains(
+            "requires-correct-password-positive-control-and-server-inner-method-evidence"
+        ));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -7206,6 +7456,72 @@ udp UNCONN 0 0 0.0.0.0:9999 0.0.0.0:* users:(("other",pid=42,fd=3))
         assert!(matrix_secondary_lane_candidate(eap_negative));
         assert!(!matrix_secondary_lane_candidate(wps));
         assert!(!matrix_secondary_lane_candidate(sta_connect));
+    }
+
+    #[test]
+    fn smartconfig_router_sender_needs_no_companion() {
+        assert!(!SmartConfigSenderKind::RouterLocal.needs_companion());
+        assert!(SmartConfigSenderKind::CompanionSta.needs_companion());
+        assert!(SmartConfigSenderKind::CompanionAp.needs_companion());
+    }
+
+    #[test]
+    fn smartconfig_ack_is_correlated_for_router_and_companion_reports() {
+        let mac = smartconfig_station_mac(
+            "boot\nsmartconfig station mac=02:00:00:00:00:01\r\nsmartconfig ready\n",
+        )
+        .unwrap();
+        for report in [
+            "ACK len=11 source=192.168.4.2 hex=1e020000000001c0a80402 valid=1",
+            "OK SMARTCONFIG_AP_PROVISION source=192.168.4.2 hex=1e020000000001c0a80402",
+        ] {
+            assert!(validate_smartconfig_ack(report, mac, 30).is_ok());
+            assert!(validate_smartconfig_ack(report, [2, 0, 0, 0, 0, 2], 30).is_err());
+            assert!(validate_smartconfig_ack(report, mac, 31).is_err());
+            assert!(validate_smartconfig_ack(
+                &report.replace("source=192.168.4.2", "source=192.168.4.3"),
+                mac,
+                30
+            )
+            .is_err());
+            assert!(
+                validate_smartconfig_ack(&report.replace("hex=1e", "hex=zz"), mac, 30).is_err()
+            );
+        }
+        assert!(validate_smartconfig_ack("OK SMARTCONFIG_AP_PROVISION", mac, 30).is_err());
+        assert!(smartconfig_station_mac("MAC: 02:00:00:00:00:01").is_err());
+    }
+
+    #[test]
+    fn smartconfig_station_identity_comes_from_uart_startup() {
+        let uart = "MAC: 02:00:00:00:00:02\nsmartconfig station mac=02:00:00:00:00:01\r\nsmartconfig ready\r\n";
+        assert_eq!(smartconfig_station_mac(uart).unwrap(), [2, 0, 0, 0, 0, 1]);
+        for invalid in [
+            "smartconfig ready",
+            "smartconfig station mac=bad",
+            "smartconfig station mac=00:00:00:00:00:00",
+            "smartconfig station mac=ff:ff:ff:ff:ff:ff",
+        ] {
+            assert!(smartconfig_station_mac(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn smartconfig_sender_ack_timeout_remains_failure() {
+        let script =
+            smartconfig_sender_script("sh", &["-c", "printf 'ERR ack-timeout\\n'; exit 7"]);
+        let output = Command::new("sh").args(["-c", &script]).output().unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"ERR ack-timeout\n");
+    }
+
+    #[test]
+    fn smartconfig_sender_arguments_are_literal() {
+        let value = "network with 'quotes' and $(exit 9)";
+        let script = smartconfig_sender_script("printf", &["%s", value]);
+        let output = Command::new("sh").args(["-c", &script]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, value.as_bytes());
     }
 
     #[test]

@@ -13,6 +13,7 @@ const EAP_CLIENT_CERT_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_CLIENT_CERT_DER_FILE
 const EAP_PRIVATE_KEY_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_DER_FILE";
 const DEFAULT_IROM_ORIGIN: u32 = 0x4021_0000;
 const IROM_FLASH_BASE: u32 = 0x4020_0000;
+const IROM_WINDOW_SIZE: u32 = 0x10_0000;
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_ca_cert_pem_nul_file)");
@@ -45,12 +46,19 @@ fn main() {
     // blob libraries. Without this, the linker creates misaligned segments
     // that crash the ESP8266 ROM bootloader.
     let wifi_link_inputs = if wifi_target {
-        "INCLUDE esp8266.rom.ld\nINCLUDE esp8266.peripherals.ld\n\
-         EXTERN(ets_printf ets_delay_us ieee80211_deliver_data)"
+        include_str!("ld/wifi.x")
     } else {
         ""
     };
-    let link_x = include_str!("ld/link.x").replace("/* WIFI_LINK_INPUTS */", wifi_link_inputs);
+    let mut link_x = include_str!("ld/link.x").replace("/* WIFI_LINK_INPUTS */", wifi_link_inputs);
+    if wifi_target {
+        fs::write(
+            out.join("wifi-exception.x"),
+            include_bytes!("ld/wifi-exception.x"),
+        )
+        .expect("failed to stage Wi-Fi exception vectors");
+        link_x = link_x.replace("INCLUDE exception.x", "INCLUDE wifi-exception.x");
+    }
     File::create(out.join("link.x"))
         .unwrap()
         .write_all(link_x.as_bytes())
@@ -98,6 +106,8 @@ fn main() {
     println!("cargo:rerun-if-changed=ld/link.x");
     println!("cargo:rerun-if-changed=ld/rom.x");
     println!("cargo:rerun-if-changed=ld/ram.x");
+    println!("cargo:rerun-if-changed=ld/wifi.x");
+    println!("cargo:rerun-if-changed=ld/wifi-exception.x");
     println!("cargo:rerun-if-env-changed={IROM_FLASH_OFFSET_ENV}");
     println!("cargo:rerun-if-env-changed={EAP_CA_CERT_PEM_NUL_FILE_ENV}");
     println!("cargo:rerun-if-env-changed={EAP_CLIENT_CERT_PEM_NUL_FILE_ENV}");
@@ -125,8 +135,11 @@ fn memory_x() -> String {
         .checked_add(offset)
         .expect("ESP8266_HAL_IROM_FLASH_OFFSET overflows IROM address");
     memory = memory.replace(
-        &format!("ORIGIN = 0x{DEFAULT_IROM_ORIGIN:08x}"),
-        &format!("ORIGIN = 0x{origin:08x}"),
+        &format!("ORIGIN = 0x{DEFAULT_IROM_ORIGIN:08x}, LENGTH = 0xf0000"),
+        &format!(
+            "ORIGIN = 0x{origin:08x}, LENGTH = 0x{:x}",
+            IROM_WINDOW_SIZE - offset
+        ),
     );
     memory
 }
@@ -136,8 +149,8 @@ fn irom_flash_offset() -> Option<u32> {
     let offset = parse_u32_literal(&raw).unwrap_or_else(|| {
         panic!("{IROM_FLASH_OFFSET_ENV} must be a decimal or 0x-prefixed number")
     });
-    if offset < 0x10000 || offset & 0xffff != 0 {
-        panic!("{IROM_FLASH_OFFSET_ENV} must be 64 KiB aligned and at least 0x10000");
+    if !(0x10000..IROM_WINDOW_SIZE).contains(&offset) || offset & 0xffff != 0 {
+        panic!("{IROM_FLASH_OFFSET_ENV} must be 64 KiB aligned in 0x10000..0x100000");
     }
     Some(offset)
 }

@@ -1,0 +1,228 @@
+# Native runtime adaptations
+
+The ESP8266 radio uses pinned Espressif binary libraries; ESP32 radio binaries
+cannot replace them. The exact SDK commit, archive inputs, generated bindings,
+licenses and reproduction procedure remain in the
+[vendor manifest](../esp8266-wifi-sys/vendor/README.md). The SDK ABI is preserved.
+The three derived archives, `libesp8266_sdk.a`, `libwpa_supplicant.a` and
+`libmbedtls_all.a`, are rebuilt from the canonical sources and SDK configuration.
+A null-connection guard in the TLS backend fixes cleanup after initialization
+failure. The configuration uses SDK defaults that disable optional Camellia,
+mbedTLS DES and Blowfish; AES-based TLS and WPA's separate DES implementation for
+MSCHAPv2 remain. The closed Espressif radio archives remain byte-for-byte copies
+of the pinned SDK inputs. Normal builds need no SDK checkout, C compilation or
+bindgen.
+
+## Link boundary
+
+[`ld/wifi.x`](../ld/wifi.x) selects the SDK syscall object through `EXTERN(abort)`
+so newlib's separate nano allocator is not selected. The SDK's reentrant
+allocation entry points reach the Rust `heap_caps` ABI and the application's
+explicit `WifiAllocator` provider.
+
+Three GNU ld assignments intentionally redirect SDK symbols to Rust functions
+with the same native signatures:
+
+| SDK symbol | Rust responsibility |
+| --- | --- |
+| `esp_timer_get_time` | Runtime-owned monotonic time |
+| `ieee80211_deliver_data` | SDK packet delivery into registered station/AP callbacks |
+| `pm_wait4wakeup` | Bounded PHY settling delay in place of polling unconfigured IDF RTC wake bits |
+
+These substitutions have explicit linker roots. The generic
+`--allow-multiple-definition` option is removed; unrelated duplicate definitions
+remain link errors. Obsolete delay, reentrant-allocation, pbuf and startup wrappers
+were removed where the selected SDK implementation already supplies the behavior.
+`uart_tx_wait_idle` uses the pinned SDK C implementation; no fixed-spin Rust
+replacement remains.
+
+## NMI entry and return
+
+The earlier NMI handler omitted the SDK's final-`RFI` guard. If `EPC3` points to
+that return instruction, saving it again overwrites the original saved
+`EPC3`/`EPS3` and can make the handler return to itself. The corrected handler
+preserves the existing return state in that case.
+
+The `xtensa-lx-rt` 0.12 default vector also stores `A0` in `EXCSAVE1`, which
+ordinary exception entry uses. An NMI during that entry can destroy its saved
+state. Wi-Fi now selects a HAL-owned vector using `EXCSAVE3`, paired with the
+corrected handler. The [Wi-Fi vector layout](../ld/wifi-exception.x) preserves the
+other vector offsets and fallbacks. This needs no vendored crate, dependency-source
+edit or blob patch. Linked-ELF inspection and repeated scan/recreation runs on two
+boards cover the corrected integration.
+
+## Allocation and reinitialization
+
+The pinned native code ignores allocation failures in hardware/RX setup
+(`wdev`/`esf`), packet-processing startup (`pp`), miscellaneous state and Wi-Fi NVS.
+Returning null at those call sites can cause a native fault instead of a usable
+initialization error.
+
+Before entering the SDK, Rust reserves nine ordinary allocations through the
+application provider, each using the normal C allocation header and ownership
+rules. Handoff matches the audited allocation size, capabilities and source
+file/line, or the corresponding queue/task boundary. Each reservation transfers
+once; unused reservations are released. This is a bounded adaptation of the
+pinned SDK, without a separate arena, vendor patch or new crate. Changes to those
+native allocation sites require re-auditing the matching handoff and dimensions.
+
+Hardware buffers and the PP queue/task remain allocated across native
+deinitialization. Their dimensions therefore lock when first native entry
+begins, including when a later initialization phase fails. Subsequent
+`Wifi::new` calls with different native RX buffer, RX packet or TX buffer counts
+return `InitError::BufferConfigurationLocked`. Reset is required to change them.
+Rust `QueueConfig` storage is independent and may change between Wi-Fi instances.
+Allocation failure before native entry does not lock the native dimensions.
+
+A same-configuration recreation reserves only the temporary 1024-byte Wi-Fi NVS
+buffer from that set. The separate 884-byte PHY workspace is needed only for the
+first attach.
+
+TLS and EAP handshake allocations use the application provider directly. The RSA
+reservation pool and its C hooks have been removed. The nine initialization
+reservations above remain necessary for the audited native startup allocations
+whose failures the SDK does not check.
+
+## Shared-heap exclusion and idle stack
+
+Wi-Fi NMI paths can allocate from the application's shared heap. Masking ordinary
+interrupts alone therefore cannot protect an allocator operation. In Wi-Fi
+builds, the HAL's `critical-section` implementation masks both ordinary interrupts
+and NMI, then restores the complete processor status and NMI-enable register from
+a `u64` token. Each nested section preserves its caller's state. Non-Wi-Fi builds
+do not access the NMI register. Protected allocator operations must stay bounded
+and must not wait for an interrupt. This uses the existing critical-section API,
+without a new allocator wrapper or dependency patch.
+
+The repeated scan/recreation stall was an idle-task stack overflow. Its previous
+512-byte stack plus 176 bytes of context storage allocated 688 bytes; an interrupt
+save frame reached the fourth canary at allocation base plus 12 bytes. Restoring
+the pinned SDK's 1024-byte idle stack allocates 1200 bytes in total, costing 512
+additional DRAM bytes. This correction, rather than changing radio buffer counts,
+addresses that observed stall.
+
+## Crypto data placement
+
+Mapped flash supports aligned word reads. Audited cipher, public-key and OID
+metadata lives there; its byte strings remain in DRAM. Cipher-suite descriptors
+also remain in DRAM because their flags are read as bytes. The previous flash
+placement caused a hardware fault during TLS key derivation. Camellia's byte
+S-boxes must likewise stay in DRAM if that optional algorithm is enabled again.
+Digest metadata stays in DRAM because a compiled getter uses a byte load.
+
+## TLS memory limits
+
+The canonical configuration has fixed TLS and cryptographic size limits:
+
+| Budget | Limit |
+| --- | ---: |
+| Incoming TLS record content | 768 bytes |
+| Outgoing TLS record content | 512 bytes |
+| MPI integer size / RSA modulus | 256 bytes / 2048 bits |
+| Elliptic-curve group size | 256 bits |
+
+Record buffers also require protocol overhead. Certificates, parsed chains,
+cryptographic work and radio traffic share the remaining application heap.
+Compact certificates and compatible record sizes are therefore required; EAP
+fragmentation does not increase the TLS record-content limits. Arbitrary
+certificate chains or RSA profiles are not qualified, even when their key sizes
+fit these ceilings.
+
+## Provisioning and polled radio interrupts
+
+SmartConfig uses the hardware NMI path. Its example keeps the provisioning
+session alive through DHCP and ESPTouch acknowledgement, then explicitly stops it.
+Networking after stop is tested separately with a fresh DHCP exchange.
+
+Promiscuous reception still polls the native FIQ handler from the timer path.
+That handler masks the NMI-enable register and relies on its hardware interrupt
+return path to reopen it. Polling must therefore save and restore the gate through
+the HAL critical section. Without that boundary, polling can leave hardware
+reception disabled. A 32-frame capture passes with the protected polling path;
+removing promiscuous polling remains unqualified.
+
+## Retained adaptations
+
+| Adaptation | Reason retained | Evidence needed before removal |
+| --- | --- | --- |
+| Scheduler, interrupt and newlib adapters | Native tasks require preemption, blocking primitives, context layout and newlib state. | Task/timer progress, peripheral interrupt coexistence and startup allocation failures. |
+| Allocation and volatile NVS adapters | C allocation requires layout recovery and free-DRAM statistics. Volatile storage preserves PHY calibration across radio restarts. | Exhaustion/rollback, shared allocator behavior and repeated initialization. |
+| AP lwIP bridge | The native AP path requires a netif and TCP/IP thread; application IP/DHCP policy remains outside the driver. | AP-client RX/TX and mixed traffic through the selected stack. |
+| PHY, cache and system adapters | Calibration, clocks, MAC addresses and cache-off execution are chip-specific ABI requirements. | Cold/repeated initialization, cache-off call paths and flash/radio coexistence. |
+| Narrow SDK service stubs | Linked native objects reference selected IDF services that are absent from the application stack. | Audit the actual consumers and validate the affected feature before removal. |
+| Historical AES, WPS and enterprise patches | The snapshot includes aligned AES tables, provisioning fixes and TLS certificate/buffer lifetime adaptations. | Encrypted ESP-NOW, WPS PBC/PIN and enterprise authentication with appropriate peers and allocation pressure. |
+
+Older investigations support retaining the historical patches. They do not
+qualify the new runtime, allocator or controller. An unavailable peer or
+authentication fixture leaves that behavior unverified.
+
+## Cost and current evidence
+
+The optional `wifi` feature remains necessary: `allocator-api2` enables the
+upstream `alloc` dependency, which requires an application Rust global allocator
+even when Wi-Fi is unused. The current representative dormant-Wi-Fi build adds
+7,435 bytes of BSS over the bare example. Global registration does not initialize
+the heap or runtime.
+`Runtime::init` still receives an explicit permanent `WifiAllocator`; applications
+may share it with their global allocator, as the examples do.
+
+The original and final scan images have these linked sections:
+
+| Linked section | Original | Refactored |
+| --- | ---: | ---: |
+| IROM bytes | 321,936 | 370,736 |
+| IRAM, including vectors | 5,710 | 5,910 |
+| Read-only DRAM bytes | 21,736 | 22,880 |
+| Initialized writable DRAM bytes | 1,249 | 1,121 |
+| BSS bytes | 15,512 | 17,000 |
+
+These are section measurements, not total RAM or a performance result. Runtime
+heap, permanent application stack and SDK task stacks require separate accounting.
+The refactor does not establish a general reduction in code size or runtime cost.
+The original linker heap extent exceeded the corrected DRAM map, so it is not a
+valid available-memory comparison.
+
+Current release images built with the pinned Xtensa toolchain and thin LTO:
+
+| Image | IROM | IRAM + vectors | Static DRAM | Heap region before runtime initialization |
+| --- | ---: | ---: | ---: | ---: |
+| Bare HAL | 8,682 | 1,493 | 2,029 | 88,080 |
+| Wi-Fi enabled, unused | 26,738 | 5,450 | 11,664 | 78,436 |
+| Scan | 370,736 | 5,910 | 41,001 | 49,096 |
+| TCP server | 449,200 | 6,158 | 60,753 | 29,344 |
+| AP + station | 451,112 | 5,970 | 61,629 | 28,480 |
+| All-feature TCP server | 569,720 | 6,118 | 73,301 | 16,800 |
+| Enterprise PEAP | 477,784 | 5,974 | 50,533 | 39,576 |
+| Enterprise EAP-TLS | 478,016 | 5,974 | 51,093 | 39,016 |
+
+All values are bytes. Static DRAM includes read-only data, initialized data and
+BSS. Heap-region figures exclude the permanently reserved 8 KiB application
+stack, but precede SDK task, packet and queue allocations; they are not free heap
+while networking is active. Enterprise rows include the compact DER certificate
+fixtures used for authentication; different credentials change these figures. The all-feature TCP example fails initialization
+cleanly with `OutOfMemory`; it is an exhaustion check, not an operational memory
+configuration.
+
+Final two-board stress completed 100 create/start/scan/stop/drop cycles on
+each board and rejected changed native buffer counts. Integrated checks cover
+AP-only and mixed upstream/downstream DHCP, plain and encrypted ESP-NOW,
+promiscuous capture, a separate LAN-host TCP exchange, and 20 byte-exact TCP echo
+connections with payloads from 4 to 2048 bytes. Flash erase/write/readback,
+Timer1/Timer2 and UART interrupt coexistence also pass.
+
+An all-features integration image reported `OutOfMemory` cleanly where native
+startup previously faulted with `LoadProhibited`; that result establishes the
+bounded failure case. The latest NMI-exclusion correction passed review and
+linked-ELF checks for IRAM placement and call-free critical-section entry/exit.
+The [refactor plan](../plan.md#final-results-and-remaining-qualification) records
+final stress, lifecycle and cleanup results, including reserved-sector comparison
+and the working AP/client pair left on the boards.
+Association attempts can report RF failures; examples and the lifecycle fixture
+use explicit bounded application retry policies. These checks do not establish
+first-attempt association reliability, arbitrary callback/interrupt stack depth,
+or independently mapped flash-cache coherence. WPS PBC/PIN and SmartConfig
+provisioning, DHCP and acknowledgement pass against an external fixture.
+PEAP/MSCHAPv2 authentication and rejection of an incorrect password pass against
+an external fixture. Compact P-256 client-certificate EAP-TLS also passes,
+including the four-way handshake;
+these results do not qualify arbitrary certificate chains or RSA profiles.

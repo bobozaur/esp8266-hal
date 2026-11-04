@@ -1,26 +1,71 @@
+--- a/sdkconfig.h
++++ b/sdkconfig.h
+@@ -166,9 +166,8 @@
+ #define CONFIG_MBEDTLS_AES_C 1
+ #define CONFIG_MBEDTLS_CCM_C 1
+ #define CONFIG_MBEDTLS_GCM_C 1
+-#define CONFIG_MBEDTLS_DES_C 1
+-#define CONFIG_MBEDTLS_BLOWFISH_C 1
+-#define CONFIG_MBEDTLS_CAMELLIA_C 1
++/* Keep the SDK-default optional legacy ciphers disabled. WPA's separate DES
++ * implementation remains available for MSCHAPv2. */
+ /* Asymmetric / EC */
+ #define CONFIG_MBEDTLS_ECDSA_C 1
+ #define CONFIG_MBEDTLS_ECP_C 1
 --- a/eap_tls_common_patched.c
 +++ b/eap_tls_common_patched.c
-@@ -542,18 +542,11 @@
- 		length_included = 1;
- 	}
- 
+@@ -545,5 +545 @@
 -	{
 -		extern void esp8266_hal_alloc_context_set(unsigned int context);
 -		extern void esp8266_hal_alloc_context_clear(void);
 -		esp8266_hal_alloc_context_set(0x1001u);
 -		*out_data = eap_tls_msg_alloc(eap_type, 1 + length_included * 4 + len,
 +	*out_data = eap_tls_msg_alloc(eap_type, 1 + length_included * 4 + len,
- 				      EAP_CODE_RESPONSE, id);
+@@ -551,2 +546,0 @@
 -		esp8266_hal_alloc_context_clear();
 -	}
- 	if (*out_data == NULL) {
+@@ -554,3 +548,2 @@
 -	    printf("[Debug] out_data is null, return \n");
- 		return -1;
+-		return -1;
 -    } 
++		return -1;
 +    }
- 
- 	flags = wpabuf_put(*out_data, 1);
- 	*flags = peap_version;
+@@ -613 +605,0 @@
+-	int esp8266_hal_eap_input_reserved = 0;
+@@ -620,4 +611,0 @@
+-		if (esp8266_hal_eap_input_reserved) {
+-			extern void esp8266_hal_eap_rsa_release(void);
+-			esp8266_hal_eap_rsa_release();
+-		}
+@@ -629 +616,0 @@
+-		extern void esp8266_hal_eap_rsa_reserve(void);
+@@ -633,2 +619,0 @@
+-		esp8266_hal_eap_rsa_reserve();
+-		esp8266_hal_eap_input_reserved = 1;
+@@ -649,4 +633,0 @@
+-			if (esp8266_hal_eap_input_reserved) {
+-				extern void esp8266_hal_eap_rsa_release(void);
+-				esp8266_hal_eap_rsa_release();
+-			}
+@@ -669,4 +649,0 @@
+-		if (esp8266_hal_eap_input_reserved) {
+-			extern void esp8266_hal_eap_rsa_release(void);
+-			esp8266_hal_eap_rsa_release();
+-		}
+@@ -693,4 +669,0 @@
+-		if (esp8266_hal_eap_input_reserved) {
+-			extern void esp8266_hal_eap_rsa_release(void);
+-			esp8266_hal_eap_rsa_release();
+-		}
+@@ -703,8 +675,0 @@
+-	if (ret >= 0 && in_len == 0 && *out_data != NULL) {
+-		extern void esp8266_hal_eap_rsa_boost(void);
+-		esp8266_hal_eap_rsa_boost();
+-	}
+-	if (esp8266_hal_eap_input_reserved) {
+-		extern void esp8266_hal_eap_rsa_release(void);
+-		esp8266_hal_eap_rsa_release();
+-	}
 --- a/esp_wpa2_patched.c
 +++ b/esp_wpa2_patched.c
 @@ -11,7 +11,11 @@
@@ -222,63 +267,44 @@
 -
 --- a/ssl_cli_patched.c
 +++ b/ssl_cli_patched.c
-@@ -16,9 +16,13 @@
-  *  See the License for the specific language governing permissions and
-  *  limitations under the License.
-  *
+@@ -18,0 +19,3 @@
 + *  Modified by esp8266-hal for its vendored Rust-first Wi-Fi runtime. See
 + *  ../README.md for the pinned source and reproduction details.
 + *
-  *  This file is part of mbed TLS (https://tls.mbed.org)
-  */
- 
+@@ -21,0 +25 @@
 +#line 22
- #if !defined(MBEDTLS_CONFIG_FILE)
- #include "mbedtls/config.h"
- #else
-@@ -2776,8 +2780,6 @@
-             const unsigned char *esp8266_hal_sig = p;
-             int esp8266_hal_in_buf_released = 0;
-             int esp8266_hal_restore_ret;
+@@ -2200,4 +2203,0 @@
+-    extern void esp8266_hal_eap_rsa_reserve(void);
+-    extern void esp8266_hal_eap_rsa_release(void);
+-
+-    esp8266_hal_eap_rsa_reserve();
+@@ -2210 +2209,0 @@
+-        esp8266_hal_eap_rsa_release();
+@@ -2214 +2212,0 @@
+-    esp8266_hal_eap_rsa_release();
+@@ -2779,2 +2776,0 @@
 -            extern void esp8266_hal_alloc_context_set(unsigned int context);
 -            extern void esp8266_hal_alloc_context_clear(void);
- 
-             if( sig_len <= sizeof( esp8266_hal_sig_copy ) )
-             {
-@@ -2787,11 +2789,9 @@
-                     esp8266_hal_ssl_release_in_buf_for_ske_verify( ssl );
-             }
- 
+@@ -2790 +2785,0 @@
 -            esp8266_hal_alloc_context_set(0x3002u);
-             ret = mbedtls_pk_verify_restartable(
-                         &ssl->session_negotiate->peer_cert->pk,
-                         md_alg, hash, hashlen, esp8266_hal_sig, sig_len, rs_ctx );
+@@ -2794 +2788,0 @@
 -            esp8266_hal_alloc_context_clear();
- 
-             esp8266_hal_restore_ret =
-                 esp8266_hal_ssl_restore_in_buf_after_ske_verify(
-@@ -3553,8 +3553,6 @@
-         int esp8266_hal_use_stack_sig = 0;
-         unsigned char esp8266_hal_hash_sig_alg = ssl->out_msg[4];
-         unsigned char esp8266_hal_sig_alg = ssl->out_msg[5];
+@@ -3010,3 +3003,0 @@
+-extern void esp8266_hal_eap_rsa_reserve(void);
+-extern void esp8266_hal_eap_rsa_release(void);
+-
+@@ -3556,2 +3546,0 @@
 -        extern void esp8266_hal_alloc_context_set(unsigned int context);
 -        extern void esp8266_hal_alloc_context_clear(void);
- 
-         if( mbedtls_pk_can_do( mbedtls_ssl_own_key( ssl ), MBEDTLS_PK_ECDSA ) )
-         {
-@@ -3575,12 +3573,10 @@
-         }
- 
-         esp8266_hal_eap_rsa_reserve();
+@@ -3577,2 +3565,0 @@
+-        esp8266_hal_eap_rsa_reserve();
 -        esp8266_hal_alloc_context_set(0x4001u);
-         ret = mbedtls_pk_sign_restartable( mbedtls_ssl_own_key( ssl ),
-                          md_alg, hash_start, hashlen,
-                          esp8266_hal_sig_out, &n,
-                          ssl->conf->f_rng, ssl->conf->p_rng, rs_ctx );
+@@ -3583 +3569,0 @@
 -        esp8266_hal_alloc_context_clear();
- 
-         if( esp8266_hal_use_stack_sig )
-         {
+@@ -3617 +3602,0 @@
+-        esp8266_hal_eap_rsa_release();
+@@ -3625 +3609,0 @@
+-    esp8266_hal_eap_rsa_release();
 --- a/ssl_tls_patched.c
 +++ b/ssl_tls_patched.c
 @@ -16,8 +16,12 @@
@@ -333,61 +359,57 @@
                                                      ssl, esp8266_hal_in_buf_released );
 --- a/tls_mbedtls_patched.c
 +++ b/tls_mbedtls_patched.c
-@@ -12,8 +12,12 @@
-  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  * See the License for the specific language governing permissions and
-  * limitations under the License.
+@@ -14,0 +15,3 @@
 + *
 + * Modified by esp8266-hal for its vendored Rust-first Wi-Fi runtime. See
 + * ../README.md for the pinned source and reproduction details.
-  */
- 
+@@ -16,0 +20 @@
 +#line 17
- #include "utils/includes.h"
- #include "utils/common.h"
- 
-@@ -130,15 +134,11 @@
- static int esp8266_hal_tls_prealloc_client_flight_out(struct tls_connection *conn)
- {
- 	struct tls_data *data = &conn->tls_io_data;
+@@ -133,2 +136,0 @@
 -	extern void esp8266_hal_alloc_context_set(unsigned int context);
 -	extern void esp8266_hal_alloc_context_clear(void);
- 
- 	if (data->out_data != NULL)
- 		return 0;
- 
+@@ -139 +140,0 @@
 -	esp8266_hal_alloc_context_set(0x2006u);
- 	data->out_data = wpabuf_alloc(ESP8266_HAL_TLS_CLIENT_FLIGHT_OUT_PREALLOC_BYTES);
+@@ -141 +141,0 @@
 -	esp8266_hal_alloc_context_clear();
- 
- 	return data->out_data == NULL ? MBEDTLS_ERR_SSL_ALLOC_FAILED : 0;
- }
-@@ -147,21 +147,15 @@
- {
- 	struct tls_connection *conn = (struct tls_connection *)ctx;
- 	struct tls_data *data = &conn->tls_io_data;
+@@ -150,2 +149,0 @@
 -	extern void esp8266_hal_alloc_context_set(unsigned int context);
 -	extern void esp8266_hal_alloc_context_clear(void);
- 
- 	if (data->out_data) {
- 		int resize_ret;
+@@ -155 +152,0 @@
 -		esp8266_hal_alloc_context_set(0x2004u);
- 		resize_ret = wpabuf_resize(&data->out_data, len);
+@@ -157 +153,0 @@
 -		esp8266_hal_alloc_context_clear();
- 		if (resize_ret < 0) {
- 			return MBEDTLS_ERR_SSL_ALLOC_FAILED;
- 		}
- 	} else {
+@@ -162 +157,0 @@
 -		esp8266_hal_alloc_context_set(0x2004u);
- 		data->out_data = wpabuf_alloc(len);
+@@ -164 +158,0 @@
 -		esp8266_hal_alloc_context_clear();
- 	}
- 	if (!data->out_data) {
- 		return MBEDTLS_ERR_SSL_ALLOC_FAILED;
-@@ -801,15 +795,9 @@
- 		conn->tls_io_data.in_ext_len = wpabuf_len(in_data);
- 		conn->tls_io_data.in_ext_pos = 0;
- 	}
+@@ -663,0 +658,3 @@
++	if (conn == NULL)
++		return;
++
+@@ -726,10 +723,2 @@
+-static int esp8266_hal_tls_restore_in_buf_after_client_flight(mbedtls_ssl_context *ssl,
+-							      int released)
+-{
+-	if (!released)
+-		return 0;
+-
+-	{
+-		extern void esp8266_hal_eap_rsa_release(void);
+-		esp8266_hal_eap_rsa_release();
+-	}
++static int esp8266_hal_tls_restore_in_buf_after_client_flight(mbedtls_ssl_context *ssl)
++{
+@@ -773 +762 @@
+-	ret = esp8266_hal_tls_restore_in_buf_after_client_flight(&conn->tls->ssl, 1);
++	ret = esp8266_hal_tls_restore_in_buf_after_client_flight(&conn->tls->ssl);
+@@ -787 +775,0 @@
+-	int esp8266_hal_eap_server_input_reserved = 0;
+@@ -797,3 +784,0 @@
+-		extern void esp8266_hal_eap_rsa_reserve(void);
+-		esp8266_hal_eap_rsa_reserve();
+-		esp8266_hal_eap_server_input_reserved = 1;
+@@ -804,9 +789,3 @@
 -	{
 -		extern void esp8266_hal_alloc_context_set(unsigned int context);
 -		extern void esp8266_hal_alloc_context_clear(void);
@@ -400,49 +422,33 @@
 +	ret = mbedtls_ssl_handshake_step(&tls->ssl);
 +	if (ret >= 0)
 +		esp8266_hal_tls_drop_verified_ca(tls);
- 	if (ret < 0) {
- 		wpa_printf(MSG_ERROR, "%s:%d", __func__, __LINE__);
- 		goto end;
-@@ -818,11 +806,7 @@
- 	/* Multiple reads */
- 	while (conn->tls_io_data.in_data || conn->tls_io_data.in_ext_data ||
- 	       conn->tls_io_data.in_ext_extra_data) {
+@@ -821,3 +799,0 @@
 -		extern void esp8266_hal_alloc_context_set(unsigned int context);
 -		extern void esp8266_hal_alloc_context_clear(void);
 -		esp8266_hal_alloc_context_set(0x2002u);
- 		ret = mbedtls_ssl_handshake_step(&tls->ssl);
+@@ -825 +800,0 @@
 -		esp8266_hal_alloc_context_clear();
- 		if (ret < 0)
- 			break;
- 		esp8266_hal_tls_drop_verified_ca(tls);
-@@ -857,8 +841,6 @@
- 		/* trigger state machine multiple times to reach till finish */
- 		extern void esp8266_hal_eap_rsa_reserve(void);
- 		extern void esp8266_hal_eap_rsa_release(void);
+@@ -858,4 +832,0 @@
+-		extern void esp8266_hal_eap_rsa_reserve(void);
+-		extern void esp8266_hal_eap_rsa_release(void);
 -		extern void esp8266_hal_alloc_context_set(unsigned int context);
 -		extern void esp8266_hal_alloc_context_clear(void);
- 		int esp8266_hal_client_flight_in_buf_released;
- 		esp8266_hal_client_flight_in_buf_released =
- 			esp8266_hal_tls_release_in_buf_for_client_flight(&tls->ssl);
-@@ -871,9 +853,7 @@
- 		}
- 		esp8266_hal_eap_rsa_reserve();
- 		while (tls->ssl.state <= MBEDTLS_SSL_CLIENT_FINISHED) {
+@@ -872 +842,0 @@
+-		esp8266_hal_eap_rsa_reserve();
+@@ -874 +843,0 @@
 -			esp8266_hal_alloc_context_set(0x2003u);
- 			ret = mbedtls_ssl_handshake_step(&tls->ssl);
+@@ -876 +844,0 @@
 -			esp8266_hal_alloc_context_clear();
- 			if (ret < 0) {
- 				break;
- 			}
-@@ -886,11 +866,7 @@
- 	/* Trigger state machine till handshake is complete or error occures */
- 	if (tls->ssl.state == MBEDTLS_SSL_FLUSH_BUFFERS) {
- 		while (tls->ssl.state < MBEDTLS_SSL_HANDSHAKE_OVER) {
+@@ -881 +848,0 @@
+-		esp8266_hal_eap_rsa_release();
+@@ -889,3 +855,0 @@
 -			extern void esp8266_hal_alloc_context_set(unsigned int context);
 -			extern void esp8266_hal_alloc_context_clear(void);
 -			esp8266_hal_alloc_context_set(0x2005u);
- 			ret = mbedtls_ssl_handshake_step(&tls->ssl);
+@@ -893 +856,0 @@
 -			esp8266_hal_alloc_context_clear();
- 			if (ret < 0) {
- 				break;
- 			}
+@@ -907,4 +869,0 @@
+-	if (esp8266_hal_eap_server_input_reserved) {
+-		extern void esp8266_hal_eap_rsa_release(void);
+-		esp8266_hal_eap_rsa_release();
+-	}

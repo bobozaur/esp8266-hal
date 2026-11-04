@@ -1,4 +1,4 @@
-use super::Ipv4Addr;
+use core::net::Ipv4Addr;
 
 const DHCP_MIN_LEN: usize = 240;
 const DHCP_MAGIC: [u8; 4] = 0x6382_5363u32.to_be_bytes();

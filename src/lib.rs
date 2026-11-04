@@ -1,6 +1,7 @@
 #![no_std]
+#![cfg_attr(target_arch = "xtensa", feature(asm_const))]
 #![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch))]
-#![cfg_attr(feature = "rt", feature(naked_functions))]
+#![cfg_attr(all(feature = "rt", target_arch = "xtensa"), feature(naked_functions))]
 #![cfg_attr(all(feature = "wifi", target_arch = "xtensa"), feature(raw_ref_op))]
 
 #[cfg(all(
@@ -17,10 +18,10 @@ pub use esp8266_hal_proc_macros::{interrupt, main, ram};
 #[cfg(target_arch = "xtensa")]
 mod critical;
 
-#[cfg(feature = "rt")]
+#[cfg(all(feature = "rt", target_arch = "xtensa"))]
 pub use xtensa_lx_rt::{entry, exception};
 
-#[cfg(all(feature = "rt", feature = "interrupt"))]
+#[cfg(all(feature = "rt", feature = "interrupt", target_arch = "xtensa"))]
 #[macro_use]
 pub mod interrupt;
 
@@ -38,22 +39,11 @@ pub mod watchdog;
 
 pub mod logger;
 
-#[cfg(feature = "wifi-core")]
+#[cfg(feature = "wifi")]
 #[path = "wifi/core/mod.rs"]
-pub mod wifi_core;
+pub(crate) mod wifi_core;
 
-#[cfg(all(
-    feature = "wifi-core",
-    any(not(feature = "wifi"), not(target_arch = "xtensa"))
-))]
-pub use wifi_core as wifi;
-
-#[cfg(all(
-    feature = "wifi",
-    feature = "rt",
-    feature = "interrupt",
-    target_arch = "xtensa"
-))]
+#[cfg(feature = "wifi")]
 #[deny(unsafe_op_in_unsafe_fn)]
 pub mod wifi;
 
@@ -63,7 +53,7 @@ pub mod wifi;
 /// ENTRY point is defined in memory.x
 /// *Note: the pre_init function is called in the original reset handler
 /// after the initializations done in this function*
-#[cfg(feature = "rt")]
+#[cfg(all(feature = "rt", target_arch = "xtensa"))]
 #[doc(hidden)]
 #[no_mangle]
 #[ram]

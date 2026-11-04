@@ -1,140 +1,99 @@
-use core::ptr;
+use super::{locked::Locked, resources::Resources, InitError};
 
-use portable_atomic::{AtomicPtr, Ordering};
-
-use super::{InitError, WifiResources};
-
-static ACTIVE_WIFI_RESOURCES: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
-
-pub(crate) struct CallbackRegistration<
-    'd,
-    const EVENTS: usize,
-    const RX: usize,
-    const ESP_NOW_PEERS: usize = 0,
-    const ESP_NOW_RX: usize = 0,
-    const PROMISCUOUS_RX: usize = 0,
-    const AP_RX_SLOTS: usize = 0,
-    const AP_RX_BYTES: usize = 0,
-> {
-    _marker: core::marker::PhantomData<
-        &'d WifiResources<
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-    >,
+struct Registration {
+    resources: *const Resources,
+    active: bool,
+    callbacks: usize,
 }
+// SAFETY: publication and callback admission are serialized by a critical section;
+// Wifi retains its allocation through quiescence or leaks it on failed teardown.
+unsafe impl Send for Registration {}
+static REGISTRATION: Locked<Registration> = Locked::new(Registration {
+    resources: core::ptr::null(),
+    active: false,
+    callbacks: 0,
+});
 
-impl<
-        'd,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    >
-    CallbackRegistration<
-        'd,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
-    pub fn install(
-        resources: &'d WifiResources<
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >,
-    ) -> Result<Self, InitError> {
-        ACTIVE_WIFI_RESOURCES
-            .compare_exchange(
-                ptr::null_mut(),
-                resources as *const _ as *mut (),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .map_err(|_| InitError::AlreadyInitialized)?;
-        Ok(Self {
-            _marker: core::marker::PhantomData,
+pub(crate) struct CallbackRegistration;
+impl CallbackRegistration {
+    pub(crate) fn install(resources: &Resources) -> Result<Self, InitError> {
+        REGISTRATION.with(|r| {
+            if r.active || r.callbacks != 0 {
+                return Err(InitError::AlreadyInitialized);
+            }
+            r.resources = resources;
+            r.active = true;
+            Ok(Self)
+        })
+    }
+    pub(crate) fn quiescent() -> bool {
+        REGISTRATION.with(|r| !r.active && r.callbacks == 0)
+    }
+}
+impl Drop for CallbackRegistration {
+    fn drop(&mut self) {
+        REGISTRATION.with(|r| {
+            r.active = false;
+            r.resources = core::ptr::null();
         })
     }
 }
 
-impl<
-        'd,
-        const EVENTS: usize,
-        const RX: usize,
-        const ESP_NOW_PEERS: usize,
-        const ESP_NOW_RX: usize,
-        const PROMISCUOUS_RX: usize,
-        const AP_RX_SLOTS: usize,
-        const AP_RX_BYTES: usize,
-    > Drop
-    for CallbackRegistration<
-        'd,
-        EVENTS,
-        RX,
-        ESP_NOW_PEERS,
-        ESP_NOW_RX,
-        PROMISCUOUS_RX,
-        AP_RX_SLOTS,
-        AP_RX_BYTES,
-    >
-{
+/// Counts every native callback, including rejected RX packets that still invoke
+/// the SDK's release routine after resource admission has closed.
+pub(crate) struct CallbackInvocation {
+    resources: *const Resources,
+}
+impl CallbackInvocation {
+    pub(crate) fn enter() -> Self {
+        REGISTRATION.with(|r| {
+            r.callbacks += 1;
+            Self {
+                resources: if r.active {
+                    r.resources
+                } else {
+                    core::ptr::null()
+                },
+            }
+        })
+    }
+    pub(crate) fn resources(&self) -> Option<&Resources> {
+        if self.resources.is_null() {
+            None
+        } else {
+            // SAFETY: entry increments in-flight count before releasing the
+            // registration lock. Wifi cannot free storage while it is nonzero.
+            Some(unsafe { &*self.resources })
+        }
+    }
+}
+impl Drop for CallbackInvocation {
     fn drop(&mut self) {
-        ACTIVE_WIFI_RESOURCES.store(ptr::null_mut(), Ordering::Release);
+        REGISTRATION.with(|r| r.callbacks -= 1)
     }
 }
 
-/// Returns the resource block currently registered for SDK callbacks.
-///
-/// # Safety
-///
-/// The returned pointer is valid only while the matching [`CallbackRegistration`]
-/// is alive. The registration is installed during backend initialization, cleared
-/// before the backend drops its controller/resources association, and protected by
-/// acquire/release ordering so callback trampolines either see a fully-initialized
-/// `WifiResources` value or a null pointer.
-pub(crate) unsafe fn active_resources<
-    const EVENTS: usize,
-    const RX: usize,
-    const ESP_NOW_PEERS: usize,
-    const ESP_NOW_RX: usize,
-    const PROMISCUOUS_RX: usize,
-    const AP_RX_SLOTS: usize,
-    const AP_RX_BYTES: usize,
->() -> *const WifiResources<
-    EVENTS,
-    RX,
-    ESP_NOW_PEERS,
-    ESP_NOW_RX,
-    PROMISCUOUS_RX,
-    AP_RX_SLOTS,
-    AP_RX_BYTES,
-> {
-    ACTIVE_WIFI_RESOURCES.load(Ordering::Acquire)
-        as *const WifiResources<
-            EVENTS,
-            RX,
-            ESP_NOW_PEERS,
-            ESP_NOW_RX,
-            PROMISCUOUS_RX,
-            AP_RX_SLOTS,
-            AP_RX_BYTES,
-        >
+#[cfg(test)]
+mod tests {
+    use super::super::{allocator::test_allocator, QueueConfig};
+    use super::*;
+    #[test]
+    fn closed_admission_still_counts_native_release_callbacks() {
+        let resources = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let registration = CallbackRegistration::install(&resources).unwrap();
+        let admitted = CallbackInvocation::enter();
+        assert!(admitted.resources().is_some());
+        drop(registration);
+        let rejected = CallbackInvocation::enter();
+        assert!(rejected.resources().is_none());
+        assert!(!CallbackRegistration::quiescent());
+        drop(admitted);
+        assert!(!CallbackRegistration::quiescent());
+        assert!(matches!(
+            CallbackRegistration::install(&resources),
+            Err(InitError::AlreadyInitialized)
+        ));
+        drop(rejected);
+        assert!(CallbackRegistration::quiescent());
+    }
 }

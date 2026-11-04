@@ -1,12 +1,16 @@
-//! SmartConfig provisioning example using the typestate WiFi core.
+//! SmartConfig provisioning example using the Wi-Fi controller.
 
 #![no_std]
 #![no_main]
 
+mod support;
+use esp8266_hal::timer::TimerExt;
+use support::log_line;
+
 use esp8266_hal::wifi::{
-    Esp8266TargetBackend, InitConfig, Ipv4Addr as CoreIpv4Addr, SmartConfigCredentials,
-    SmartConfigEvent, SmartConfigStartConfig, SmartConfigTimeout, SmartConfigType, StaMode,
-    Started, WifiDriver, WifiResources,
+    Controller, InitConfig, Interface as WifiInterface, Ipv4Addr as CoreIpv4Addr,
+    SmartConfigCredentials, SmartConfigEvent, SmartConfigStartConfig, SmartConfigTimeout,
+    SmartConfigType, Wifi,
 };
 use smoltcp::iface::{Config as SmolConfig, Interface, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::socket::{dhcpv4, udp};
@@ -18,32 +22,18 @@ use xtensa_lx_rt::exception::{Context, ExceptionCause};
 const UDP_BUF_BYTES: usize = 32;
 const ESPTOUCH_ACK_PORT: u16 = 18_266;
 const DHCP_TIMEOUT_MS: u64 = 30_000;
+const ACK_TIMEOUT_MS: u64 = 5_000;
 const STATIC_ACK_IP: CoreIpv4Addr = CoreIpv4Addr::new(192, 168, 4, 2);
 const STATIC_ACK_ENABLED: bool = option_env!("ESP8266_HAL_SMARTCONFIG_STATIC_ACK").is_some();
 
-type SmartConfigResources = WifiResources<8, 4>;
-type SmartConfigDriver =
-    WifiDriver<'static, Started<StaMode>, Esp8266TargetBackend<'static, 8, 4>, 8, 4>;
-type SmartConfigDevice = esp8266_hal::wifi::smoltcp::WifiDevice<
-    'static,
-    StaMode,
-    Esp8266TargetBackend<'static, 8, 4>,
-    8,
-    4,
->;
+type SmartConfigDevice = esp8266_hal::wifi::smoltcp::WifiDevice<'static>;
 
-static WIFI_RESOURCES: StaticCell<SmartConfigResources> = StaticCell::new();
+static WIFI: StaticCell<Wifi> = StaticCell::new();
 static SOCKET_STORAGE: StaticCell<[SocketStorage<'static>; 3]> = StaticCell::new();
 static UDP_RX_METADATA: StaticCell<[udp::PacketMetadata; 1]> = StaticCell::new();
 static UDP_TX_METADATA: StaticCell<[udp::PacketMetadata; 1]> = StaticCell::new();
 static UDP_RX_BUFFER: StaticCell<[u8; 1]> = StaticCell::new();
 static UDP_TX_BUFFER: StaticCell<[u8; UDP_BUF_BYTES]> = StaticCell::new();
-
-#[inline(always)]
-fn log_line(message: &[u8]) {
-    esp8266_hal::logger::write_bytes(message);
-    esp8266_hal::logger::write_newline();
-}
 
 fn idle_forever() -> ! {
     loop {
@@ -51,39 +41,36 @@ fn idle_forever() -> ! {
     }
 }
 
-fn smartconfig_start_config() -> SmartConfigStartConfig {
-    SmartConfigStartConfig::default()
-}
-
 fn provision_with_smartconfig(
-    driver: &mut SmartConfigDriver,
-) -> Option<(SmartConfigCredentials, bool)> {
+    driver: &mut Controller<'static>,
+    link: WifiInterface<'static>,
+) -> Result<(), ()> {
     let mut session = match driver.smart_config() {
         Ok(session) => session,
         Err(_error) => {
             log_line(b"smartconfig session err");
-            return None;
+            return Err(());
         }
     };
 
     let _ = session.set_type(SmartConfigType::EspTouch);
     let _ = session.set_timeout(SmartConfigTimeout::try_from(15).expect("smartconfig timeout"));
 
-    if session.start(&smartconfig_start_config()).is_err() {
+    if session.start(&SmartConfigStartConfig::default()).is_err() {
         log_line(b"smartconfig start err");
-        return None;
+        return Err(());
     }
     log_line(b"smartconfig ready");
 
     loop {
         match session.next_event() {
-            Some(SmartConfigEvent::ScanDone) => {
+            Ok(Some(SmartConfigEvent::ScanDone)) => {
                 log_line(b"smartconfig scan done");
             }
-            Some(SmartConfigEvent::FoundChannel) => {
+            Ok(Some(SmartConfigEvent::FoundChannel)) => {
                 log_line(b"smartconfig found channel");
             }
-            Some(SmartConfigEvent::GotCredentials(credentials)) => {
+            Ok(Some(SmartConfigEvent::GotCredentials(credentials))) => {
                 esp8266_hal::logger::write_bytes(b"smartconfig credentials ssid-len=");
                 esp8266_hal::logger::write_dec_u32(credentials.ssid().len() as u32);
                 esp8266_hal::logger::write_newline();
@@ -104,23 +91,23 @@ fn provision_with_smartconfig(
                 }
                 log_line(b"smartconfig connected");
                 log_line(b"smartconfig-credentials-ok");
-                if STATIC_ACK_ENABLED {
-                    if session
-                        .send_esptouch_ack(&credentials, STATIC_ACK_IP)
-                        .is_err()
-                    {
-                        log_line(b"smartconfig ack send err");
-                        return None;
-                    }
-                    log_line(b"smartconfig ack sent");
+                // Keep provisioning active through DHCP and the ACK, as the SDK does.
+                let result = run_network_ack(link, &credentials);
+                if result.is_err() {
+                    log_line(b"smartconfig ack err");
                 }
                 if session.stop().is_err() {
                     log_line(b"smartconfig stop err");
+                    return Err(());
                 }
-                return Some((credentials, STATIC_ACK_ENABLED));
+                return result;
             }
-            Some(SmartConfigEvent::SendAckDone) => {
+            Ok(Some(SmartConfigEvent::SendAckDone)) => {
                 log_line(b"smartconfig sdk ack done");
+            }
+            Err(error) => {
+                support::log_debug(&error);
+                log_line(b"provisioning event err");
             }
             _ => {}
         }
@@ -146,24 +133,11 @@ fn log_dhcp_up(address: [u8; 4], prefix_len: u8) {
 }
 
 fn run_network_ack(
-    driver: SmartConfigDriver,
+    link: WifiInterface<'static>,
     credentials: &SmartConfigCredentials,
 ) -> Result<(), ()> {
     log_line(b"smartconfig net start");
-    let link = match driver.sta_link() {
-        Ok(link) => link,
-        Err(_error) => {
-            log_line(b"smartconfig net err");
-            return Err(());
-        }
-    };
-    let sta_mac = match link.mac_address() {
-        Ok(mac) => mac,
-        Err(_error) => {
-            log_line(b"smartconfig mac err");
-            return Err(());
-        }
-    };
+    let sta_mac = link.mac_address();
 
     let mut device = SmartConfigDevice::new(link).expect("valid station frame capacity");
     let config = SmolConfig::new(HardwareAddress::Ethernet(EthernetAddress(sta_mac)));
@@ -178,11 +152,20 @@ fn run_network_ack(
     let dhcp_handle = sockets.add(dhcpv4::Socket::new());
     log_line(b"smartconfig dhcp socket");
 
-    let local_ip = match wait_for_dhcp(&mut iface, &mut device, &mut sockets, dhcp_handle) {
-        Some(local_ip) => local_ip,
-        None => {
-            log_line(b"smartconfig dhcp err");
-            return Err(());
+    let local_ip = if STATIC_ACK_ENABLED {
+        let address = STATIC_ACK_IP.octets();
+        iface.update_ip_addrs(|addresses| {
+            addresses.clear();
+            let _ = addresses.push(IpCidr::new(Ipv4Address::from(address).into(), 24));
+        });
+        address
+    } else {
+        match wait_for_dhcp(&mut iface, &mut device, &mut sockets, dhcp_handle) {
+            Some(address) => address,
+            None => {
+                log_line(b"smartconfig dhcp err");
+                return Err(());
+            }
         }
     };
 
@@ -204,21 +187,9 @@ fn wait_for_dhcp(
 ) -> Option<[u8; 4]> {
     log_line(b"smartconfig waiting dhcp");
     let start = now();
-    let mut first_poll = true;
 
     loop {
-        let log_poll = first_poll;
-        if first_poll {
-            first_poll = false;
-            log_line(b"smartconfig dhcp poll");
-        }
-        if log_poll {
-            log_line(b"smartconfig dhcp poll enter");
-        }
         let _ = iface.poll(now(), device, sockets);
-        if log_poll {
-            log_line(b"smartconfig dhcp poll exit");
-        }
         {
             let dhcp = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle);
             if let Some(dhcpv4::Event::Configured(config)) = dhcp.poll() {
@@ -317,7 +288,7 @@ fn send_esptouch_ack(
             }
 
             let _ = iface.poll(now(), device, sockets);
-            if elapsed_ms_since(send_start) >= 1_000 {
+            if elapsed_ms_since(send_start) >= ACK_TIMEOUT_MS {
                 log_line(b"smartconfig ack send err");
                 return Err(());
             }
@@ -331,7 +302,7 @@ fn send_esptouch_ack(
             if queued == 0 {
                 break;
             }
-            if elapsed_ms_since(flush_start) >= 1_000 {
+            if elapsed_ms_since(flush_start) >= ACK_TIMEOUT_MS {
                 log_line(b"smartconfig ack send err");
                 return Err(());
             }
@@ -347,16 +318,30 @@ fn send_esptouch_ack(
 
 #[esp8266_hal::main]
 fn main() -> ! {
+    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let (_, timer2) = peripherals.TIMER.timers();
+    let runtime = support::init(timer2);
     log_line(b"wifi_smartconfig start");
 
-    let resources = WIFI_RESOURCES.init_with(WifiResources::new);
-    let driver = WifiDriver::new(resources)
-        .initialize(InitConfig::new(14, 4, 4).expect("init config"))
-        .expect("wifi init");
+    let init = InitConfig::new(14, 4, 4).expect("init config");
+
+    let wifi = WIFI.init(Wifi::new(runtime, init).expect("wifi init"));
+    let (mut driver, interfaces) = wifi.split();
+    esp8266_hal::logger::write_bytes(b"smartconfig station mac=");
+    for (index, byte) in interfaces.station.mac_address().into_iter().enumerate() {
+        if index != 0 {
+            esp8266_hal::logger::write_byte(b':');
+        }
+        esp8266_hal::logger::write_hex_u8(byte);
+    }
+    esp8266_hal::logger::write_newline();
     log_line(b"wifi init ok");
 
-    let mut driver = match driver.enable_sta().and_then(|driver| driver.start()) {
-        Ok(driver) => driver,
+    match driver
+        .enable_station()
+        .and_then(|()| driver.start_blocking(1_000))
+    {
+        Ok(()) => {}
         Err(_error) => {
             log_line(b"smartconfig sta start err");
             idle_forever();
@@ -364,12 +349,7 @@ fn main() -> ! {
     };
     log_line(b"smartconfig sta started");
 
-    let (credentials, acknowledged) = match provision_with_smartconfig(&mut driver) {
-        Some(result) => result,
-        None => idle_forever(),
-    };
-    if !acknowledged && run_network_ack(driver, &credentials).is_err() {
-        log_line(b"smartconfig ack err");
+    if provision_with_smartconfig(&mut driver, interfaces.station).is_err() {
         idle_forever();
     }
     log_line(b"smartconfig-ok");
