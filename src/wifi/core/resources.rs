@@ -13,7 +13,7 @@ use super::{
     allocator::RuntimeAllocator,
     event::WifiEvent,
     locked::Locked,
-    packet::{release_owned_rx_slot, OwnedRxPool, RawRxRecord, RxRing},
+    packet::{RawRxRecord, RxRing},
     waker::CallbackWaker,
     DriverError, InitError, LinkState, QueueConfig,
 };
@@ -48,7 +48,7 @@ pub(crate) struct ControlState {
     pub(crate) reason: Option<u8>,
     admission: [bool; 2],
     generation: [u32; 2],
-    sdk_leases: usize,
+    rx_leases: [usize; 2],
     submissions: usize,
 }
 impl ControlState {
@@ -67,7 +67,7 @@ impl ControlState {
             reason: None,
             admission: [false; 2],
             generation: [0; 2],
-            sdk_leases: 0,
+            rx_leases: [0; 2],
             submissions: 0,
         }
     }
@@ -89,8 +89,6 @@ pub(crate) struct Resources {
     pub(super) smartconfig_storage: Locked<super::target_map::SmartConfigStorage>,
     sta_rx: Locked<RxRing>,
     ap_rx: Locked<RxRing>,
-    // Shared pool access never creates an exclusive borrow of leased bytes.
-    ap_owned: OwnedRxPool,
     pub(crate) frame_bytes: usize,
     pub(crate) station_rx_capacity: usize,
     pub(crate) ap_rx_capacity: usize,
@@ -136,7 +134,6 @@ impl Resources {
             smartconfig_storage: Locked::new(super::target_map::SmartConfigStorage::new()),
             sta_rx: Locked::new(RxRing::try_new(config.station_rx, allocator)?),
             ap_rx: Locked::new(RxRing::try_new(config.access_point_rx, allocator)?),
-            ap_owned: OwnedRxPool::try_new(config.access_point_rx, config.frame_bytes, allocator)?,
             frame_bytes: config.frame_bytes,
             station_rx_capacity: config.station_rx,
             ap_rx_capacity: config.access_point_rx,
@@ -284,7 +281,7 @@ impl Resources {
     }
     pub(crate) fn close_admission(&self) -> Result<(), DriverError> {
         self.state.with(|s| {
-            if s.sdk_leases != 0 || s.submissions != 0 {
+            if s.rx_leases.iter().any(|&leases| leases != 0) || s.submissions != 0 {
                 return Err(DriverError::Busy);
             }
             s.stopping = true;
@@ -297,7 +294,7 @@ impl Resources {
     }
     pub(crate) fn close_station(&self) -> Result<(), DriverError> {
         self.state.with(|s| {
-            if s.sdk_leases != 0 || s.submissions != 0 {
+            if s.rx_leases[InterfaceId::Station.index()] != 0 || s.submissions != 0 {
                 return Err(DriverError::Busy);
             }
             s.disconnecting = true;
@@ -324,27 +321,28 @@ impl Resources {
                 return None;
             }
             let record = self.ring(id).with(RxRing::pop)?;
-            let sdk = id == InterfaceId::Station;
-            if sdk {
-                self.state.with(|s| s.sdk_leases += 1)
-            }
+            self.state.with(|s| s.rx_leases[id.index()] += 1);
             Some(RxPacket {
                 record: Some(record),
                 resources: self,
-                sdk,
+                id,
             })
         })
     }
-    pub(crate) fn enqueue_rx(&self, record: RawRxRecord) -> Result<(), DriverError> {
+    pub(crate) fn enqueue_rx(
+        &self,
+        id: InterfaceId,
+        record: RawRxRecord,
+    ) -> Result<(), DriverError> {
         let result = critical_section::with(|_| {
-            if !self.state.with(|s| s.admission[0]) || record.len() > self.frame_bytes {
+            if !self.state.with(|s| s.admission[id.index()]) || record.len() > self.frame_bytes {
                 return Err(record);
             }
-            self.sta_rx.with(|queue| queue.try_push(record))
+            self.ring(id).with(|queue| queue.try_push(record))
         });
         match result {
             Ok(()) => {
-                self.rx_wakers[0].wake();
+                self.rx_wakers[id.index()].wake();
                 Ok(())
             }
             Err(record) => {
@@ -352,32 +350,6 @@ impl Resources {
                 Err(DriverError::PacketOverflow)
             }
         }
-    }
-    pub(crate) fn enqueue_ap_rx_copy(&self, frame: &[u8]) -> Result<(), DriverError> {
-        let result = critical_section::with(|_| {
-            if !self.state.with(|s| s.admission[1]) {
-                return Err(DriverError::NotStarted);
-            }
-            let lease = self.ap_owned.try_acquire_copy(frame)?;
-            let record = unsafe {
-                RawRxRecord::from_raw(
-                    lease.buffer,
-                    lease.len,
-                    lease.slot,
-                    Some(release_owned_rx_slot),
-                )
-            };
-            self.ap_rx.with(|q| {
-                q.try_push(record).map_err(|rejected| {
-                    drop(rejected);
-                    DriverError::PacketOverflow
-                })
-            })
-        });
-        if result.is_ok() {
-            self.rx_wakers[1].wake()
-        }
-        result
     }
     pub(crate) fn drain_sta_rx(&self) {
         while let Some(record) = self.sta_rx.with(RxRing::pop) {
@@ -392,7 +364,6 @@ impl Resources {
     pub(crate) fn reset_runtime(&self) {
         self.drain_sta_rx();
         self.drain_ap_rx();
-        // Checked-out AP bytes remain valid. Their leases return slots later.
         self.state.with(|s| {
             s.connected = false;
             s.connecting = false;
@@ -604,11 +575,11 @@ impl Drop for Submission<'_> {
     }
 }
 
-/// Packet lease keeps its owner alive and distinguishes checked-out SDK buffers.
+/// Checked-out native frame whose interface must remain alive until release.
 pub(crate) struct RxPacket<'a> {
     record: Option<RawRxRecord>,
     resources: &'a Resources,
-    sdk: bool,
+    id: InterfaceId,
 }
 impl RxPacket<'_> {
     pub(crate) fn as_slice(&self) -> &[u8] {
@@ -618,9 +589,9 @@ impl RxPacket<'_> {
 impl Drop for RxPacket<'_> {
     fn drop(&mut self) {
         drop(self.record.take());
-        if self.sdk {
-            self.resources.state.with(|s| s.sdk_leases -= 1)
-        }
+        self.resources
+            .state
+            .with(|s| s.rx_leases[self.id.index()] -= 1)
     }
 }
 
@@ -649,58 +620,233 @@ mod tests {
         )
         .unwrap()
     }
-    #[test]
-    fn checked_out_sdk_record_blocks_stop_and_releases_once() {
-        static RELEASES: AtomicUsize = AtomicUsize::new(0);
-        unsafe fn release(_: *mut core::ffi::c_void, _: *mut core::ffi::c_void) {
-            RELEASES.fetch_add(1, Ordering::SeqCst);
+    fn record(releases: &Arc<AtomicUsize>, len: u16) -> RawRxRecord {
+        unsafe fn release(_: *mut core::ffi::c_void, counter: *mut core::ffi::c_void) {
+            // SAFETY: the record owns the Arc transferred by into_raw below.
+            let counter = unsafe { Arc::from_raw(counter.cast::<AtomicUsize>()) };
+            counter.fetch_add(1, Ordering::SeqCst);
         }
-        RELEASES.store(0, Ordering::SeqCst);
-        let r = resources();
-        r.publish_event(WifiEvent::StaConnected).unwrap();
-        let record = || unsafe {
+        assert!(usize::from(len) <= BYTES.len());
+        // SAFETY: immutable static bytes and an owned Arc keep both pointers
+        // alive. The record owns the only invocation of this release hook.
+        unsafe {
             RawRxRecord::from_raw(
                 BYTES.as_ptr().cast_mut().cast(),
-                128,
-                core::ptr::null_mut(),
+                len,
+                Arc::into_raw(releases.clone()).cast_mut().cast(),
                 Some(release),
             )
-        };
-        r.enqueue_rx(record()).unwrap();
-        assert_eq!(r.enqueue_rx(record()), Err(DriverError::PacketOverflow));
-        assert_eq!(RELEASES.load(Ordering::SeqCst), 1);
-        let packet = r.take_rx(InterfaceId::Station).unwrap();
-        assert_eq!(r.close_admission(), Err(DriverError::Busy));
-        assert_eq!(packet.as_slice(), BYTES);
-        drop(packet);
-        assert_eq!(RELEASES.load(Ordering::SeqCst), 2);
-        assert_eq!(r.close_admission(), Ok(()));
-        assert_eq!(r.enqueue_rx(record()), Err(DriverError::PacketOverflow));
-        assert_eq!(RELEASES.load(Ordering::SeqCst), 3);
+        }
     }
+
     #[test]
-    fn ap_lease_survives_stop_reset_and_is_not_reused() {
+    fn both_rx_interfaces_release_once_on_rejection_drain_and_token_drop() {
+        for id in [InterfaceId::Station, InterfaceId::AccessPoint] {
+            let releases = Arc::new(AtomicUsize::new(0));
+            let r = Resources::try_new(
+                &QueueConfig {
+                    station_rx: 1,
+                    access_point_rx: 1,
+                    frame_bytes: 82,
+                    ..QueueConfig::default()
+                },
+                test_allocator(),
+            )
+            .unwrap();
+            // Closed admission releases immediately.
+            assert_eq!(
+                r.enqueue_rx(id, record(&releases, 64)),
+                Err(DriverError::PacketOverflow)
+            );
+            assert_eq!(releases.load(Ordering::SeqCst), 1);
+            r.publish_event(match id {
+                InterfaceId::Station => WifiEvent::StaConnected,
+                InterfaceId::AccessPoint => WifiEvent::ApStarted,
+            })
+            .unwrap();
+            // Oversize and full queue also return their release responsibility.
+            assert_eq!(
+                r.enqueue_rx(id, record(&releases, 128)),
+                Err(DriverError::PacketOverflow)
+            );
+            r.enqueue_rx(id, record(&releases, 64)).unwrap();
+            assert_eq!(
+                r.enqueue_rx(id, record(&releases, 64)),
+                Err(DriverError::PacketOverflow)
+            );
+            assert_eq!(releases.load(Ordering::SeqCst), 3);
+            let packet = r.take_rx(id).unwrap();
+            assert_eq!(packet.as_slice(), &BYTES[..64]);
+            assert_eq!(r.close_admission(), Err(DriverError::Busy));
+            assert_eq!(releases.load(Ordering::SeqCst), 3);
+            drop(packet);
+            assert_eq!(releases.load(Ordering::SeqCst), 4);
+            r.enqueue_rx(id, record(&releases, 64)).unwrap();
+            r.close_admission().unwrap();
+            r.reset_runtime();
+            assert_eq!(releases.load(Ordering::SeqCst), 5);
+            assert!(!r.has_rx(id));
+        }
+    }
+
+    #[test]
+    fn disabled_rx_queues_release_both_interfaces() {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let r = Resources::try_new(
+            &QueueConfig {
+                station_rx: 0,
+                access_point_rx: 0,
+                ..QueueConfig::default()
+            },
+            test_allocator(),
+        )
+        .unwrap();
+        r.publish_event(WifiEvent::StaConnected).unwrap();
+        r.publish_event(WifiEvent::ApStarted).unwrap();
+        for id in [InterfaceId::Station, InterfaceId::AccessPoint] {
+            assert_eq!(
+                r.enqueue_rx(id, record(&releases, 64)),
+                Err(DriverError::PacketOverflow)
+            );
+            assert!(r.take_rx(id).is_none());
+        }
+        assert_eq!(releases.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn ap_rx_lease_blocks_radio_stop_but_not_station_disconnect() {
+        let releases = Arc::new(AtomicUsize::new(0));
         let r = resources();
+        r.publish_event(WifiEvent::StaConnected).unwrap();
         r.publish_event(WifiEvent::ApStarted).unwrap();
-        r.enqueue_ap_rx_copy(b"first").unwrap();
-        let packet = r.take_rx(InterfaceId::AccessPoint).unwrap();
-        let bytes = packet.as_slice();
+        r.enqueue_rx(InterfaceId::AccessPoint, record(&releases, 64))
+            .unwrap();
+        let ap = r.take_rx(InterfaceId::AccessPoint).unwrap();
+        assert_eq!(r.close_admission(), Err(DriverError::Busy));
+        // A separate station lease still blocks station disconnection.
+        r.enqueue_rx(InterfaceId::Station, record(&releases, 64))
+            .unwrap();
+        let sta = r.take_rx(InterfaceId::Station).unwrap();
+        assert_eq!(r.close_station(), Err(DriverError::Busy));
+        drop(sta);
+        r.close_station().unwrap();
+        assert_eq!(ap.as_slice(), &BYTES[..64]);
+        assert_eq!(r.close_admission(), Err(DriverError::Busy));
+        drop(ap);
         r.close_admission().unwrap();
-        r.reset_runtime();
-        assert_eq!(bytes, b"first");
-        r.state.with(|s| s.stopping = false);
-        r.publish_event(WifiEvent::ApStarted).unwrap();
+        assert_eq!(releases.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn ap_rx_storage_scales_with_record_count_not_frame_capacity() {
+        use super::super::allocator::TrackingAllocator;
+        let allocated = |access_point_rx, frame_bytes| {
+            let (provider, allocator) = TrackingAllocator::new(32);
+            let r = Resources::try_new(
+                &QueueConfig {
+                    access_point_rx,
+                    frame_bytes,
+                    ..QueueConfig::default()
+                },
+                allocator,
+            )
+            .unwrap();
+            let bytes = provider.live_bytes.load(Ordering::SeqCst);
+            drop(r);
+            assert_eq!(provider.live.load(Ordering::SeqCst), 0);
+            assert_eq!(provider.live_bytes.load(Ordering::SeqCst), 0);
+            bytes
+        };
+        let small = allocated(1, super::super::MIN_IPV4_ETHERNET_FRAME_SIZE);
+        let wide = allocated(1, super::super::MAX_ETHERNET_FRAME_SIZE);
+        assert_eq!(small, wide);
         assert_eq!(
-            r.enqueue_ap_rx_copy(b"second"),
-            Err(DriverError::PacketOverflow)
-        );
-        drop(packet);
-        r.enqueue_ap_rx_copy(b"second").unwrap();
-        assert_eq!(
-            r.take_rx(InterfaceId::AccessPoint).unwrap().as_slice(),
-            b"second"
+            allocated(4, super::super::MAX_ETHERNET_FRAME_SIZE) - wide,
+            3 * core::mem::size_of::<Option<RawRxRecord>>()
         );
     }
+    #[cfg(feature = "wifi-smoltcp")]
+    fn empty_queues(frame_bytes: usize) -> QueueConfig {
+        QueueConfig {
+            station_rx: 0,
+            access_point_rx: 0,
+            frame_bytes,
+            events: 0,
+            esp_now_peers: 0,
+            esp_now_rx: 0,
+            promiscuous_rx: 0,
+        }
+    }
+
+    #[cfg(feature = "wifi-smoltcp")]
+    #[test]
+    fn smoltcp_tx_uses_provided_frame_storage_without_allocating() {
+        use super::super::{allocator::TrackingAllocator, Interface};
+        use crate::wifi::device::WifiDevice;
+        use smoltcp::phy::{Device as _, TxToken as _};
+        for frame_bytes in [672, super::super::MAX_ETHERNET_FRAME_SIZE] {
+            let (provider, allocator) = TrackingAllocator::new(0);
+            let r = Resources::try_new(&empty_queues(frame_bytes), allocator).unwrap();
+            assert_eq!(provider.live.load(Ordering::SeqCst), 0);
+            r.publish_event(WifiEvent::StaConnected).unwrap();
+            let mut storage = [0; super::super::MAX_ETHERNET_FRAME_SIZE];
+            let interface = {
+                let interface = Interface {
+                    resources: &r,
+                    id: InterfaceId::Station,
+                    mac: [2, 0, 0, 0, 0, 1],
+                };
+                let mut device = WifiDevice::new(interface, &mut storage).unwrap();
+                assert_eq!(provider.live.load(Ordering::SeqCst), 0);
+                assert_eq!(provider.live_bytes.load(Ordering::SeqCst), 0);
+                assert_eq!(device.capabilities().max_transmission_unit, frame_bytes);
+                let token = device
+                    .transmit(smoltcp::time::Instant::from_millis(0))
+                    .unwrap();
+                token.consume(frame_bytes, |frame| {
+                    assert_eq!(frame.len(), frame_bytes);
+                    frame.fill(0xa5);
+                });
+                // No allocation budget is available. Native TX is unavailable
+                // on this host, but the caller's storage holds the full frame.
+                assert_eq!(provider.live.load(Ordering::SeqCst), 0);
+                assert_eq!(provider.live_bytes.load(Ordering::SeqCst), 0);
+                device.into_interface()
+            };
+            assert!(storage[..frame_bytes].iter().all(|&byte| byte == 0xa5));
+            assert!(storage[frame_bytes..].iter().all(|&byte| byte == 0));
+            // Consuming the adapter returns its interface and ends the separate
+            // TX storage borrow, so both resources can be used independently.
+            storage.fill(0);
+            assert_eq!(interface.max_frame_size(), frame_bytes);
+            assert_eq!(provider.live.load(Ordering::SeqCst), 0);
+            assert_eq!(provider.live_bytes.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[cfg(feature = "wifi-smoltcp")]
+    #[test]
+    fn smoltcp_tx_rejects_undersized_provided_storage_without_allocating() {
+        use super::super::{allocator::TrackingAllocator, Interface};
+        use crate::wifi::device::WifiDevice;
+        for frame_bytes in [672, super::super::MAX_ETHERNET_FRAME_SIZE] {
+            let (provider, allocator) = TrackingAllocator::new(0);
+            let r = Resources::try_new(&empty_queues(frame_bytes), allocator).unwrap();
+            let mut storage = [0; super::super::MAX_ETHERNET_FRAME_SIZE];
+            let interface = Interface {
+                resources: &r,
+                id: InterfaceId::Station,
+                mac: [2, 0, 0, 0, 0, 1],
+            };
+            assert!(matches!(
+                WifiDevice::new(interface, &mut storage[..frame_bytes - 1]),
+                Err(DriverError::InvalidFrameSize)
+            ));
+            assert_eq!(provider.live.load(Ordering::SeqCst), 0);
+            assert_eq!(provider.live_bytes.load(Ordering::SeqCst), 0);
+        }
+    }
+
     #[test]
     fn stop_generation_rejects_old_tx_and_late_events_cannot_reopen_admission() {
         let r = resources();

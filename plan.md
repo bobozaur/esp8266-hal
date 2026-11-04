@@ -1,14 +1,18 @@
 # ESP8266 HAL refactor plan
 
-Status: implementation, adversarial review and final validation are complete for
-the qualified configurations below. The OpenWrt follow-up is complete and the
-router is restored. Remaining qualification limits are explicit; publication is separate.
+Status: the baseline refactor is committed as `f31504b`. The packet optimization
+implementation, source reviews and board cleanup are complete.
+Current follow-up evidence is recorded below; the original campaign results remain
+a baseline record. SmartConfig now passes on both boards, including fresh DHCP
+after provisioning stops. Intermittent provisioning failures remain. The temporary
+sender is removed and both boards are restored. Publication is separate.
 Updated: 2026-11-04.
 
 The decisions below were agreed during discussion. The user subsequently
 authorized autonomous planning, adversarial review to saturation, implementation
 and hardware validation. Implementation choices and progress are now tracked here
-without requiring further approval. Commits and publication are outside this task.
+without requiring further approval. The baseline commit was explicitly requested;
+new commits and publication require separate authorization.
 
 ## Agreed scope
 
@@ -218,7 +222,8 @@ the implemented public interfaces.
   of silently losing terminal results.
 - Stop/reconfiguration closes packet admission, accounts for checked-out SDK RX
   leases, drains queued packets, and only then stops the SDK. Reject conflicting
-  operations while leases are live. Never reuse an AP slot with a live lease.
+  operations while leases are live. Both interfaces retain native packet leases
+  until consumption; station-only disconnect accounts only for station leases.
 - Include TX tokens and retained adapter frames in the stop/restart contract.
   Capture a small lifecycle generation and reject stale submissions after restart;
   drain pending TX state on stop. Do not rely on future/token destructors for
@@ -284,6 +289,54 @@ the implemented public interfaces.
 - Preserve generated PAC code except necessary integration changes. Avoid bulk
   rewrites or dependency upgrades without a concrete correctness/simplicity benefit.
 
+## Packet optimization follow-up
+
+The user authorized these optimizations after inspecting the architecture.
+
+| Work | Owner | Decision / status |
+| --- | --- | --- |
+| AP RX ownership | RX worker | Implemented: remove the AP copy/pool and use the SDK's existing delayed-release packet contract for both interfaces. Per-interface checked-out lease counts preserve station-only disconnect while AP packets are held. Stop/drop still require all native leases to finish. |
+| smoltcp TX storage | Main | Accept caller-owned transmit storage sized for the interface frame capacity, without allocation or capacity type parameters. Independent interface/storage lifetimes let `into_interface()` release the TX buffer for reuse. A heap-owned slot would move SmartConfig's buffer off its permanently reserved stack and reduce available heap. Raw-frame AP examples now use `Interface` directly and eliminate unused staging entirely. |
+| TX backpressure | TX worker | Correct the pinned native byte-return ABI: descriptor exhaustion returns positive 255, which must retain/retry a staged frame as `WouldBlock`. Keep the 1 ms fallback; completion callbacks do not cover all shared native resource availability and run before descriptor recycling finishes. |
+| Integrated review / measurement / validation | Main + independent reviewers | Independent reviews converged after correcting the TX storage lifetime coupling. Final 27 host and 22 target checks pass. AP-only/mixed DHCP and 20 TCP echoes pass; the two-board pressure test retained 20 intact packets, including peer leave/rejoin, completed three radio stop/drain sessions and recovered from 215 `WouldBlock` results with no OOM. Direct smoltcp DHCP and five byte-exact UDP packets, Pi TCP, plain/encrypted ESP-NOW, 32 management captures and 100 recreate/scan cycles on each board also pass. Router configuration/interface state is restored, temporary LAN-host listeners exited, both reserved 16 KiB flash regions match their backups, and the final AP/client DHCP pair passes. AP-only/AP+station gain 1,720/1,640 bytes of linked heap region and remove 1,024/1,344 bytes of preallocated AP frame payload, respectively. |
+
+The pinned SDK uses the same retained custom-pbuf RX contract for AP and station.
+Removing the AP copy saves its preallocated frame pool and one full-frame copy,
+but native buffers remain occupied longer. Measure traffic pressure and recovery;
+do not infer an unconditional free-heap or throughput gain. A held AP RX token now
+returns `Busy` from whole-radio stop, like a held station token. The normal Embassy
+channel copy remains because it establishes independent stack-owned storage.
+
+The SmartConfig retry refreshed the LAN/AP identity and selected the sender's
+reachable LAN address explicitly. Full provisioning, association, DHCP and
+sender-validated ESPTouch acknowledgement pass on both boards with the optimized
+image. The post-stop fixture also passes fresh DHCP after stopping provisioning
+and waiting 12 seconds. No firmware changes were needed for these passes.
+
+Across five optimized-image attempts, three passed and two stopped before
+credentials were decoded. The committed-baseline comparison decoded credentials
+but failed association. Ordinary LAN association and DHCP also passed separately.
+These runs establish working end-to-end paths; they do not establish first-attempt
+reliability or identify the cause of the intermittent failures. The earlier
+wrong-subnet ACK destination was a corrected fixture error, separate from these
+remaining failures. Concurrent router work is a possible explanation, not a
+demonstrated cause.
+
+The retry changed no router network or service settings. Persistent configuration
+matched the initial snapshot during the attempts. After a temporary loss of SSH
+reachability, the final snapshot showed a separate network-configuration change;
+that change was preserved. The LAN address set and staged UCI state match the
+initial snapshot. All sender processes exited and the temporary executable was
+removed. Both boards are restored to the working AP/client images, with a fresh
+paired DHCP check passing.
+
+Of the measured affected images, only the SmartConfig example's loadable image
+changed after the final lifetime correction. Loaded AP, mixed, TCP and pressure
+images match their already-tested versions byte-for-byte. The full host/target
+checks passed again after that correction. The promiscuous capture's generic
+helper expected the wrong success marker; its saved UART contains all 32 management
+frames and the configured filter's correct terminal marker.
+
 ## Campaign checklist and ownership
 
 | Campaign | Owner | State / completion evidence |
@@ -348,7 +401,8 @@ the implemented public interfaces.
   Association on the first attempt is not guaranteed. These limits do not replace
   the host tests, source reviews or hardware evidence above.
 - Before publishing HAL 0.6, publish the dependency versions listed in the
-  [migration guide](docs/migration-0.6.md). No commits or publication were performed.
+  [migration guide](docs/migration-0.6.md). The baseline was committed as `f31504b`;
+  no publication was performed.
   Raw failure and final-run evidence remains in the ignored private workspace;
   no diagnostic production code or private probe examples are packaged.
 

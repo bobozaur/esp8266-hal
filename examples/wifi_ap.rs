@@ -9,7 +9,6 @@ use core::task::Poll;
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_time::{Duration, Instant, Timer};
-use esp8266_hal::wifi::smoltcp::WifiDevice;
 mod support;
 use esp8266_hal::timer::TimerExt;
 use support::dhcp::{DhcpMessageType, DhcpReply, DhcpServer, DhcpServerConfig};
@@ -38,14 +37,10 @@ const DHCP_REPLY_FRAME_BYTES: usize =
     ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN + DHCP_PACKET_BYTES;
 const DHCP_REPLY_HEADERS: usize = ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN;
 
-type ApNetDevice = WifiDevice<'static>;
-
-struct ApNetRuntime {
-    device: ApNetDevice,
-}
+type ApNetDevice = WifiInterface<'static>;
 
 static WIFI: StaticCell<Wifi> = StaticCell::new();
-static AP_RUNTIME: StaticCell<ApNetRuntime> = StaticCell::new();
+static AP_DEVICE: StaticCell<ApNetDevice> = StaticCell::new();
 static AP_RX_FRAME: StaticCell<[u8; AP_RX_FRAME_BYTES]> = StaticCell::new();
 static DHCP_REPLY_FRAME: StaticCell<[u8; DHCP_REPLY_FRAME_BYTES]> = StaticCell::new();
 
@@ -124,7 +119,7 @@ fn ap_dhcp_poll_ms() -> u64 {
         .unwrap_or(1000)
 }
 
-async fn run_dhcp_server(runtime: &'static mut ApNetRuntime) -> ! {
+async fn run_dhcp_server(device: &'static mut ApNetDevice) -> ! {
     log_stage(b"dhcp-task-enter");
     if ap_dhcp_bind_only_enabled() {
         log_line(b"ap-dhcp-bind-ready");
@@ -141,7 +136,7 @@ async fn run_dhcp_server(runtime: &'static mut ApNetRuntime) -> ! {
     let mut server = DhcpServer::<4>::new(config);
     let reply_frame = DHCP_REPLY_FRAME.init([0; DHCP_REPLY_FRAME_BYTES]);
     let rx_frame = AP_RX_FRAME.init([0; AP_RX_FRAME_BYTES]);
-    let ap_mac = EthernetAddress(runtime.device.mac_address());
+    let ap_mac = EthernetAddress(device.mac_address());
     let mut last_wait_log = Instant::now();
 
     log_line(b"ap-dhcp-ready");
@@ -156,7 +151,7 @@ async fn run_dhcp_server(runtime: &'static mut ApNetRuntime) -> ! {
         let mut reply = None;
 
         loop {
-            let frame_len = match runtime.device.receive_frame(rx_frame) {
+            let frame_len = match device.receive(rx_frame) {
                 Ok(Some(frame_len)) => frame_len,
                 Ok(None) => break,
                 Err(_) => {
@@ -192,11 +187,11 @@ async fn run_dhcp_server(runtime: &'static mut ApNetRuntime) -> ! {
                 log_line(b"ap-dhcp-wait");
                 last_wait_log = Instant::now();
             }
-            wait_for_ap_rx(&runtime.device, Duration::from_millis(ap_dhcp_poll_ms())).await;
+            wait_for_ap_rx(device, Duration::from_millis(ap_dhcp_poll_ms())).await;
             continue;
         };
 
-        if transmit_dhcp_reply(&mut runtime.device, reply_frame, ap_mac, reply).is_err() {
+        if transmit_dhcp_reply(device, reply_frame, ap_mac, reply).is_err() {
             log_line(b"ap-dhcp send err");
             continue;
         }
@@ -219,7 +214,8 @@ async fn wait_for_ap_rx(device: &ApNetDevice, fallback: Duration) {
     }
 
     let rx_ready = poll_fn(|cx| {
-        device.register_waker(cx.waker());
+        device.register_rx_waker(cx.waker());
+        device.register_link_waker(cx.waker());
         if device.has_rx_data() {
             Poll::Ready(())
         } else {
@@ -299,17 +295,7 @@ fn transmit_dhcp_reply(
         &checksum_caps,
     );
 
-    device.transmit_frame(&frame[..frame_len])
-}
-
-fn start_ap_network(
-    link: WifiInterface<'static>,
-) -> Result<&'static mut ApNetRuntime, &'static [u8]> {
-    log_stage(b"net-link");
-    let device = WifiDevice::new(link).map_err(|_| b"ap-net frame size err" as &'static [u8])?;
-
-    log_stage(b"net-ready");
-    Ok(AP_RUNTIME.init(ApNetRuntime { device }))
+    device.transmit(&frame[..frame_len])
 }
 
 #[esp8266_hal::main]
@@ -395,25 +381,17 @@ async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtim
             log_line(b"ap-delay-before-net-done");
         }
         log_line(b"ap network starting");
-        let runtime = match start_ap_network(interfaces.access_point) {
-            Ok(runtime) => runtime,
-            Err(marker) => {
-                log_line(marker);
-                loop {
-                    Timer::after(Duration::from_secs(60)).await;
-                }
-            }
-        };
+        let device = AP_DEVICE.init(interfaces.access_point);
         log_line(b"ap-net-up");
         log_line(b"ap-start-ok");
         if ap_network_attach_only_enabled() {
-            let _runtime = runtime;
+            let _device = device;
             log_line(b"ap-net-attach-ready");
             loop {
                 Timer::after(Duration::from_secs(1)).await;
             }
         }
-        run_dhcp_server(runtime).await;
+        run_dhcp_server(device).await;
     }
 
     if wait_for_client_enabled() {

@@ -687,6 +687,50 @@ mod ownership_tests {
         assert_eq!(unsafe { &*ptr }.frame_bytes, 1514);
     }
     #[test]
+    fn forgotten_ap_rx_lease_quarantines_owner_without_native_teardown() {
+        use super::super::packet::RawRxRecord;
+        static BYTES: [u8; 64] = [0xa5; 64];
+        let (provider, allocator) = TrackingAllocator::new(32);
+        let mut config = InitConfig::default();
+        config.queues.access_point_rx = 1;
+        let resources = Wifi::allocate_resources(&config, allocator).unwrap();
+        resources
+            .publish_event(super::super::WifiEvent::ApStarted)
+            .unwrap();
+        // SAFETY: immutable static bytes remain valid even when the lease is
+        // deliberately forgotten. This test record has no native release hook.
+        let record = unsafe {
+            RawRxRecord::from_raw(
+                BYTES.as_ptr().cast_mut().cast(),
+                64,
+                core::ptr::null_mut(),
+                None,
+            )
+        };
+        resources
+            .enqueue_rx(super::super::resources::InterfaceId::AccessPoint, record)
+            .unwrap();
+        let packet = resources
+            .take_rx(super::super::resources::InterfaceId::AccessPoint)
+            .unwrap();
+        core::mem::forget(packet);
+        let ptr = &*resources as *const Resources;
+        let mut sdk = Sdk::new(&resources);
+        sdk.started = true;
+        let wifi = Wifi {
+            sdk,
+            resources: Some(resources),
+            station_mac: [0; 6],
+            ap_mac: [0; 6],
+        };
+        let before = provider.live.load(Ordering::SeqCst);
+        drop(wifi);
+        assert_eq!(provider.live.load(Ordering::SeqCst), before);
+        // A native shutdown would reset ap_started. Busy lease admission must
+        // retain both the callback memory and the running SDK instead.
+        assert!(unsafe { &*ptr }.state.with(|s| s.ap_started));
+    }
+    #[test]
     fn failed_teardown_retains_callback_storage() {
         let (provider, allocator) = TrackingAllocator::new(32);
         let resources = Wifi::allocate_resources(&InitConfig::default(), allocator).unwrap();

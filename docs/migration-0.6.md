@@ -88,6 +88,12 @@ Rust queue capacities remain fixed for that Wi-Fi instance. SDK allocations stil
 use the shared provider during operation; queue preallocation does not make the
 whole native radio allocation-free.
 
+Both interfaces queue native receive-buffer leases. AP reception no longer
+copies each frame into a separate Rust pool. Release smoltcp receive tokens
+promptly: a held token on either interface makes whole-radio `stop()` return
+`Busy`. An AP token does not prevent station-only disconnection. Queue capacities
+bound queued records; checked-out tokens also consume native receive buffers.
+
 TLS and EAP use that same application allocator directly. The separate RSA
 reservation pool and its native hooks are removed. The nine audited native
 initialization reservations remain to handle SDK startup paths that do not check
@@ -140,10 +146,28 @@ overflow is distinguishable from an empty queue.
 The opt-in boundary remains because global allocator registration and dormant
 SDK storage affect even unused Wi-Fi builds. Remove
 `wifi-core` from feature lists. Enable `wifi-smoltcp` for
-`wifi::smoltcp::WifiDevice::new(interface)`, or `wifi-embassy-net` for
+`wifi::smoltcp::WifiDevice::new(interface, tx_buffer)`, or `wifi-embassy-net` for
 `wifi::embassy_net::new(state, interface)`. Both adapters accept either station or
 AP interfaces; the mixed-mode wrapper and separate AP constructors are removed.
 The smaller-MTU Embassy constructor remains `new_with_mtu`.
+
+The smoltcp adapter borrows one caller-supplied `&mut [u8]` for pending TX.
+It must contain at least `interface.max_frame_size()` bytes; a shorter buffer
+returns `DriverError::InvalidFrameSize`. Extra capacity is unused. Choose stack,
+static or heap placement in the application; the adapter allocates nothing.
+`WifiDevice<'d, 'tx>` borrows the interface and TX storage independently;
+`into_interface()` returns the interface and releases the storage borrow.
+For example, with the default frame size:
+
+```rust,ignore
+let mut tx_buffer = [0; esp8266_hal::wifi::MAX_ETHERNET_FRAME_SIZE];
+let mut device = esp8266_hal::wifi::smoltcp::WifiDevice::new(
+    interfaces.station, &mut tx_buffer,
+).expect("TX buffer fits the interface");
+```
+
+Applications sending and receiving raw frames can use `Interface` directly,
+without reserving a smoltcp TX slot.
 
 The library leaves IP addressing, DHCP and sockets to the chosen network stack.
 Custom DHCP and static-IP helpers moved to

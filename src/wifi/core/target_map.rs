@@ -6,7 +6,7 @@ use super::SmartConfigType;
 use super::{feature::EspNowInterface, EspNowPeerConfig};
 #[cfg(target_arch = "xtensa")]
 use super::{AccessPointConfig, ApCredential, RawMode, ScanOptions, ScanType};
-use super::{Channel, ClientConfig, InitConfig, StationPowerSave};
+use super::{Channel, ClientConfig, DriverError, InitConfig, StationPowerSave};
 #[cfg(all(feature = "wifi-promiscuous", target_arch = "xtensa"))]
 use super::{PromiscuousControlFilter, PromiscuousPacketType};
 #[cfg(all(feature = "wifi-wps", target_arch = "xtensa"))]
@@ -15,6 +15,19 @@ use super::{WpsConfig, WpsMode};
 #[cfg(target_arch = "xtensa")]
 extern "C" {
     fn esp_event_send(event: *mut esp8266_wifi_sys::system_event_t) -> esp8266_wifi_sys::esp_err_t;
+}
+
+pub(super) fn map_internal_tx_result(result: i32) -> Result<(), DriverError> {
+    match result {
+        0 => Ok(()),
+        // SDK da7ce37be424d71874241ca9f17cf8da0e3cdb70, libnet80211.a:
+        // ieee80211_output_pbuf returns descriptor exhaustion as byte-valued
+        // ERR_MEM: movi a12,-1; extui a2,a12,0,8. The Rust static-buffer
+        // fallback instead returns signed -1. Both require retaining the frame.
+        -1 | 255 => Err(DriverError::WouldBlock),
+        esp8266_wifi_sys::ESP_ERR_NO_MEM => Err(DriverError::OutOfMemory),
+        code => Err(DriverError::Sdk(code)),
+    }
 }
 
 #[inline(always)]
@@ -362,6 +375,36 @@ pub(super) fn raw_esp_now_peer(peer: &EspNowPeerConfig) -> esp8266_wifi_sys::esp
 mod tests {
     use super::super::StationCredential;
     use super::*;
+
+    #[test]
+    fn internal_tx_preserves_native_byte_abi_backpressure() {
+        assert_eq!(map_internal_tx_result(0), Ok(()));
+        for result in [-1, 255] {
+            assert_eq!(map_internal_tx_result(result), Err(DriverError::WouldBlock));
+        }
+        assert_eq!(
+            map_internal_tx_result(esp8266_wifi_sys::ESP_ERR_NO_MEM),
+            Err(DriverError::OutOfMemory)
+        );
+    }
+
+    #[test]
+    fn internal_tx_preserves_other_native_and_esp_errors() {
+        // ESP_ERR_WIFI_WOULD_BLOCK is not a proven Ethernet TX result. Preserve
+        // it unchanged rather than extending the separate esp_err_t mapping.
+        for result in [
+            -16,
+            240,
+            241,
+            511,
+            esp8266_wifi_sys::ESP_ERR_WIFI_WOULD_BLOCK,
+        ] {
+            assert_eq!(
+                map_internal_tx_result(result),
+                Err(DriverError::Sdk(result))
+            );
+        }
+    }
 
     #[cfg(feature = "wifi-promiscuous")]
     #[test]

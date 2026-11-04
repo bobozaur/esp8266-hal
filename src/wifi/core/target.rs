@@ -9,7 +9,10 @@ use portable_atomic::{AtomicBool, Ordering};
 #[cfg(feature = "wifi-promiscuous")]
 use super::feature::PROMISCUOUS_MAX_PAYLOAD_PREFIX;
 use super::target_map::*;
-use super::{resources::Resources, target_callback::CallbackRegistration};
+use super::{
+    resources::{InterfaceId, Resources},
+    target_callback::CallbackRegistration,
+};
 use super::{
     AccessPointConfig, AccessPointRecord, ApStationInfo, AuthenticationMethod, Channel,
     ClientConfig, DriverError, InitConfig, InitError, RawMode, RawRxRecord, ScanOptions,
@@ -1470,25 +1473,19 @@ unsafe extern "C" fn rx_callback_sta(
     len: u16,
     eb: *mut core::ffi::c_void,
 ) -> esp8266_wifi_sys::esp_err_t {
-    let invocation = super::target_callback::CallbackInvocation::enter();
-    if len != 0 && buffer.is_null() {
-        unsafe { release_rx_ownership(buffer, eb) };
-        return esp8266_wifi_sys::ESP_ERR_INVALID_ARG;
-    }
-
-    let resources = match invocation.resources() {
-        Some(resources) => resources,
-        None => {
-            unsafe { release_rx_ownership(buffer, eb) };
-            return esp8266_wifi_sys::ESP_OK;
-        }
-    };
-    let record = unsafe { RawRxRecord::from_raw(buffer, len, eb, Some(release_rx_ownership)) };
-    let _ = resources.enqueue_rx(record);
-    esp8266_wifi_sys::ESP_OK
+    unsafe { rx_callback(InterfaceId::Station, buffer, len, eb) }
 }
 
 unsafe extern "C" fn rx_callback_ap(
+    buffer: *mut core::ffi::c_void,
+    len: u16,
+    eb: *mut core::ffi::c_void,
+) -> esp8266_wifi_sys::esp_err_t {
+    unsafe { rx_callback(InterfaceId::AccessPoint, buffer, len, eb) }
+}
+
+unsafe fn rx_callback(
+    interface: InterfaceId,
     buffer: *mut core::ffi::c_void,
     len: u16,
     eb: *mut core::ffi::c_void,
@@ -1506,14 +1503,10 @@ unsafe extern "C" fn rx_callback_ap(
             return esp8266_wifi_sys::ESP_OK;
         }
     };
-    let frame = if len == 0 {
-        &[]
-    } else {
-        unsafe { core::slice::from_raw_parts(buffer.cast::<u8>(), len as usize) }
-    };
-    let enqueue = resources.enqueue_ap_rx_copy(frame);
-    unsafe { release_rx_ownership(buffer, eb) };
-    let _ = enqueue;
+    // The pinned SDK uses the same deferred-release buffer contract for AP
+    // and station callbacks. The record releases it after consumption or drop.
+    let record = unsafe { RawRxRecord::from_raw(buffer, len, eb, Some(release_rx_ownership)) };
+    let _ = resources.enqueue_rx(interface, record);
     esp8266_wifi_sys::ESP_OK
 }
 
@@ -1627,15 +1620,6 @@ unsafe extern "C" fn esp_now_send_callback(
         _ => EspNowSendStatus::Failed,
     };
     let _ = resources.complete_esp_now_tx(status);
-}
-
-fn map_internal_tx_result(result: i32) -> Result<(), DriverError> {
-    match result {
-        0 => Ok(()),
-        -1 => Err(DriverError::WouldBlock),
-        esp8266_wifi_sys::ESP_ERR_NO_MEM => Err(DriverError::OutOfMemory),
-        code => Err(DriverError::Sdk(code)),
-    }
 }
 
 fn map_esp_init_error(error: crate::wifi::EspError) -> InitError {

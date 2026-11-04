@@ -36,6 +36,29 @@ were removed where the selected SDK implementation already supplies the behavior
 `uart_tx_wait_idle` uses the pinned SDK C implementation; no fixed-spin Rust
 replacement remains.
 
+## Packet ownership and transmit admission
+
+Both station and AP callbacks transfer a native receive-buffer lease. The pinned
+SDK's `tcpip_adapter_lwip.c` uses the same deferred-release custom-pbuf contract
+for both interfaces: release the SDK buffer through
+`esp_wifi_internal_free_rx_buffer`, or free the heap buffer when no SDK handle
+exists. Rust queues that ownership directly and releases it once after consumption
+or rejection. AP reception needs no additional frame pool or callback copy.
+Queued packets drain before native teardown, and checked-out packets make radio
+stop return `Busy`. Holding packets longer consumes native RX capacity, so
+applications should release them promptly.
+
+The native `ieee80211_output_pbuf` returns descriptor exhaustion as byte-valued
+`ERR_MEM` (positive 255), while the Rust static-TX-buffer fallback returns signed
+`-1`. Both map to `WouldBlock`, preserving an adapter's pending frame for retry.
+Other native errors retain their original meaning.
+
+Embassy retries pending TX after 1 ms. Native completion callbacks run before
+descriptor recycling, and shared management/AP traffic can consume capacity
+without an application completion event. A completion-only wakeup would therefore
+be insufficient. The existing timer avoids introducing extra notification state
+while still guaranteeing another attempt.
+
 ## NMI entry and return
 
 The earlier NMI handler omitted the SDK's final-`RFI` guard. If `EPC3` points to
@@ -166,7 +189,7 @@ the heap or runtime.
 `Runtime::init` still receives an explicit permanent `WifiAllocator`; applications
 may share it with their global allocator, as the examples do.
 
-The original and final scan images have these linked sections:
+The original and committed refactor (`f31504b`) scan images have these linked sections:
 
 | Linked section | Original | Refactored |
 | --- | ---: | ---: |
@@ -182,7 +205,7 @@ The refactor does not establish a general reduction in code size or runtime cost
 The original linker heap extent exceeded the corrected DRAM map, so it is not a
 valid available-memory comparison.
 
-Current release images built with the pinned Xtensa toolchain and thin LTO:
+Committed refactor release images (`f31504b`), built with the pinned Xtensa toolchain and thin LTO:
 
 | Image | IROM | IRAM + vectors | Static DRAM | Heap region before runtime initialization |
 | --- | ---: | ---: | ---: | ---: |
@@ -202,6 +225,37 @@ while networking is active. Enterprise rows include the compact DER certificate
 fixtures used for authentication; different credentials change these figures. The all-feature TCP example fails initialization
 cleanly with `OutOfMemory`; it is an exhaustion check, not an operational memory
 configuration.
+
+The packet optimization follow-up changes representative images as follows,
+with the same feature selections and toolchain:
+
+| Image | IROM change | Static DRAM change | Heap-region change |
+| --- | ---: | ---: | ---: |
+| AP-only | −3,240 | −1,720 | +1,720 |
+| AP + station | −1,928 | −1,640 | +1,640 |
+| SmartConfig | −2,296 | −16 | +16 |
+| TCP server | −2,120 | −24 | +32 |
+
+All values are bytes; linker alignment explains the TCP heap-region rounding.
+The AP examples now use the raw interface directly, removing unused smoltcp
+staging. Removing the AP receive pool additionally removes preallocated frame
+payload of 1,024 bytes (2 × 512) and 1,344 bytes (2 × 672), plus pool bookkeeping.
+Those allocation savings are separate from the linked section changes. Native
+frames remain live until consumed, so active free heap and peak packet capacity
+depend on application consumption; these measurements do not establish a
+throughput improvement. SmartConfig keeps its caller-owned TX buffer on the
+existing application stack and introduces no heap allocation.
+
+The follow-up passes AP/mixed DHCP, retained-packet pressure and peer reconnect,
+20 TCP echo connections, separate-host TCP and direct smoltcp DHCP plus five exact
+UDP payloads, plain/encrypted ESP-NOW, 32 management-frame captures and 100
+create/scan/stop/drop cycles per board. A SmartConfig retry passes provisioning,
+DHCP and sender-validated ESPTouch acknowledgement on both boards. Fresh DHCP also
+passes after stopping provisioning and waiting 12 seconds. Three of five
+optimized-image attempts passed; two failed before credentials were decoded.
+The committed-baseline comparison failed association after decoding credentials.
+These results confirm working provisioning and post-stop networking paths;
+first-attempt reliability and the cause of intermittent failures remain unresolved.
 
 Final two-board stress completed 100 create/start/scan/stop/drop cycles on
 each board and rejected changed native buffer counts. Integrated checks cover

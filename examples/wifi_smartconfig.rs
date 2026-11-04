@@ -26,7 +26,7 @@ const ACK_TIMEOUT_MS: u64 = 5_000;
 const STATIC_ACK_IP: CoreIpv4Addr = CoreIpv4Addr::new(192, 168, 4, 2);
 const STATIC_ACK_ENABLED: bool = option_env!("ESP8266_HAL_SMARTCONFIG_STATIC_ACK").is_some();
 
-type SmartConfigDevice = esp8266_hal::wifi::smoltcp::WifiDevice<'static>;
+type SmartConfigDevice<'tx> = esp8266_hal::wifi::smoltcp::WifiDevice<'static, 'tx>;
 
 static WIFI: StaticCell<Wifi> = StaticCell::new();
 static SOCKET_STORAGE: StaticCell<[SocketStorage<'static>; 3]> = StaticCell::new();
@@ -139,7 +139,9 @@ fn run_network_ack(
     log_line(b"smartconfig net start");
     let sta_mac = link.mac_address();
 
-    let mut device = SmartConfigDevice::new(link).expect("valid station frame capacity");
+    let mut tx_buffer = [0; esp8266_hal::wifi::MAX_ETHERNET_FRAME_SIZE];
+    let mut device =
+        SmartConfigDevice::new(link, &mut tx_buffer).expect("valid station frame capacity");
     let config = SmolConfig::new(HardwareAddress::Ethernet(EthernetAddress(sta_mac)));
     let mut iface = Interface::new(config, &mut device, now());
     log_line(b"smartconfig net iface");
@@ -181,7 +183,7 @@ fn run_network_ack(
 
 fn wait_for_dhcp(
     iface: &mut Interface,
-    device: &mut SmartConfigDevice,
+    device: &mut SmartConfigDevice<'_>,
     sockets: &mut SocketSet<'static>,
     dhcp_handle: SocketHandle,
 ) -> Option<[u8; 4]> {
@@ -232,7 +234,7 @@ fn wait_for_dhcp(
 
 fn send_esptouch_ack(
     iface: &mut Interface,
-    device: &mut SmartConfigDevice,
+    device: &mut SmartConfigDevice<'_>,
     sockets: &mut SocketSet<'static>,
     credentials: &SmartConfigCredentials,
     sta_mac: [u8; 6],

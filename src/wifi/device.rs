@@ -1,14 +1,12 @@
 //! Caller-polled smoltcp integration for either Wi-Fi interface.
 //!
-//! One fixed TX slot preserves a frame when SDK admission returns WouldBlock.
+//! One caller-supplied TX slot preserves a frame when SDK admission returns
+//! WouldBlock. The adapter performs no allocation.
 //! Subsequent device polls retry it before issuing another transmit token; the
 //! application must keep polling smoltcp while traffic is pending.
 
 use super::neighbor::{EthernetNeighborHint, EthernetNeighborHints, ETHERNET_ARP_IPV4_FRAME_LEN};
-use crate::wifi_core::{
-    DriverError, Interface, LinkState, RxPacket, MAX_ETHERNET_FRAME_SIZE,
-    MIN_IPV4_ETHERNET_FRAME_SIZE,
-};
+use crate::wifi_core::{DriverError, Interface, LinkState, RxPacket};
 use core::task::Waker;
 use smoltcp::{
     phy::{self, DeviceCapabilities, Medium},
@@ -16,34 +14,34 @@ use smoltcp::{
 };
 
 /// A concrete station or access-point smoltcp device.
-pub struct WifiDevice<'d> {
+pub struct WifiDevice<'d, 'tx> {
     interface: Interface<'d>,
-    pending_tx: PendingTx,
+    pending_tx: PendingTx<'tx>,
     generation: u32,
     neighbor_hints: EthernetNeighborHints,
 }
 
-struct PendingTx {
-    bytes: [u8; MAX_ETHERNET_FRAME_SIZE],
+struct PendingTx<'d> {
+    bytes: &'d mut [u8],
     len: usize,
 }
 
-impl<'d> WifiDevice<'d> {
-    pub fn new(interface: Interface<'d>) -> Result<Self, DriverError> {
-        if !(MIN_IPV4_ETHERNET_FRAME_SIZE..=MAX_ETHERNET_FRAME_SIZE)
-            .contains(&interface.max_frame_size())
-        {
-            return Err(DriverError::InvalidFrameSize);
-        }
+impl<'d, 'tx> WifiDevice<'d, 'tx> {
+    /// Use caller-owned storage for the single pending transmit frame.
+    ///
+    /// The buffer must fit [`Interface::max_frame_size`], otherwise this returns
+    /// [`DriverError::InvalidFrameSize`]. Extra capacity is unused. Keeping the
+    /// buffer borrowed prevents reuse while a frame is waiting for SDK admission.
+    pub fn new(interface: Interface<'d>, tx_buffer: &'tx mut [u8]) -> Result<Self, DriverError> {
+        let bytes = tx_buffer
+            .get_mut(..interface.max_frame_size())
+            .ok_or(DriverError::InvalidFrameSize)?;
         let mac = interface.mac_address();
         let generation = interface.tx_generation();
         Ok(Self {
             interface,
             generation,
-            pending_tx: PendingTx {
-                bytes: [0; MAX_ETHERNET_FRAME_SIZE],
-                len: 0,
-            },
+            pending_tx: PendingTx { bytes, len: 0 },
             neighbor_hints: EthernetNeighborHints::new(Some(mac)),
         })
     }
@@ -109,13 +107,13 @@ impl<'d> WifiDevice<'d> {
     }
 }
 
-impl<'d> phy::Device for WifiDevice<'d> {
+impl<'d, 'tx> phy::Device for WifiDevice<'d, 'tx> {
     type RxToken<'a>
         = WifiRxToken<'d>
     where
         Self: 'a;
     type TxToken<'a>
-        = WifiTxToken<'a, 'd>
+        = WifiTxToken<'a, 'd, 'tx>
     where
         Self: 'a;
 
@@ -187,13 +185,13 @@ impl phy::RxToken for WifiRxToken<'_> {
     }
 }
 
-pub struct WifiTxToken<'a, 'd> {
+pub struct WifiTxToken<'a, 'd, 'tx> {
     interface: &'a mut Interface<'d>,
-    pending: &'a mut PendingTx,
+    pending: &'a mut PendingTx<'tx>,
     generation: u32,
 }
 
-impl phy::TxToken for WifiTxToken<'_, '_> {
+impl phy::TxToken for WifiTxToken<'_, '_, '_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,

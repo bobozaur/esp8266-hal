@@ -12,7 +12,6 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 
 use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverStateWithMtu};
-use esp8266_hal::wifi::smoltcp::WifiDevice;
 mod support;
 use esp8266_hal::timer::TimerExt;
 use support::dhcp::{DhcpMessageType, DhcpReply, DhcpServer, DhcpServerConfig};
@@ -46,7 +45,7 @@ const AP_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 4, 1);
 const AP_LEASE_START: Ipv4Addr = Ipv4Addr::new(192, 168, 4, 2);
 const AP_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 // smoltcp DHCP needs at least 658 Ethernet bytes to advertise option 57 >= 576.
-// Keep this DHCP-only demo at 672 to bound channel and copied AP storage.
+// Keep this DHCP-only demo at 672 to bound channel and application frame storage.
 const NET_MTU: usize = 672;
 const DHCP_PACKET_BYTES: usize = 576;
 const DHCP_REPLY_FRAME_BYTES: usize =
@@ -58,14 +57,13 @@ const NET_TX_PACKETS: usize = 1;
 type MixedNetState = NetDriverStateWithMtu<NET_MTU, NET_RX_PACKETS, NET_TX_PACKETS>;
 type WifiNetRunner = wifi_net::RunnerWithMtu<'static, 'static, NET_MTU>;
 type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDeviceWithMtu<'static, NET_MTU>>;
-type ApNetDevice = WifiDevice<'static>;
+type ApNetDevice = esp8266_hal::wifi::Interface<'static>;
 
 static NET_STATE: StaticCell<MixedNetState> = StaticCell::new();
 static WIFI: StaticCell<Wifi> = StaticCell::new();
 static STACK_RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
 static WIFI_RUNNER: StaticCell<WifiNetRunner> = StaticCell::new();
 static NET_RUNNER: StaticCell<EmbassyNetRunner> = StaticCell::new();
-// Keep the adapter's fixed TX buffer outside the Embassy task arena.
 static AP_DEVICE: StaticCell<ApNetDevice> = StaticCell::new();
 static AP_RX_FRAME: StaticCell<[u8; NET_MTU]> = StaticCell::new();
 static DHCP_REPLY_FRAME: StaticCell<[u8; DHCP_REPLY_FRAME_BYTES]> = StaticCell::new();
@@ -149,8 +147,7 @@ fn start_network(
     let net_state = NET_STATE.init(MixedNetState::new());
     let (driver_runner, net_device) =
         wifi_net::new_with_mtu(net_state, sta_link).expect("STA net driver");
-    let ap_device =
-        AP_DEVICE.init_with(|| WifiDevice::new(ap_link).expect("valid AP frame capacity"));
+    let ap_device = AP_DEVICE.init(ap_link);
 
     let config = embassy_net::Config::dhcpv4(Default::default());
     let resources = STACK_RESOURCES.init(embassy_net::StackResources::<2>::new());
@@ -185,7 +182,7 @@ async fn run_networks(stack: embassy_net::Stack<'static>, device: &'static mut A
         let mut reply = None;
         let mut made_progress = false;
         loop {
-            let frame_len = match device.receive_frame(rx_frame) {
+            let frame_len = match device.receive(rx_frame) {
                 Ok(Some(frame_len)) => {
                     made_progress = true;
                     frame_len
@@ -331,7 +328,7 @@ async fn transmit_dhcp_reply(
     // to the station stack, but bound how long a busy radio can delay the AP.
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        match device.transmit_frame(&frame[..frame_len]) {
+        match device.transmit(&frame[..frame_len]) {
             Err(DriverError::WouldBlock | DriverError::OutOfMemory)
                 if Instant::now() < deadline =>
             {

@@ -79,6 +79,7 @@ pub(crate) fn test_allocator() -> RuntimeAllocator {
 #[cfg(test)]
 pub(crate) struct TrackingAllocator {
     pub(crate) live: core::sync::atomic::AtomicUsize,
+    pub(crate) live_bytes: core::sync::atomic::AtomicUsize,
     budget: core::sync::atomic::AtomicIsize,
 }
 #[cfg(test)]
@@ -86,6 +87,7 @@ impl TrackingAllocator {
     pub(crate) fn new(budget: isize) -> (&'static Self, RuntimeAllocator) {
         let provider = std::boxed::Box::leak(std::boxed::Box::new(Self {
             live: core::sync::atomic::AtomicUsize::new(0),
+            live_bytes: core::sync::atomic::AtomicUsize::new(0),
             budget: core::sync::atomic::AtomicIsize::new(budget),
         }));
         (provider, RuntimeAllocator::new(provider))
@@ -101,11 +103,14 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         let ptr = unsafe { std::alloc::System.alloc(layout) };
         if !ptr.is_null() {
             self.live.fetch_add(1, Ordering::SeqCst);
+            self.live_bytes.fetch_add(layout.size(), Ordering::SeqCst);
         }
         ptr
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         self.live.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+        self.live_bytes
+            .fetch_sub(layout.size(), core::sync::atomic::Ordering::SeqCst);
         unsafe { std::alloc::System.dealloc(ptr, layout) }
     }
 }
