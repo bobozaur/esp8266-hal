@@ -35,5 +35,7 @@ pub mod semphr;
 pub mod task;
 #[cfg(target_arch = "xtensa")]
 pub mod timer;
+#[cfg(any(target_arch = "xtensa", test))]
+mod wait_list;
 #[cfg(target_arch = "xtensa")]
 pub mod wifi_os_adapter;

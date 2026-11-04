@@ -1,5 +1,3 @@
-#[cfg(feature = "wifi-esp-now")]
-use super::feature::{EspNowPeer, EspNowPeerTable};
 #[cfg(any(
     feature = "wifi-esp-now",
     feature = "wifi-promiscuous",
@@ -48,11 +46,12 @@ pub(crate) struct ControlState {
     pub(crate) reason: Option<u8>,
     admission: [bool; 2],
     generation: [u32; 2],
+    rx: [RxRing; 2],
     rx_leases: [usize; 2],
     submissions: usize,
 }
 impl ControlState {
-    fn new() -> Self {
+    fn new(rx: [RxRing; 2]) -> Self {
         Self {
             stopping: false,
             scan_pending: false,
@@ -67,6 +66,7 @@ impl ControlState {
             reason: None,
             admission: [false; 2],
             generation: [0; 2],
+            rx,
             rx_leases: [0; 2],
             submissions: 0,
         }
@@ -87,8 +87,6 @@ pub(crate) struct Resources {
     pub(super) scan_storage: Locked<super::target_map::ScanStorage>,
     #[cfg(all(target_arch = "xtensa", feature = "wifi-smartconfig"))]
     pub(super) smartconfig_storage: Locked<super::target_map::SmartConfigStorage>,
-    sta_rx: Locked<RxRing>,
-    ap_rx: Locked<RxRing>,
     pub(crate) frame_bytes: usize,
     pub(crate) station_rx_capacity: usize,
     pub(crate) ap_rx_capacity: usize,
@@ -98,7 +96,7 @@ pub(crate) struct Resources {
     #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
     events: Locked<ProvisioningEvents>,
     #[cfg(feature = "wifi-esp-now")]
-    peers: Locked<EspNowPeerTable>,
+    esp_now_peer_capacity: usize,
     #[cfg(feature = "wifi-esp-now")]
     esp_now_rx: Locked<Queue<EspNowRxFrame>>,
     #[cfg(feature = "wifi-esp-now")]
@@ -127,13 +125,14 @@ impl Resources {
             return Err(InitError::InvalidConfiguration);
         }
         Ok(Self {
-            state: Locked::new(ControlState::new()),
+            state: Locked::new(ControlState::new([
+                RxRing::try_new(config.station_rx, allocator)?,
+                RxRing::try_new(config.access_point_rx, allocator)?,
+            ])),
             #[cfg(target_arch = "xtensa")]
             scan_storage: Locked::new(super::target_map::ScanStorage::new()),
             #[cfg(all(target_arch = "xtensa", feature = "wifi-smartconfig"))]
             smartconfig_storage: Locked::new(super::target_map::SmartConfigStorage::new()),
-            sta_rx: Locked::new(RxRing::try_new(config.station_rx, allocator)?),
-            ap_rx: Locked::new(RxRing::try_new(config.access_point_rx, allocator)?),
             frame_bytes: config.frame_bytes,
             station_rx_capacity: config.station_rx,
             ap_rx_capacity: config.access_point_rx,
@@ -147,7 +146,7 @@ impl Resources {
                 overflow: false,
             }),
             #[cfg(feature = "wifi-esp-now")]
-            peers: Locked::new(EspNowPeerTable::try_new(config.esp_now_peers, allocator)?),
+            esp_now_peer_capacity: config.esp_now_peers,
             #[cfg(feature = "wifi-esp-now")]
             esp_now_rx: Locked::new(Queue::try_new(config.esp_now_rx, allocator)?),
             #[cfg(feature = "wifi-esp-now")]
@@ -176,6 +175,7 @@ impl Resources {
                 state.connecting = false;
                 state.disconnecting = false;
                 state.admission[0] = false;
+                state.generation[0] = state.generation[0].wrapping_add(1);
             }
             WifiEvent::StaConnected => {
                 state.connected = true;
@@ -214,6 +214,14 @@ impl Resources {
             #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
             _ => {}
         });
+        // SDK lifecycle events are serialized by its event-loop mutex. Close
+        // admission first, release queued records without borrowing state, then
+        // publish/wake. Checked-out leases and the other interface stay live.
+        match event {
+            WifiEvent::StaDisconnected { .. } | WifiEvent::StaStopped => self.drain_sta_rx(),
+            WifiEvent::ApStopped => self.drain_ap_rx(),
+            _ => {}
+        }
         #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
         let result = self.events.with(|events| {
             if events.claimed && events.queue.try_push(event).is_err() {
@@ -304,24 +312,16 @@ impl Resources {
         })
     }
     pub(crate) fn has_rx(&self, id: InterfaceId) -> bool {
-        critical_section::with(|_| {
-            self.state.with(|state| state.admission[id.index()])
-                && self.ring(id).with(|queue| queue.len() != 0)
-        })
-    }
-    fn ring(&self, id: InterfaceId) -> &Locked<RxRing> {
-        match id {
-            InterfaceId::Station => &self.sta_rx,
-            InterfaceId::AccessPoint => &self.ap_rx,
-        }
+        self.state
+            .with(|s| s.admission[id.index()] && s.rx[id.index()].len() != 0)
     }
     pub(crate) fn take_rx(&self, id: InterfaceId) -> Option<RxPacket<'_>> {
-        critical_section::with(|_| {
-            if !self.state.with(|s| s.admission[id.index()]) {
+        self.state.with(|s| {
+            if !s.admission[id.index()] {
                 return None;
             }
-            let record = self.ring(id).with(RxRing::pop)?;
-            self.state.with(|s| s.rx_leases[id.index()] += 1);
+            let record = s.rx[id.index()].pop()?;
+            s.rx_leases[id.index()] += 1;
             Some(RxPacket {
                 record: Some(record),
                 resources: self,
@@ -334,11 +334,11 @@ impl Resources {
         id: InterfaceId,
         record: RawRxRecord,
     ) -> Result<(), DriverError> {
-        let result = critical_section::with(|_| {
-            if !self.state.with(|s| s.admission[id.index()]) || record.len() > self.frame_bytes {
+        let result = self.state.with(|s| {
+            if !s.admission[id.index()] || record.len() > self.frame_bytes {
                 return Err(record);
             }
-            self.ring(id).with(|queue| queue.try_push(record))
+            s.rx[id.index()].try_push(record)
         });
         match result {
             Ok(()) => {
@@ -351,15 +351,16 @@ impl Resources {
             }
         }
     }
-    pub(crate) fn drain_sta_rx(&self) {
-        while let Some(record) = self.sta_rx.with(RxRing::pop) {
-            drop(record)
+    fn drain_rx(&self, id: InterfaceId) {
+        while let Some(record) = self.state.with(|s| s.rx[id.index()].pop()) {
+            drop(record);
         }
     }
+    pub(crate) fn drain_sta_rx(&self) {
+        self.drain_rx(InterfaceId::Station)
+    }
     pub(crate) fn drain_ap_rx(&self) {
-        while let Some(record) = self.ap_rx.with(RxRing::pop) {
-            drop(record)
-        }
+        self.drain_rx(InterfaceId::AccessPoint)
     }
     pub(crate) fn reset_runtime(&self) {
         self.drain_sta_rx();
@@ -436,24 +437,8 @@ impl Resources {
         self.esp_now_rx.with(|q| q.capacity())
     }
     #[cfg(feature = "wifi-esp-now")]
-    pub(crate) fn register_esp_now_peer(&self, p: EspNowPeer) -> Result<bool, DriverError> {
-        self.peers.with(|t| t.insert(p))
-    }
-    #[cfg(feature = "wifi-esp-now")]
-    pub(crate) fn remove_esp_now_peer(&self, p: &[u8; 6]) -> bool {
-        self.peers.with(|t| t.remove(p))
-    }
-    #[cfg(feature = "wifi-esp-now")]
-    pub(crate) fn contains_esp_now_peer(&self, p: &[u8; 6]) -> bool {
-        self.peers.with(|t| t.contains(p))
-    }
-    #[cfg(feature = "wifi-esp-now")]
-    pub(crate) fn esp_now_peer_count(&self) -> usize {
-        self.peers.with(|t| t.len())
-    }
-    #[cfg(feature = "wifi-esp-now")]
     pub(crate) fn esp_now_peer_capacity(&self) -> usize {
-        self.peers.with(|t| t.capacity())
+        self.esp_now_peer_capacity
     }
     #[cfg(feature = "wifi-esp-now")]
     pub(crate) fn enqueue_esp_now_rx(&self, f: EspNowRxFrame) -> Result<(), DriverError> {
@@ -506,7 +491,6 @@ impl Resources {
     }
     #[cfg(feature = "wifi-esp-now")]
     pub(crate) fn reset_esp_now_runtime(&self) {
-        self.peers.with(EspNowPeerTable::clear);
         self.esp_now_rx.with(Queue::clear);
         self.esp_now_tx.with(|s| *s = EspNowTxSlot::Idle)
     }
@@ -687,6 +671,165 @@ mod tests {
             assert_eq!(releases.load(Ordering::SeqCst), 5);
             assert!(!r.has_rx(id));
         }
+    }
+
+    #[test]
+    fn station_disconnect_and_stop_drain_only_queued_station_frames_before_reconnect() {
+        for event in [
+            WifiEvent::StaDisconnected { reason: Some(8) },
+            WifiEvent::StaStopped,
+        ] {
+            let sta_releases = Arc::new(AtomicUsize::new(0));
+            let ap_releases = Arc::new(AtomicUsize::new(0));
+            let r = Resources::try_new(
+                &QueueConfig {
+                    station_rx: 2,
+                    access_point_rx: 2,
+                    ..QueueConfig::default()
+                },
+                test_allocator(),
+            )
+            .unwrap();
+            r.publish_event(WifiEvent::StaConnected).unwrap();
+            r.publish_event(WifiEvent::ApStarted).unwrap();
+            r.enqueue_rx(InterfaceId::Station, record(&sta_releases, 64))
+                .unwrap();
+            let held_sta = r.take_rx(InterfaceId::Station).unwrap();
+            r.enqueue_rx(InterfaceId::Station, record(&sta_releases, 64))
+                .unwrap();
+            r.enqueue_rx(InterfaceId::Station, record(&sta_releases, 64))
+                .unwrap();
+            r.enqueue_rx(InterfaceId::AccessPoint, record(&ap_releases, 64))
+                .unwrap();
+            let held_ap = r.take_rx(InterfaceId::AccessPoint).unwrap();
+            r.enqueue_rx(InterfaceId::AccessPoint, record(&ap_releases, 64))
+                .unwrap();
+            r.publish_event(event).unwrap();
+            assert_eq!(sta_releases.load(Ordering::SeqCst), 2);
+            assert_eq!(ap_releases.load(Ordering::SeqCst), 0);
+            assert_eq!(held_sta.as_slice(), &BYTES[..64]);
+            assert_eq!(held_ap.as_slice(), &BYTES[..64]);
+            assert!(r.has_rx(InterfaceId::AccessPoint));
+            r.publish_event(WifiEvent::StaConnected).unwrap();
+            assert!(r.take_rx(InterfaceId::Station).is_none());
+            r.enqueue_rx(InterfaceId::Station, record(&sta_releases, 128))
+                .unwrap();
+            assert_eq!(r.take_rx(InterfaceId::Station).unwrap().as_slice(), BYTES);
+            drop(held_sta);
+            drop(held_ap);
+            r.drain_ap_rx();
+            assert_eq!(sta_releases.load(Ordering::SeqCst), 4);
+            assert_eq!(ap_releases.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[test]
+    fn ap_stopped_drains_ap_queue_without_discarding_station_frames() {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let r = resources();
+        r.publish_event(WifiEvent::StaConnected).unwrap();
+        r.publish_event(WifiEvent::ApStarted).unwrap();
+        r.enqueue_rx(InterfaceId::Station, record(&releases, 64))
+            .unwrap();
+        r.enqueue_rx(InterfaceId::AccessPoint, record(&releases, 64))
+            .unwrap();
+        r.publish_event(WifiEvent::ApStopped).unwrap();
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        r.publish_event(WifiEvent::ApStarted).unwrap();
+        assert!(r.take_rx(InterfaceId::AccessPoint).is_none());
+        assert!(r.has_rx(InterfaceId::Station));
+        drop(r.take_rx(InterfaceId::Station).unwrap());
+        assert_eq!(releases.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn disconnect_releases_outside_state_borrow_and_wakes_after_all_queued_releases() {
+        use std::boxed::Box;
+        struct ReleaseCheck {
+            resources: *const Resources,
+            releases: Arc<AtomicUsize>,
+        }
+        unsafe fn release(_: *mut core::ffi::c_void, context: *mut core::ffi::c_void) {
+            // SAFETY: each record owns its context Box, and Resources stays
+            // alive until publish_event has released all these queued records.
+            let context = unsafe { Box::from_raw(context.cast::<ReleaseCheck>()) };
+            let resources = unsafe { &*context.resources };
+            assert_eq!(resources.link_state(), LinkState::Down);
+            assert!(!resources.has_rx(InterfaceId::Station));
+            assert!(resources.take_rx(InterfaceId::Station).is_none());
+            context.releases.fetch_add(1, Ordering::SeqCst);
+        }
+        struct DrainWake {
+            releases: Arc<AtomicUsize>,
+            wakes: AtomicUsize,
+        }
+        impl Wake for DrainWake {
+            fn wake(self: Arc<Self>) {
+                assert_eq!(self.releases.load(Ordering::SeqCst), 2);
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let r = Box::new(
+            Resources::try_new(
+                &QueueConfig {
+                    station_rx: 2,
+                    ..QueueConfig::default()
+                },
+                test_allocator(),
+            )
+            .unwrap(),
+        );
+        r.publish_event(WifiEvent::StaConnected).unwrap();
+        let releases = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            let context = Box::new(ReleaseCheck {
+                resources: &*r,
+                releases: releases.clone(),
+            });
+            // SAFETY: static initialized bytes, one owned context per release,
+            // boxed Resources remains stationary and alive throughout the drain.
+            let record = unsafe {
+                RawRxRecord::from_raw(
+                    BYTES.as_ptr().cast_mut().cast(),
+                    64,
+                    Box::into_raw(context).cast(),
+                    Some(release),
+                )
+            };
+            r.enqueue_rx(InterfaceId::Station, record).unwrap();
+        }
+        let wake = Arc::new(DrainWake {
+            releases,
+            wakes: AtomicUsize::new(0),
+        });
+        r.register_control_waker(&wake.clone().into());
+        r.register_link_waker(InterfaceId::Station, &wake.clone().into());
+        r.publish_event(WifiEvent::StaDisconnected { reason: Some(8) })
+            .unwrap();
+        assert_eq!(wake.wakes.load(Ordering::SeqCst), 2);
+        assert_eq!(r.state.with(|s| s.rx[0].len()), 0);
+    }
+
+    #[cfg(feature = "wifi-esp-now")]
+    #[test]
+    fn esp_now_peer_capacity_is_scalar_and_does_not_allocate_peer_storage() {
+        use super::super::allocator::TrackingAllocator;
+        let (provider, allocator) = TrackingAllocator::new(0);
+        let r = Resources::try_new(
+            &QueueConfig {
+                station_rx: 0,
+                access_point_rx: 0,
+                events: 0,
+                esp_now_peers: usize::MAX,
+                esp_now_rx: 0,
+                promiscuous_rx: 0,
+                ..QueueConfig::default()
+            },
+            allocator,
+        )
+        .unwrap();
+        assert_eq!(r.esp_now_peer_capacity(), usize::MAX);
+        assert_eq!(provider.live.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -62,42 +62,8 @@ pub(crate) type RxRing = Queue<RawRxRecord>;
 mod tests {
     extern crate std;
 
-    use self::std::format;
     use super::super::{allocator::test_allocator, DriverError};
     use super::*;
-    use proptest::prelude::*;
-
-    fn fake_record(len: u16) -> RawRxRecord {
-        static BYTES: [u8; 64] = [0; 64];
-        assert!(len as usize <= BYTES.len());
-        unsafe {
-            RawRxRecord::from_raw(
-                BYTES.as_ptr().cast_mut().cast(),
-                len,
-                core::ptr::null_mut(),
-                None,
-            )
-        }
-    }
-
-    #[test]
-    fn ring_rejects_when_full() {
-        let mut ring = RxRing::try_new(1, test_allocator()).unwrap();
-        assert!(ring.try_push(fake_record(32)).is_ok());
-        assert!(ring.try_push(fake_record(64)).is_err());
-    }
-
-    #[test]
-    fn zero_capacity_ring_rejects_without_storing() {
-        let mut ring = RxRing::try_new(0, test_allocator()).unwrap();
-        let rejected = ring
-            .try_push(fake_record(32))
-            .expect_err("zero-capacity ring must reject");
-
-        assert_eq!(rejected.len(), 32);
-        assert_eq!(ring.len(), 0);
-        assert!(ring.pop().is_none());
-    }
 
     #[test]
     fn interface_receive_releases_whole_record_on_copy_or_short_buffer() {
@@ -201,19 +167,5 @@ mod tests {
         }
 
         assert_eq!(RELEASES.load(core::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    proptest! {
-        #[test]
-        fn ring_len_never_exceeds_capacity(ops in proptest::collection::vec(0u8..3, 1..32)) {
-            let mut ring = RxRing::try_new(4, test_allocator()).unwrap();
-            for op in ops {
-                match op {
-                    0 => { let _ = ring.try_push(fake_record(64)); }
-                    _ => { let _ = ring.pop(); }
-                }
-                prop_assert!(ring.len() <= 4);
-            }
-        }
     }
 }

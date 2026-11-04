@@ -238,14 +238,13 @@ fn open_ap_config_preserves_channel() {
 }
 
 #[test]
-fn ap_config_builder_preserves_validated_limits() {
-    let ap = AccessPointConfig::builder(
+fn ap_config_setters_preserve_validated_limits() {
+    let ap = AccessPointConfig::open(
         Ssid::try_from("core-ap").unwrap(),
         Channel::try_from(11u8).unwrap(),
     )
-    .max_clients(ApClientLimit::try_from(3u8).unwrap())
-    .beacon_interval(BeaconInterval::try_from(250u16).unwrap())
-    .build();
+    .with_max_clients(ApClientLimit::try_from(3u8).unwrap())
+    .with_beacon_interval(BeaconInterval::try_from(250u16).unwrap());
 
     assert_eq!(ap.max_clients().get(), 3);
     assert_eq!(ap.beacon_interval().millis(), 250);
@@ -313,10 +312,15 @@ fn wps_pin_requires_exactly_eight_ascii_digits_with_valid_checksum() {
 fn wps_config_borrows_validated_factory_info() {
     let pin = WpsPin::try_from("12345670").unwrap();
     let target = Ssid::try_from("esp8266-hal-wps").unwrap();
-    let manufacturer = [b'm'; 64];
-    let model_number = [b'n'; 32];
-    let model_name = [b'o'; 32];
-    let device_name = [b'd'; 32];
+    let mut manufacturer = [b'm'; 64];
+    let mut model_number = [b'n'; 32];
+    let mut model_name = [b'o'; 32];
+    let mut device_name = [b'd'; 32];
+    // Factory text is copied literally by the native backend, including percent.
+    manufacturer[0] = b'%';
+    model_number[0] = b'%';
+    model_name[0] = b'%';
+    device_name[0] = b'%';
     let factory =
         WpsFactoryInfo::new(&manufacturer, &model_number, &model_name, &device_name).unwrap();
 
@@ -366,17 +370,4 @@ fn init_config_rejects_counts_outside_sdk_ranges() {
         Err(ConfigError::InvalidTxBufferCount(3))
     );
     assert_eq!(InitConfig::new(14, 4, 4).unwrap().rx_buf_num(), 14);
-}
-
-#[cfg(feature = "wifi-wps")]
-#[test]
-fn wps_factory_fields_cannot_be_native_format_strings() {
-    for index in 0..4 {
-        let mut fields: [&[u8]; 4] = [b"safe"; 4];
-        fields[index] = b"%n";
-        assert_eq!(
-            WpsFactoryInfo::new(fields[0], fields[1], fields[2], fields[3]),
-            Err(ConfigError::WpsFactoryInfoContainsPercent)
-        );
-    }
 }

@@ -63,6 +63,7 @@ impl<'d> Interface<'d> {
         frame: &[u8],
         generation: u32,
     ) -> Result<(), DriverError> {
+        super::validate_frame_len(frame.len())?;
         if frame.len() > self.max_frame_size() {
             return Err(DriverError::PayloadTooLong);
         }
@@ -78,5 +79,50 @@ impl<'d> Interface<'d> {
         {
             Err(DriverError::InvalidState)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{allocator::test_allocator, QueueConfig, WifiEvent};
+    use super::*;
+
+    #[test]
+    fn transmit_rejects_incomplete_headers_and_preserves_frame_capacity() {
+        let resources = Resources::try_new(
+            &QueueConfig {
+                frame_bytes: 82,
+                ..QueueConfig::default()
+            },
+            test_allocator(),
+        )
+        .unwrap();
+        resources.publish_event(WifiEvent::StaConnected).unwrap();
+        let mut interface = Interface {
+            resources: &resources,
+            id: InterfaceId::Station,
+            mac: [2; 6],
+        };
+        for len in 0..14 {
+            assert_eq!(
+                interface.transmit(&[0; 14][..len]),
+                Err(DriverError::InvalidFrameSize)
+            );
+        }
+        for len in [14, 18, 42, 82] {
+            // These lengths reach target dispatch; the host has no native TX.
+            assert_eq!(
+                interface.transmit(&[0; 82][..len]),
+                Err(DriverError::InvalidState)
+            );
+        }
+        assert_eq!(
+            interface.transmit(&[0; 83]),
+            Err(DriverError::PayloadTooLong)
+        );
+        assert_eq!(
+            interface.transmit(&[0; 1515]),
+            Err(DriverError::PayloadTooLong)
+        );
     }
 }

@@ -122,7 +122,7 @@ fn init_wifi(
 
     let mut config = ClientConfig::new(Ssid::try_from(WIFI_SSID.trim()).expect("ssid"), credential);
     if let Some(channel) = WIFI_CHANNEL
-        .and_then(parse_u8_literal)
+        .and_then(|value| value.trim().parse::<u8>().ok())
         .and_then(|channel| Channel::try_from(channel).ok())
     {
         config = config.with_channel(channel);
@@ -141,17 +141,6 @@ fn init_wifi(
     };
 
     (driver, interfaces)
-}
-
-fn parse_u8_literal(value: &str) -> Option<u8> {
-    let mut result = 0u8;
-    for byte in value.trim().bytes() {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        result = result.checked_mul(10)?.checked_add(byte - b'0')?;
-    }
-    Some(result)
 }
 
 #[embassy_executor::task]

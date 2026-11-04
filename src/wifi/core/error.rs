@@ -39,8 +39,6 @@ pub enum ConfigError {
     WpsDeviceNameTooLong,
     #[cfg(feature = "wifi-wps")]
     WpsFactoryInfoContainsNul,
-    #[cfg(feature = "wifi-wps")]
-    WpsFactoryInfoContainsPercent,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

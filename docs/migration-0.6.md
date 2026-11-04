@@ -93,6 +93,14 @@ copies each frame into a separate Rust pool. Release smoltcp receive tokens
 promptly: a held token on either interface makes whole-radio `stop()` return
 `Busy`. An AP token does not prevent station-only disconnection. Queue capacities
 bound queued records; checked-out tokens also consume native receive buffers.
+Station disconnection releases queued station frames before notifying consumers,
+including unsolicited link loss. Already borrowed frames remain valid until
+released; AP queues and leases are independent.
+
+Raw transmission requires a complete 14-byte Ethernet header. Shorter inputs
+return `DriverError::InvalidFrameSize`. Valid short frames such as ARP and
+EAPOL retain their logical length; the native copy reserves and initializes the
+extra bytes its parser reads.
 
 TLS and EAP use that same application allocator directly. The separate RSA
 reservation pool and its native hooks are removed. The nine audited native
@@ -140,6 +148,21 @@ Protocol sessions are concrete borrowed types returned by
 Provisioning `next_event()` returns `Result<Option<Event>, DriverError>` so event
 overflow is distinguishable from an empty queue.
 
+WPS failure and timeout events end the current attempt. Applications retry
+explicitly with `stop()` followed by `start(...)`. Factory information accepts
+literal percent characters; native copies no longer interpret it as formatting.
+
+Configure APs directly with `AccessPointConfig::open(ssid, channel)` and
+`.with_credential(...)`, `.with_max_clients(...)` or `.with_beacon_interval(...)`.
+The separate AP builder and final `.build()` call are removed.
+
+ESP-NOW uses one `EspNowPeerConfig`: `.for_station()` and `.for_access_point()`
+select its interface, and `add_peer` / `update_peer` validate the current mode.
+Interface-specific peer wrapper types and methods are removed. The SDK owns the
+peer table; `esp_now_peers` limits its application-visible capacity without a
+second Rust allocation. `peer_count()` now returns `Result<usize, DriverError>`;
+an inactive session returns `Ok(0)`.
+
 ## Select networking and optional Embassy support
 
 `wifi` enables `rt` and `interrupt`; it no longer enables Embassy or smoltcp.
@@ -150,6 +173,13 @@ SDK storage affect even unused Wi-Fi builds. Remove
 `wifi::embassy_net::new(state, interface)`. Both adapters accept either station or
 AP interfaces; the mixed-mode wrapper and separate AP constructors are removed.
 The smaller-MTU Embassy constructor remains `new_with_mtu`.
+
+`wifi-embassy-net` no longer enables the HAL's smoltcp dependency. The smoltcp
+adapter enables Ethernet, IPv4 and UDP, the smallest existing socket selection
+that satisfies smoltcp 0.12's feature requirements. Applications enable TCP,
+DHCPv4 or other protocols on their own smoltcp dependency. The raw AP examples
+need only `embassy` and `wifi-embassy-net`, respectively; their wire codecs are
+example dependencies.
 
 The smoltcp adapter borrows one caller-supplied `&mut [u8]` for pending TX.
 It must contain at least `interface.max_frame_size()` bytes; a shorter buffer
@@ -231,11 +261,16 @@ Section sizes exclude runtime heap and stacks; see the
 [cost and evidence notes](native-runtime.md#cost-and-current-evidence). The idle
 stack overflow and NMI exclusion defects are corrected. Integrated validation
 covers the available radio, network and peripheral fixtures; it does not establish
-first-attempt association reliability. WPS PBC/PIN and SmartConfig provisioning,
-DHCP and acknowledgement pass against an external fixture. PEAP/MSCHAPv2
-authentication and incorrect-password rejection also pass. Compact P-256 client-certificate EAP-TLS
-also passes, including the four-way handshake. Examples keep bounded retry policy in
-application code.
+first-attempt association reliability. Earlier campaigns passed WPS PBC/PIN,
+SmartConfig provisioning with DHCP and acknowledgement, PEAP/MSCHAPv2 with
+incorrect-password rejection, and compact P-256 client-certificate EAP-TLS with
+the four-way handshake. The latest simplification campaign has not requalified
+WPS or enterprise authentication: association failed against the available
+external fixture, including with an earlier WPS image. SmartConfig passed DHCP
+and acknowledgement once, but its post-stop fixtures did not decode credentials;
+fresh DHCP after stop remains unqualified in this campaign. See the
+[current campaign results](../plan.md#further-simplification-review) for coverage
+and remaining limits. Examples keep bounded retry policy in application code.
 
 Before publishing HAL 0.6, publish the currently unpublished dependency versions:
 PAC `esp8266` 0.7, `esp8266-hal-proc-macros` 0.2 and `esp8266-wifi-sys` 0.1. Local

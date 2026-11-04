@@ -60,7 +60,6 @@ pub(crate) struct Sdk {
     smartconfig_handler_registered: bool,
     sta_rx_registered: bool,
     ap_rx_registered: bool,
-    ap_netif_started: bool,
     #[cfg(feature = "wifi-enterprise")]
     wpa2_enterprise_enabled: bool,
     #[cfg(feature = "wifi-promiscuous")]
@@ -99,7 +98,6 @@ impl Sdk {
             smartconfig_handler_registered: false,
             sta_rx_registered: false,
             ap_rx_registered: false,
-            ap_netif_started: false,
             #[cfg(feature = "wifi-enterprise")]
             wpa2_enterprise_enabled: false,
             #[cfg(feature = "wifi-promiscuous")]
@@ -400,29 +398,6 @@ impl Sdk {
         .map_err(map_esp_driver_error)
     }
 
-    pub(crate) fn ensure_ap_netif_started(&mut self) -> Result<(), DriverError> {
-        if self.ap_netif_started {
-            return Ok(());
-        }
-
-        let ap_mac = self.ap_mac_address()?;
-        crate::wifi::ap_netif::start(ap_mac)
-            .map_err(|code| map_esp_driver_error(crate::wifi::EspError(code)))?;
-        self.ap_netif_started = true;
-        Ok(())
-    }
-
-    pub(crate) fn stop_ap_netif(&mut self) -> Result<(), DriverError> {
-        if !self.ap_netif_started {
-            return Ok(());
-        }
-
-        crate::wifi::ap_netif::stop()
-            .map_err(|code| map_esp_driver_error(crate::wifi::EspError(code)))?;
-        self.ap_netif_started = false;
-        Ok(())
-    }
-
     pub(crate) fn quiesce(&mut self) -> Result<(), DriverError> {
         let mut result = Ok(());
         #[cfg(feature = "wifi-smartconfig")]
@@ -457,7 +432,6 @@ impl Sdk {
             if self.ap_rx_registered || self.sta_rx_registered {
                 result = result.and(Err(DriverError::InvalidState));
             }
-            result = result.and(self.stop_ap_netif());
             #[cfg(feature = "wifi-smartconfig")]
             {
                 result = result.and(self.unregister_smartconfig_event_handler());
@@ -492,7 +466,6 @@ impl Sdk {
         self.started = false;
         self.detach_ap_rx();
         self.detach_sta_rx();
-        let _ = self.stop_ap_netif();
         #[cfg(feature = "wifi-smartconfig")]
         let _ = self.unregister_smartconfig_event_handler();
         let _ = self.unregister_event_handler();
@@ -771,7 +744,6 @@ impl Sdk {
             return Ok(());
         }
 
-        self.ensure_ap_netif_started()?;
         self.register_ap_rx_callback()?;
         self.ap_rx_registered = true;
         Ok(())
@@ -1126,6 +1098,23 @@ impl Sdk {
     pub(crate) fn set_esp_now_pmk(&mut self, pmk: &[u8; 16]) -> Result<(), DriverError> {
         crate::wifi::EspError::check(unsafe { esp8266_wifi_sys::esp_now_set_pmk(pmk.as_ptr()) })
             .map_err(map_esp_driver_error)
+    }
+
+    #[cfg(feature = "wifi-esp-now")]
+    pub(crate) fn contains_esp_now_peer(&self, peer_addr: &[u8; 6]) -> bool {
+        self.esp_now_initialized
+            && unsafe { esp8266_wifi_sys::esp_now_is_peer_exist(peer_addr.as_ptr()) }
+    }
+
+    #[cfg(feature = "wifi-esp-now")]
+    pub(crate) fn esp_now_peer_count(&self) -> Result<usize, DriverError> {
+        if !self.esp_now_initialized {
+            return Ok(0);
+        }
+        let mut count: esp8266_wifi_sys::esp_now_peer_num_t = unsafe { core::mem::zeroed() };
+        crate::wifi::EspError::check(unsafe { esp8266_wifi_sys::esp_now_get_peer_num(&mut count) })
+            .map_err(map_esp_driver_error)?;
+        Ok(count.total_num as usize)
     }
 
     #[cfg(feature = "wifi-esp-now")]

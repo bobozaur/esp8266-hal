@@ -45,7 +45,7 @@ fn main() -> ! {
 
     let mut config = ClientConfig::new(Ssid::try_from(WIFI_SSID.trim()).expect("ssid"), credential);
     if let Some(channel) = WIFI_CHANNEL
-        .and_then(parse_u8_literal)
+        .and_then(|value| value.trim().parse::<u8>().ok())
         .and_then(|channel| Channel::try_from(channel).ok())
     {
         config = config.with_channel(channel);
@@ -58,7 +58,7 @@ fn main() -> ! {
     esp8266_hal::logger::write_bytes(b"wifi core started");
     esp8266_hal::logger::write_newline();
     let connect_timeout_ms = WIFI_CONNECT_TIMEOUT_MS
-        .and_then(parse_u32_literal)
+        .and_then(|value| value.trim().parse::<u32>().ok())
         .unwrap_or(60_000);
     {
         let sta = &mut driver;
@@ -87,26 +87,4 @@ fn main() -> ! {
     loop {
         esp8266_hal::wifi::delay_ticks(100);
     }
-}
-
-fn parse_u8_literal(value: &str) -> Option<u8> {
-    let mut result = 0u8;
-    for byte in value.trim().bytes() {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        result = result.checked_mul(10)?.checked_add(byte - b'0')?;
-    }
-    Some(result)
-}
-
-fn parse_u32_literal(value: &str) -> Option<u32> {
-    let mut result = 0u32;
-    for byte in value.trim().bytes() {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        result = result.checked_mul(10)?.checked_add((byte - b'0') as u32)?;
-    }
-    Some(result)
 }

@@ -7,8 +7,6 @@
 
 pub use crate::wifi_core::*;
 
-#[cfg(target_arch = "xtensa")]
-pub(crate) mod ap_netif;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) mod compat;
 #[cfg(target_arch = "xtensa")]
@@ -17,6 +15,8 @@ pub(crate) mod error;
 pub mod runtime;
 #[cfg(target_arch = "xtensa")]
 pub(crate) mod sdk;
+#[cfg(any(test, target_arch = "xtensa"))]
+pub(crate) mod tx_buffer;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use error::EspError;
 #[cfg(target_arch = "xtensa")]

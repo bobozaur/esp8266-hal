@@ -17,14 +17,6 @@ use syn::{
     ItemStatic, Meta, ReturnType, StaticMutability, Stmt, Type, Visibility,
 };
 
-// TODO:
-// - check if all called function are in ram
-// - check if all used data is in ram
-// - check that no constants are use in the function (these cannot be forced to ram)
-fn check_ram_function(_func: &syn::ItemFn) {
-    //    eprintln!("{:?}", func);
-}
-
 #[derive(Debug, Default, FromMeta)]
 #[darling(default)]
 struct RamArgs {
@@ -110,7 +102,6 @@ pub fn ram(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            check_ram_function(function_item);
             quote! {
                 #[link_section=#section_name_text]
                 #[inline(never)] // make certain function is not inlined
@@ -191,7 +182,7 @@ pub fn interrupt(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // XXX should we blacklist other attributes?
 
-    if let Err(error) = check_attr_whitelist(&f.attrs, WhiteListCaller::Interrupt) {
+    if let Err(error) = check_attr_whitelist(&f.attrs) {
         return error;
     }
 
@@ -310,25 +301,10 @@ fn extract_static_muts(
 }
 
 fn extract_cfgs(attrs: Vec<Attribute>) -> (Vec<Attribute>, Vec<Attribute>) {
-    let mut cfgs = vec![];
-    let mut not_cfgs = vec![];
-
-    for attr in attrs {
-        if eq(&attr, "cfg") {
-            cfgs.push(attr);
-        } else {
-            not_cfgs.push(attr);
-        }
-    }
-
-    (cfgs, not_cfgs)
+    attrs.into_iter().partition(|attr| eq(attr, "cfg"))
 }
 
-enum WhiteListCaller {
-    Interrupt,
-}
-
-fn check_attr_whitelist(attrs: &[Attribute], caller: WhiteListCaller) -> Result<(), TokenStream> {
+fn check_attr_whitelist(attrs: &[Attribute]) -> Result<(), TokenStream> {
     let whitelist = &[
         "doc",
         "link_section",
@@ -348,15 +324,12 @@ fn check_attr_whitelist(attrs: &[Attribute], caller: WhiteListCaller) -> Result<
             }
         }
 
-        let err_str = match caller {
-            WhiteListCaller::Interrupt => {
-                "this attribute is not allowed on an interrupt handler controlled by esp8266_hal"
-            }
-        };
-
-        return Err(parse::Error::new(attr.span(), err_str)
-            .to_compile_error()
-            .into());
+        return Err(parse::Error::new(
+            attr.span(),
+            "this attribute is not allowed on an interrupt handler controlled by esp8266_hal",
+        )
+        .to_compile_error()
+        .into());
     }
 
     Ok(())

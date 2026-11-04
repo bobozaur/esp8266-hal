@@ -67,8 +67,7 @@ pub use event::LinkState;
 pub(crate) use event::WifiEvent;
 #[cfg(feature = "wifi-esp-now")]
 pub use feature::{
-    EspNowAccessPointPeerConfig, EspNowPeerConfig, EspNowRxFrame, EspNowSendStatus,
-    EspNowStationPeerConfig, ESP_NOW_KEY_LEN, ESP_NOW_MAX_PAYLOAD,
+    EspNowPeerConfig, EspNowRxFrame, EspNowSendStatus, ESP_NOW_KEY_LEN, ESP_NOW_MAX_PAYLOAD,
 };
 #[cfg(feature = "wifi-promiscuous")]
 pub use feature::{
@@ -84,7 +83,7 @@ pub use feature::{
 pub use feature::{WpsConfig, WpsEvent, WpsFactoryInfo, WpsMode};
 #[cfg(any(target_arch = "xtensa", test))]
 pub use interface::{Interface, Interfaces};
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use link::validate_frame_len;
 pub use link::{MAX_ETHERNET_FRAME_SIZE, MIN_IPV4_ETHERNET_FRAME_SIZE};
 #[cfg(target_arch = "xtensa")]

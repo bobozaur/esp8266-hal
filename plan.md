@@ -1,18 +1,19 @@
 # ESP8266 HAL refactor plan
 
-Status: the baseline refactor is committed as `f31504b`. The packet optimization
-implementation, source reviews and board cleanup are complete.
-Current follow-up evidence is recorded below; the original campaign results remain
-a baseline record. SmartConfig now passes on both boards, including fresh DHCP
-after provisioning stops. Intermittent provisioning failures remain. The temporary
-sender is removed and both boards are restored. Publication is separate.
+Status: the baseline refactor is committed as `f31504b`, and the packet
+optimizations as `51d8b41`. The further simplification batch is implemented and
+reviewed. Technical and report reviews have converged with no unresolved
+material source finding. Current evidence and qualification gaps are recorded under
+“Further simplification review”; earlier sections retain their campaign scope.
+WPS, enterprise authentication and SmartConfig post-stop networking are not
+requalified by this batch. Publication is separate.
 Updated: 2026-11-04.
 
 The decisions below were agreed during discussion. The user subsequently
 authorized autonomous planning, adversarial review to saturation, implementation
 and hardware validation. Implementation choices and progress are now tracked here
-without requiring further approval. The baseline commit was explicitly requested;
-new commits and publication require separate authorization.
+without requiring further approval. The user authorized committing this reviewed
+batch. Publication remains separate.
 
 ## Agreed scope
 
@@ -289,6 +290,80 @@ the implemented public interfaces.
 - Preserve generated PAC code except necessary integration changes. Avoid bulk
   rewrites or dependency upgrades without a concrete correctness/simplicity benefit.
 
+## Further simplification review
+
+The user requested a new review after committing the packet optimizations.
+Independent assessments cover the current project before reconciliation with
+earlier findings. Aggregate candidates, challenge their assumptions and costs,
+then implement justified changes as one coordinated batch. Preserve useful
+behavior and safety contracts; fewer lines alone do not establish improvement.
+
+| Coverage | Owner | State |
+| --- | --- | --- |
+| Core/API streamlining, duplication and necessary LOC | Core reviewer | Accepted changes implemented; final source review found no new material issue |
+| Packet/runtime performance and resource costs | Performance reviewer | Accepted changes implemented; final source/instruction review found no new material issue |
+| HAL, build, features, examples, tests and tooling | Integration reviewer | Accepted changes implemented, including 102 lines of unused WPS tooling removed; final source review found no new material issue |
+| Architecture and whole-system interactions | Architecture reviewer | Accepted changes implemented; final integrated source review found no new material issue |
+| Aggregate findings, implementation, documentation and validation | Main | Full 27 host and 25 target checks pass. Native WPS fault validation and deterministic archive import pass. All four technical lanes and the document lane converge with no new material finding; remaining protocol qualification is explicit below |
+
+The current batch removes the private AP lwIP task/interface and redundant
+ESP-NOW peer ownership, puts RX admission/rings/leases under one lock, narrows
+network dependencies, and shares example frame codecs. It also corrects short-frame
+native TX storage, scheduler slot reuse, stale RX across disconnect, WPS partial
+allocation ownership, and hardware-harness false positives/cache invalidation.
+The revised-source review additionally found WPS receive bounds/fragment ownership
+defects and missing DHCP example packet validation; these are included in the
+correction batch. Target inspection confirms native queue headers shrink from
+168 to 56 bytes, and RX enqueue uses conditional wrap instead of division.
+These facts do not establish throughput or latency gains. The SmartConfig ETS
+worker is retained because removal lacks sufficient evidence. The normal
+FreeRTOS timer daemon has an actual PMKSA/SDK timer consumer and is retained.
+
+Compared with `51d8b41`, the AP, mixed, TCP and WPS examples remove 31,440–33,312
+bytes of flash-mapped code/data. Static DRAM shrinks by 1,849–2,297 bytes across
+those images. An identical AP runtime fixture has 5,856 more free heap bytes
+after startup; 256 child-task lifecycles complete without heap loss. The production
+source/build/linker diff is 610 lines added and 1,411 deleted (801 fewer lines),
+including the native WPS repair. These measurements do not establish throughput
+or latency gains.
+
+WPS and enterprise authentication are not requalified by this campaign. The
+external AP reports unacknowledged association responses; both the revised and
+an earlier WPS image failed. The cause is not isolated. Actual-C fault tests cover
+WPS allocation failures, receive bounds, fragments, cleanup and stale work, but
+do not substitute for successful RF provisioning or enterprise authentication.
+
+Current hardware passes AP association before DHCP, mixed upstream/downstream
+DHCP, plain/encrypted ESP-NOW and wrong-key rejection, native peer-table lifecycle,
+packet pressure and peer rejoin, blocking/async lifecycle transitions, 32
+management-frame captures, 20 exact TCP echoes, separate-host DHCP/static-IP TCP,
+and timer/UART/flash coexistence. Both boards complete 100 create/scan/stop/drop
+cycles. Host USB serial read failures initially obscured the first board's
+completion; recovered interrupt counters continued without restart. A private
+fixture that repeats its final result after the unchanged exercise and capture
+recovery establish its pass. Earlier failed captures remain recorded.
+
+SmartConfig completed provisioning, DHCP and sender-validated acknowledgement on
+one board. Four other attempts, including post-stop fixtures on both boards,
+failed before credentials were decoded. Fresh DHCP after stopping provisioning
+therefore remains unqualified in this campaign. The earlier post-stop passes
+remain historical evidence; neither campaign establishes first-attempt reliability.
+
+Router configuration, radio/interface state, global services and uplink match
+the starting state; temporary router files/processes are removed. The separate
+host's services/routes are unchanged and its listener has exited. Both reserved
+16 KiB flash regions match their backups, and the final AP/client DHCP pair passes.
+Both boards are left running that pair.
+
+Before release, maintainers must complete WPS PBC/PIN, enterprise authentication
+(including password rejection and compact certificate TLS), and SmartConfig
+post-stop qualification against working fixtures. These follow-ups are tracked
+here; there is no external issue. Peak WPS stack usage, throughput and interrupt
+latency are not established by the resource measurements. Actual-C fault tests
+pass through the retained [optional native WPS runner](esp8266-wifi-sys/tests/native-wps/README.md).
+It uses the canonical sources with an external pinned SDK and newlib headers;
+it runs separately from ordinary Cargo checks and does not qualify radio behavior.
+
 ## Packet optimization follow-up
 
 The user authorized these optimizations after inspecting the architecture.
@@ -357,6 +432,9 @@ frames and the configured filter's correct terminal marker.
 | OpenWrt protocol qualification and restoration | Main + protocol owners | Complete: WPS PBC/PIN, SmartConfig DHCP/ACK and post-stop DHCP, PEAP, wrong-password rejection and compact P-256 EAP-TLS pass. Native cleanup/data placement, allocator and NMI polling corrections are reviewed to saturation. TLS record/heap limits are documented. All router restoration checks pass |
 
 ## Final results and remaining qualification
+
+This section records the baseline refactor campaign. The later packet and
+simplification campaigns, including their current qualification gaps, are above.
 
 - All 27 host checks pass: feature-isolated and combined tests, formatting,
   warnings/lints, documentation, native archive integrity, supporting-package

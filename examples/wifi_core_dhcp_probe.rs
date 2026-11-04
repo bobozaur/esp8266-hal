@@ -73,7 +73,7 @@ fn init_wifi(
 
     let mut config = ClientConfig::new(Ssid::try_from(WIFI_SSID.trim()).expect("ssid"), credential);
     if let Some(channel) = WIFI_CHANNEL
-        .and_then(parse_u8_literal)
+        .and_then(|value| value.parse::<u8>().ok())
         .and_then(|channel| Channel::try_from(channel).ok())
     {
         config = config.with_channel(channel);
@@ -172,26 +172,6 @@ async fn app_main(spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtime
     loop {
         embassy_time::Timer::after(Duration::from_secs(60)).await;
     }
-}
-
-fn parse_u8_literal(value: &str) -> Option<u8> {
-    let mut acc = 0_u16;
-    let mut has_digit = false;
-    for byte in value.as_bytes() {
-        match *byte {
-            b'0'..=b'9' => {
-                acc = acc
-                    .saturating_mul(10)
-                    .saturating_add(u16::from(*byte - b'0'));
-                if acc > u16::from(u8::MAX) {
-                    return None;
-                }
-                has_digit = true;
-            }
-            _ => return None,
-        }
-    }
-    has_digit.then_some(acc as u8)
 }
 
 #[panic_handler]

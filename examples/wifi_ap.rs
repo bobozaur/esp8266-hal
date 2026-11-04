@@ -12,17 +12,12 @@ use embassy_time::{Duration, Instant, Timer};
 mod support;
 use esp8266_hal::timer::TimerExt;
 use support::dhcp::{DhcpMessageType, DhcpReply, DhcpServer, DhcpServerConfig};
+use support::dhcp_wire::{self, REPLY_HEADERS};
 use support::log_line;
 
 use esp8266_hal::wifi::{
-    AccessPointConfig, ApClientLimit, ApCredential, BeaconInterval, Channel, Configuration,
-    DriverError, InitConfig, Interface as WifiInterface, Ipv4Addr, Ssid, Wifi,
-};
-use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::wire::{
-    EthernetAddress, EthernetFrame, EthernetProtocol, IpAddress, IpProtocol,
-    Ipv4Address as SmoltcpIpv4Address, Ipv4Packet, Ipv4Repr, UdpPacket, UdpRepr,
-    ETHERNET_HEADER_LEN, IPV4_HEADER_LEN, UDP_HEADER_LEN,
+    AccessPointConfig, ApClientLimit, BeaconInterval, Channel, Configuration, DriverError,
+    InitConfig, Interface as WifiInterface, Ipv4Addr, Ssid, Wifi,
 };
 use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
@@ -33,9 +28,7 @@ const AP_LEASE_START: Ipv4Addr = Ipv4Addr::new(192, 168, 4, 2);
 const AP_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 const DHCP_PACKET_BYTES: usize = 288;
 const AP_RX_FRAME_BYTES: usize = 512;
-const DHCP_REPLY_FRAME_BYTES: usize =
-    ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN + DHCP_PACKET_BYTES;
-const DHCP_REPLY_HEADERS: usize = ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN;
+const DHCP_REPLY_FRAME_BYTES: usize = REPLY_HEADERS + DHCP_PACKET_BYTES;
 
 type ApNetDevice = WifiInterface<'static>;
 
@@ -75,59 +68,22 @@ fn dhcp_enabled() -> bool {
     matches!(option_env!("ESP8266_HAL_AP_DHCP"), Some("1"))
 }
 
-fn ap_attach_only_enabled() -> bool {
-    matches!(option_env!("ESP8266_HAL_AP_ATTACH_ONLY"), Some("1"))
-}
-
-fn ap_network_attach_only_enabled() -> bool {
-    matches!(option_env!("ESP8266_HAL_AP_NET_ATTACH_ONLY"), Some("1"))
-}
-
-fn ap_dhcp_bind_only_enabled() -> bool {
-    matches!(option_env!("ESP8266_HAL_AP_DHCP_BIND_ONLY"), Some("1"))
-}
-
-fn parse_u64_ascii(text: &str) -> Option<u64> {
-    let bytes = text.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let mut value = 0_u64;
-    for &byte in bytes {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        value = value.checked_mul(10)?;
-        value = value.checked_add((byte - b'0') as u64)?;
-    }
-
-    Some(value)
-}
-
-fn ap_delay_before_network_ms() -> Option<u64> {
-    option_env!("ESP8266_HAL_AP_DELAY_BEFORE_NET_MS").and_then(parse_u64_ascii)
-}
-
 fn ap_dhcp_grace_ms() -> Option<u64> {
-    option_env!("ESP8266_HAL_AP_DHCP_GRACE_MS").and_then(parse_u64_ascii)
+    option_env!("ESP8266_HAL_AP_DHCP_GRACE_MS").and_then(|value| value.parse::<u64>().ok())
 }
 
 fn ap_dhcp_poll_ms() -> u64 {
     option_env!("ESP8266_HAL_AP_DHCP_POLL_MS")
-        .and_then(parse_u64_ascii)
+        .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(1000)
+}
+
+fn wait_before_dhcp_enabled() -> bool {
+    matches!(option_env!("ESP8266_HAL_AP_WAIT_BEFORE_DHCP"), Some("1"))
 }
 
 async fn run_dhcp_server(device: &'static mut ApNetDevice) -> ! {
     log_stage(b"dhcp-task-enter");
-    if ap_dhcp_bind_only_enabled() {
-        log_line(b"ap-dhcp-bind-ready");
-        loop {
-            Timer::after(Duration::from_secs(1)).await;
-        }
-    }
-
     let config = DhcpServerConfig::new(AP_IP, AP_NETMASK, AP_LEASE_START, 4)
         .expect("dhcp config")
         .router(AP_IP)
@@ -136,7 +92,7 @@ async fn run_dhcp_server(device: &'static mut ApNetDevice) -> ! {
     let mut server = DhcpServer::<4>::new(config);
     let reply_frame = DHCP_REPLY_FRAME.init([0; DHCP_REPLY_FRAME_BYTES]);
     let rx_frame = AP_RX_FRAME.init([0; AP_RX_FRAME_BYTES]);
-    let ap_mac = EthernetAddress(device.mac_address());
+    let ap_mac = device.mac_address();
     let mut last_wait_log = Instant::now();
 
     log_line(b"ap-dhcp-ready");
@@ -159,11 +115,11 @@ async fn run_dhcp_server(device: &'static mut ApNetDevice) -> ! {
                     continue;
                 }
             };
-            match dhcp_payload(&rx_frame[..frame_len]) {
+            match dhcp_wire::payload(&rx_frame[..frame_len]) {
                 Some(packet) => match server.handle(
                     Instant::now().as_secs(),
                     packet,
-                    &mut reply_frame[DHCP_REPLY_HEADERS..],
+                    &mut reply_frame[REPLY_HEADERS..],
                 ) {
                     Ok(result) => {
                         reply = result;
@@ -225,75 +181,13 @@ async fn wait_for_ap_rx(device: &ApNetDevice, fallback: Duration) {
     let _ = select(rx_ready, Timer::after(fallback)).await;
 }
 
-fn dhcp_payload(frame: &[u8]) -> Option<&[u8]> {
-    let ethernet = EthernetFrame::new_checked(frame).ok()?;
-    if ethernet.ethertype() != EthernetProtocol::Ipv4 {
-        return None;
-    }
-
-    let ipv4 = Ipv4Packet::new_checked(ethernet.payload()).ok()?;
-    if ipv4.next_header() != IpProtocol::Udp {
-        return None;
-    }
-
-    let udp = UdpPacket::new_checked(ipv4.payload()).ok()?;
-    if udp.src_port() == 68 && udp.dst_port() == 67 {
-        Some(udp.payload())
-    } else {
-        None
-    }
-}
-
 fn transmit_dhcp_reply(
     device: &mut ApNetDevice,
     frame: &mut [u8],
-    ap_mac: EthernetAddress,
+    ap_mac: [u8; 6],
     reply: DhcpReply,
 ) -> Result<(), DriverError> {
-    let src_ip = SmoltcpIpv4Address::from(AP_IP.octets());
-    let payload_len = reply.len();
-    let broadcast = reply.broadcast() || reply.leased_ip() == Ipv4Addr::UNSPECIFIED;
-    let dst_ip = if broadcast {
-        SmoltcpIpv4Address::BROADCAST
-    } else {
-        SmoltcpIpv4Address::from(reply.leased_ip().octets())
-    };
-    let src_ip_addr = IpAddress::Ipv4(src_ip);
-    let dst_ip_addr = IpAddress::Ipv4(dst_ip);
-    let checksum_caps = ChecksumCapabilities::default();
-    let frame_len = DHCP_REPLY_HEADERS + payload_len;
-
-    let mut ethernet = EthernetFrame::new_unchecked(&mut frame[..frame_len]);
-    ethernet.set_dst_addr(if broadcast {
-        EthernetAddress::BROADCAST
-    } else {
-        EthernetAddress(reply.client_mac())
-    });
-    ethernet.set_src_addr(ap_mac);
-    ethernet.set_ethertype(EthernetProtocol::Ipv4);
-
-    let mut ipv4 = Ipv4Packet::new_unchecked(ethernet.payload_mut());
-    Ipv4Repr {
-        src_addr: src_ip,
-        dst_addr: dst_ip,
-        next_header: IpProtocol::Udp,
-        payload_len: UDP_HEADER_LEN + payload_len,
-        hop_limit: 64,
-    }
-    .emit(&mut ipv4, &checksum_caps);
-
-    UdpRepr {
-        src_port: 67,
-        dst_port: 68,
-    }
-    .emit(
-        &mut UdpPacket::new_unchecked(ipv4.payload_mut()),
-        &src_ip_addr,
-        &dst_ip_addr,
-        payload_len,
-        |_| {},
-        &checksum_caps,
-    );
+    let frame_len = dhcp_wire::emit_reply(frame, AP_IP, ap_mac, reply);
 
     device.transmit(&frame[..frame_len])
 }
@@ -323,14 +217,12 @@ async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtim
     let (mut driver, interfaces) = wifi.split();
     log_line(b"wifi init ok");
 
-    let config = AccessPointConfig::builder(
+    let config = AccessPointConfig::open(
         Ssid::try_from(AP_SSID).expect("ap ssid"),
         Channel::try_from(6).expect("ap channel"),
     )
-    .credential(ApCredential::Open)
-    .max_clients(ApClientLimit::try_from(4).expect("ap clients"))
-    .beacon_interval(BeaconInterval::try_from(100).expect("beacon"))
-    .build();
+    .with_max_clients(ApClientLimit::try_from(4).expect("ap clients"))
+    .with_beacon_interval(BeaconInterval::try_from(100).expect("beacon"));
 
     log_stage(b"ap-configure");
     match driver.set_configuration(&Configuration::AccessPoint(config)) {
@@ -366,35 +258,10 @@ async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtim
     };
     log_station_count(station_count);
 
-    if ap_attach_only_enabled() {
-        let _link = interfaces.access_point;
-        log_line(b"ap-link-ready");
-        loop {
-            Timer::after(Duration::from_secs(60)).await;
+    if wait_for_client_enabled() || wait_before_dhcp_enabled() {
+        if wait_before_dhcp_enabled() {
+            log_line(b"ap-association-ready");
         }
-    }
-
-    if dhcp_enabled() {
-        if let Some(delay_ms) = ap_delay_before_network_ms() {
-            log_line(b"ap-delay-before-net");
-            Timer::after(Duration::from_millis(delay_ms)).await;
-            log_line(b"ap-delay-before-net-done");
-        }
-        log_line(b"ap network starting");
-        let device = AP_DEVICE.init(interfaces.access_point);
-        log_line(b"ap-net-up");
-        log_line(b"ap-start-ok");
-        if ap_network_attach_only_enabled() {
-            let _device = device;
-            log_line(b"ap-net-attach-ready");
-            loop {
-                Timer::after(Duration::from_secs(1)).await;
-            }
-        }
-        run_dhcp_server(device).await;
-    }
-
-    if wait_for_client_enabled() {
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut saw_client = false;
         while Instant::now() < deadline {
@@ -422,14 +289,27 @@ async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtim
             }
         }
 
-        if driver.deauth_all().is_err() {
-            log_line(b"ap deauth err");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
+        if wait_before_dhcp_enabled() {
+            log_line(b"ap-associated-before-dhcp");
         }
-        log_line(b"ap-deauth-ok");
-        log_line(b"ap-station-list-ok");
+        if wait_for_client_enabled() {
+            if driver.deauth_all().is_err() {
+                log_line(b"ap deauth err");
+                loop {
+                    Timer::after(Duration::from_secs(60)).await;
+                }
+            }
+            log_line(b"ap-deauth-ok");
+            log_line(b"ap-station-list-ok");
+        }
+    }
+
+    if dhcp_enabled() {
+        log_line(b"ap network starting");
+        let device = AP_DEVICE.init(interfaces.access_point);
+        log_line(b"ap-net-up");
+        log_line(b"ap-start-ok");
+        run_dhcp_server(device).await;
     }
 
     log_line(b"ap-start-ok");

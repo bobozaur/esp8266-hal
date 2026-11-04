@@ -34,44 +34,17 @@ fn log_peer(peer_addr: &[u8; 6]) {
     esp8266_hal::logger::write_newline();
 }
 
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 fn parse_peer_addr(value: &str) -> Option<[u8; 6]> {
-    let bytes = value.as_bytes();
-    let mut out = [0u8; 6];
-    let mut byte_index = 0;
-    let mut offset = 0;
-
-    while byte_index < out.len() {
-        if offset + 2 > bytes.len() {
+    let mut parts = value.split(':');
+    let mut address = [0; 6];
+    for byte in &mut address {
+        let part = parts.next()?;
+        if part.len() != 2 || !part.bytes().all(|digit| digit.is_ascii_hexdigit()) {
             return None;
         }
-        let high = hex_value(bytes[offset])?;
-        let low = hex_value(bytes[offset + 1])?;
-        out[byte_index] = (high << 4) | low;
-        offset += 2;
-        byte_index += 1;
-
-        if byte_index < out.len() {
-            if bytes.get(offset).copied() != Some(b':') {
-                return None;
-            }
-            offset += 1;
-        }
+        *byte = u8::from_str_radix(part, 16).ok()?;
     }
-
-    if offset == bytes.len() {
-        Some(out)
-    } else {
-        None
-    }
+    parts.next().is_none().then_some(address)
 }
 
 fn encrypted_peer_enabled() -> bool {
@@ -162,7 +135,7 @@ async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtim
             EspNowPeerConfig::unencrypted(peer)
                 .channel(Channel::try_from(6).expect("esp-now channel"))
         };
-        if session.add_station_peer(peer_config.for_station()).is_err() {
+        if session.add_peer(peer_config.for_station()).is_err() {
             log_line(b"esp-now peer err");
             loop {
                 Timer::after(Duration::from_secs(60)).await;

@@ -14,6 +14,10 @@ use core::ffi::c_void;
 use super::critical;
 use super::memory;
 use super::task;
+use super::wait_list::WaitList;
+
+// u8::MAX remains the empty sentinel; every scheduler task ID fits below it.
+const _: () = assert!(task::MAX_TASKS <= u8::MAX as usize);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -29,9 +33,6 @@ const QUEUE_SEND_TO_FRONT: i32 = 1;
 /// `queueOVERWRITE`
 const QUEUE_OVERWRITE: i32 = 2;
 
-/// Maximum number of tasks that can block on a single queue.
-const MAX_WAITERS: usize = 8;
-
 /// Queue type tags (matching FreeRTOS queueQUEUE_TYPE_*).
 const QUEUE_TYPE_BASE: u8 = 0;
 const QUEUE_TYPE_MUTEX: u8 = 1;
@@ -46,97 +47,13 @@ const QUEUE_LOCKED_UNMODIFIED: i8 = 0;
 // Queue data structure
 // ---------------------------------------------------------------------------
 
-/// A waiter entry: task index waiting to send or receive.
-#[derive(Clone, Copy)]
-struct Waiter {
-    task_idx: usize,
-    active: bool,
-}
-
-/// Wait list for tasks blocked on a queue operation.
-struct WaitList {
-    entries: [Waiter; MAX_WAITERS],
-}
-
 impl WaitList {
-    const fn new() -> Self {
-        Self {
-            entries: [Waiter {
-                task_idx: 0,
-                active: false,
-            }; MAX_WAITERS],
-        }
-    }
-
-    /// Add a task to the wait list.
-    #[inline(never)]
-    fn add(&mut self, task_idx: usize) {
-        let mut free_slot = MAX_WAITERS;
-        let mut slot = 0usize;
-
-        while slot < MAX_WAITERS {
-            let entry = &mut self.entries[slot];
-            if entry.active {
-                if entry.task_idx == task_idx {
-                    return;
-                }
-            } else if free_slot == MAX_WAITERS {
-                free_slot = slot;
-            }
-
-            slot += 1;
-        }
-
-        if free_slot < MAX_WAITERS {
-            self.entries[free_slot].task_idx = task_idx;
-            self.entries[free_slot].active = true;
-        }
-        // If full, the waiter is silently dropped (shouldn't happen with MAX_WAITERS=8).
-    }
-
-    /// Remove a task from the wait list.
-    #[inline(never)]
-    fn remove(&mut self, task_idx: usize) {
-        let mut slot = 0usize;
-        while slot < MAX_WAITERS {
-            let entry = &mut self.entries[slot];
-            if entry.active && entry.task_idx == task_idx {
-                entry.active = false;
-                return;
-            }
-            slot += 1;
-        }
-    }
-
-    /// Wake the highest-priority waiting task. Returns true if the woken task
-    /// has higher priority than the current task (needs context switch).
+    /// Wake the selected task after removing its waiter registration.
     #[inline(never)]
     unsafe fn wake_highest_priority(&mut self) -> bool {
         unsafe {
-            let mut best: Option<usize> = None;
-            let mut best_prio: u32 = 0;
-            let mut best_slot: usize = 0;
-            let mut slot = 0usize;
-
-            while slot < MAX_WAITERS {
-                let entry = &mut self.entries[slot];
-                if entry.active {
-                    let prio = task::task_priority(entry.task_idx);
-                    if best.is_none() || prio > best_prio {
-                        best = Some(entry.task_idx);
-                        best_prio = prio;
-                        best_slot = slot;
-                    }
-                }
-                slot += 1;
-            }
-
-            if let Some(task_idx) = best {
-                self.entries[best_slot].active = false;
-                task::wake_task(task_idx)
-            } else {
-                false
-            }
+            self.take_highest_priority(|task_idx| task::task_priority(task_idx))
+                .is_some_and(|task_idx| task::wake_task(task_idx))
         }
     }
 }
@@ -977,7 +894,7 @@ unsafe fn unlock_queue(q: *mut RawQueue) {
                 task::missed_yield();
             }
             tx_lock -= 1;
-            if !has_active_waiter(&q.rx_waiters) {
+            if !q.rx_waiters.has_waiter() {
                 break;
             }
         }
@@ -991,7 +908,7 @@ unsafe fn unlock_queue(q: *mut RawQueue) {
                 task::missed_yield();
             }
             rx_lock -= 1;
-            if !has_active_waiter(&q.tx_waiters) {
+            if !q.tx_waiters.has_waiter() {
                 break;
             }
         }
@@ -1022,17 +939,6 @@ unsafe fn notify_queue_received(q: *mut RawQueue) -> bool {
             false
         }
     }
-}
-
-fn has_active_waiter(list: &WaitList) -> bool {
-    let mut slot = 0usize;
-    while slot < MAX_WAITERS {
-        if list.entries[slot].active {
-            return true;
-        }
-        slot += 1;
-    }
-    false
 }
 
 pub(crate) unsafe fn remove_rx_waiter_for_task(queue: *mut c_void, task_idx: usize) {

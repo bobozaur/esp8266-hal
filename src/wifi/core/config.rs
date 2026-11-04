@@ -861,17 +861,26 @@ pub struct AccessPointConfig {
 
 impl AccessPointConfig {
     pub fn open(ssid: Ssid, channel: Channel) -> Self {
-        Self::builder(ssid, channel).build()
-    }
-
-    pub fn builder(ssid: Ssid, channel: Channel) -> AccessPointConfigBuilder {
-        AccessPointConfigBuilder {
+        Self {
             ssid,
             channel,
             credential: ApCredential::Open,
             max_clients: ApClientLimit::DEFAULT,
             beacon_interval: BeaconInterval::DEFAULT,
         }
+    }
+
+    pub fn with_credential(mut self, credential: ApCredential) -> Self {
+        self.credential = credential;
+        self
+    }
+    pub fn with_max_clients(mut self, max_clients: ApClientLimit) -> Self {
+        self.max_clients = max_clients;
+        self
+    }
+    pub fn with_beacon_interval(mut self, beacon_interval: BeaconInterval) -> Self {
+        self.beacon_interval = beacon_interval;
+        self
     }
 
     pub fn ssid(&self) -> &Ssid {
@@ -892,42 +901,6 @@ impl AccessPointConfig {
 
     pub const fn beacon_interval(&self) -> BeaconInterval {
         self.beacon_interval
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct AccessPointConfigBuilder {
-    ssid: Ssid,
-    channel: Channel,
-    credential: ApCredential,
-    max_clients: ApClientLimit,
-    beacon_interval: BeaconInterval,
-}
-
-impl AccessPointConfigBuilder {
-    pub fn credential(mut self, credential: ApCredential) -> Self {
-        self.credential = credential;
-        self
-    }
-
-    pub fn max_clients(mut self, max_clients: ApClientLimit) -> Self {
-        self.max_clients = max_clients;
-        self
-    }
-
-    pub fn beacon_interval(mut self, beacon_interval: BeaconInterval) -> Self {
-        self.beacon_interval = beacon_interval;
-        self
-    }
-
-    pub fn build(self) -> AccessPointConfig {
-        AccessPointConfig {
-            ssid: self.ssid,
-            channel: self.channel,
-            credential: self.credential,
-            max_clients: self.max_clients,
-            beacon_interval: self.beacon_interval,
-        }
     }
 }
 
@@ -1108,7 +1081,9 @@ impl Default for InitConfig {
     }
 }
 
-/// Queue storage is allocated once by Wifi initialization. Zero disables a queue.
+/// Fixed queue capacities and the ESP-NOW peer limit. Queue storage is allocated
+/// once by Wifi initialization; peers are stored by the native SDK. Zero disables
+/// the corresponding queue or adding peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueConfig {
     pub station_rx: usize,

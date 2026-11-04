@@ -119,7 +119,16 @@ impl EspNowSession<'_> {
         self.sdk.set_esp_now_pmk(pmk)
     }
     pub fn add_peer(&mut self, peer: super::EspNowPeerConfig) -> Result<bool, DriverError> {
-        self.add_peer_inner(&peer)
+        self.ensure_active()?;
+        self.validate_interface(&peer)?;
+        if self.sdk.contains_esp_now_peer(peer.peer_addr()) {
+            return Ok(false);
+        }
+        if self.sdk.esp_now_peer_count()? >= self.resources.esp_now_peer_capacity() {
+            return Err(DriverError::PeerOverflow);
+        }
+        self.sdk.add_esp_now_peer(&peer)?;
+        Ok(true)
     }
     fn validate_interface(&self, peer: &super::EspNowPeerConfig) -> Result<(), DriverError> {
         use super::feature::EspNowInterface;
@@ -133,69 +142,28 @@ impl EspNowSession<'_> {
             Err(DriverError::InvalidState)
         }
     }
-    fn add_peer_inner(&mut self, peer: &super::EspNowPeerConfig) -> Result<bool, DriverError> {
-        self.ensure_active()?;
-        self.validate_interface(peer)?;
-        if self.resources.contains_esp_now_peer(peer.peer_addr()) {
-            return Ok(false);
-        }
-        if self.resources.esp_now_peer_count() == self.resources.esp_now_peer_capacity() {
-            return Err(DriverError::PeerOverflow);
-        }
-        self.sdk.add_esp_now_peer(peer)?;
-        self.resources.register_esp_now_peer(peer.peer_record())
-    }
     pub fn update_peer(&mut self, peer: super::EspNowPeerConfig) -> Result<(), DriverError> {
-        self.update_peer_inner(&peer)
-    }
-    fn update_peer_inner(&mut self, peer: &super::EspNowPeerConfig) -> Result<(), DriverError> {
         self.ensure_active()?;
-        self.validate_interface(peer)?;
-        if !self.resources.contains_esp_now_peer(peer.peer_addr()) {
+        self.validate_interface(&peer)?;
+        if !self.sdk.contains_esp_now_peer(peer.peer_addr()) {
             return Err(DriverError::InvalidState);
         }
-        self.sdk.modify_esp_now_peer(peer)?;
-        self.resources.register_esp_now_peer(peer.peer_record())?;
-        Ok(())
-    }
-    pub fn add_station_peer(
-        &mut self,
-        peer: super::EspNowStationPeerConfig,
-    ) -> Result<bool, DriverError> {
-        self.add_peer_inner(peer.inner())
-    }
-    pub fn update_station_peer(
-        &mut self,
-        peer: super::EspNowStationPeerConfig,
-    ) -> Result<(), DriverError> {
-        self.update_peer_inner(peer.inner())
-    }
-    pub fn add_access_point_peer(
-        &mut self,
-        peer: super::EspNowAccessPointPeerConfig,
-    ) -> Result<bool, DriverError> {
-        self.add_peer_inner(peer.inner())
-    }
-    pub fn update_access_point_peer(
-        &mut self,
-        peer: super::EspNowAccessPointPeerConfig,
-    ) -> Result<(), DriverError> {
-        self.update_peer_inner(peer.inner())
+        self.sdk.modify_esp_now_peer(&peer)
     }
     pub fn remove_peer(&mut self, addr: &[u8; 6]) -> Result<bool, DriverError> {
         self.ensure_active()?;
-        if !self.resources.contains_esp_now_peer(addr) {
+        if !self.sdk.contains_esp_now_peer(addr) {
             return Ok(false);
         }
         self.sdk.remove_esp_now_peer(addr)?;
-        Ok(self.resources.remove_esp_now_peer(addr))
+        Ok(true)
     }
     pub fn send(&mut self, addr: &[u8; 6], payload: &[u8]) -> Result<(), DriverError> {
         self.ensure_active()?;
         if payload.len() > super::ESP_NOW_MAX_PAYLOAD {
             return Err(DriverError::PayloadTooLong);
         }
-        if !self.resources.contains_esp_now_peer(addr) {
+        if !self.sdk.contains_esp_now_peer(addr) {
             return Err(DriverError::InvalidState);
         }
         self.resources.reserve_esp_now_tx()?;
@@ -211,8 +179,10 @@ impl EspNowSession<'_> {
     pub fn send_status(&mut self) -> Option<super::EspNowSendStatus> {
         self.resources.take_esp_now_tx_status()
     }
-    pub fn peer_count(&self) -> usize {
-        self.resources.esp_now_peer_count()
+    /// SDK peer count, including broadcast peers. Inactive sessions return zero;
+    /// active native query failures are returned to the caller.
+    pub fn peer_count(&self) -> Result<usize, DriverError> {
+        self.sdk.esp_now_peer_count()
     }
 }
 #[cfg(feature = "wifi-esp-now")]
@@ -432,6 +402,85 @@ mod tests {
     use super::*;
     #[cfg(feature = "wifi-esp-now")]
     #[test]
+    fn esp_now_native_peers_include_broadcast_preserve_modes_and_propagate_errors() {
+        use super::super::EspNowPeerConfig;
+        let r = Resources::try_new(
+            &QueueConfig {
+                esp_now_peers: 2,
+                ..QueueConfig::default()
+            },
+            test_allocator(),
+        )
+        .unwrap();
+        let mut sdk = Sdk::new(&r);
+        let mut c = Controller {
+            sdk: &mut sdk,
+            resources: &r,
+        };
+        c.enable_station().unwrap();
+        c.start_blocking(1000).unwrap();
+        let mut session = c.esp_now().unwrap();
+        assert_eq!(session.peer_count(), Ok(0));
+        session.start().unwrap();
+        let first = EspNowPeerConfig::unencrypted([2; 6]);
+        assert_eq!(session.add_peer(first), Ok(true));
+        // A native addition outside the public helper must immediately affect
+        // count/capacity/existence; there is no Resources mirror to update.
+        session
+            .sdk
+            .add_esp_now_peer(&EspNowPeerConfig::broadcast())
+            .unwrap();
+        assert_eq!(session.peer_count(), Ok(2));
+        assert_eq!(session.add_peer(EspNowPeerConfig::broadcast()), Ok(false));
+        assert_eq!(
+            session.add_peer(EspNowPeerConfig::unencrypted([4; 6])),
+            Err(DriverError::PeerOverflow)
+        );
+        assert_eq!(
+            session.update_peer(EspNowPeerConfig::encrypted([2; 6], [7; 16])),
+            Ok(())
+        );
+        assert_eq!(
+            session.update_peer(EspNowPeerConfig::unencrypted([4; 6])),
+            Err(DriverError::InvalidState)
+        );
+        assert_eq!(session.remove_peer(&[4; 6]), Ok(false));
+        assert_eq!(
+            session.add_peer(first.for_access_point()),
+            Err(DriverError::InvalidState)
+        );
+        assert_eq!(
+            session.update_peer(first.for_access_point()),
+            Err(DriverError::InvalidState)
+        );
+        session.sdk.fail_next = Some(DriverError::Sdk(9));
+        assert_eq!(session.update_peer(first), Err(DriverError::Sdk(9)));
+        session.sdk.fail_next = Some(DriverError::Sdk(8));
+        assert_eq!(session.remove_peer(&[2; 6]), Err(DriverError::Sdk(8)));
+        assert_eq!(session.peer_count(), Ok(2));
+        assert_eq!(
+            session.remove_peer(&EspNowPeerConfig::BROADCAST_ADDR),
+            Ok(true)
+        );
+        session.sdk.peer_count_error = Some(DriverError::Sdk(7));
+        assert_eq!(session.peer_count(), Err(DriverError::Sdk(7)));
+        assert_eq!(
+            session.add_peer(EspNowPeerConfig::unencrypted([4; 6])),
+            Err(DriverError::Sdk(7))
+        );
+        session.sdk.peer_count_error = None;
+        session.sdk.fail_next = Some(DriverError::Sdk(6));
+        assert_eq!(
+            session.add_peer(EspNowPeerConfig::unencrypted([4; 6])),
+            Err(DriverError::Sdk(6))
+        );
+        assert_eq!(session.peer_count(), Ok(1));
+        session.stop().unwrap();
+        session.sdk.peer_count_error = Some(DriverError::Sdk(5));
+        assert_eq!(session.peer_count(), Ok(0));
+    }
+    #[cfg(feature = "wifi-esp-now")]
+    #[test]
     fn esp_now_capacity_serialization_restart_and_failed_drop_are_owned_by_sdk() {
         let r = Resources::try_new(
             &QueueConfig {
@@ -478,7 +527,7 @@ mod tests {
             );
             session.stop().unwrap();
             session.start().unwrap();
-            assert_eq!(session.peer_count(), 0);
+            assert_eq!(session.peer_count(), Ok(0));
             session.sdk.fail_next = Some(DriverError::Sdk(9));
         }
         assert!(c.sdk.session_claimed);

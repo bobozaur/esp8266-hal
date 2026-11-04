@@ -97,6 +97,10 @@ async controller futures can be polled by another suitable executor. Async
 `#[main]` entry sugar has been removed: Embassy examples use a synchronous entry
 point and explicitly call `Executor::run(runtime, init)`.
 
+The smoltcp adapter selects Ethernet, IPv4 and UDP to satisfy the pinned stack's
+minimum feature requirements. Applications select additional socket protocols
+on their smoltcp dependency. The Embassy adapter does not enable smoltcp in the HAL.
+
 ## Examples and validation
 
 Executable examples live in [`examples`](examples). Start with

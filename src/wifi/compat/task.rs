@@ -21,10 +21,10 @@ use super::memory;
 // ---------------------------------------------------------------------------
 
 /// Maximum number of concurrent tasks. The supported worst case needs the
-/// application, idle, timer daemon, sys_evt, ppTask, ETS timer, lwIP TCP/IP,
-/// SmartConfig, and WPA2 worker tasks. One final slot lets the idle task reap
-/// a just-deleted feature worker before another one starts.
-const MAX_TASKS: usize = 10;
+/// application, idle, timer daemon, sys_evt and ppTask, plus optional ETS timer,
+/// WPA2 and WPS workers. Spare slots allow feature workers awaiting idle cleanup
+/// to coexist with replacements during rapid stop/start cycles.
+pub(super) const MAX_TASKS: usize = 10;
 pub(crate) const PP_TASK_STACK_BYTES: u16 = 2816;
 
 /// Maximum priority levels. Must match `configMAX_PRIORITIES` (15) that the
@@ -114,24 +114,23 @@ struct TaskControlBlock {
 // Global scheduler state
 // ---------------------------------------------------------------------------
 
-/// The task table.
-static mut TASKS: [TaskControlBlock; MAX_TASKS] = {
-    const EMPTY: TaskControlBlock = TaskControlBlock {
-        stack_top: core::ptr::null_mut(),
-        stack_base: core::ptr::null_mut(),
-        stack_size: 0,
-        priority: 0,
-        base_priority: 0,
-        state: TaskState::Free,
-        delay_until: 0,
-        name: [0; 16],
-        tls: [core::ptr::null_mut(); TLS_SLOTS],
-        mutex_held_count: 0,
-        entry: None,
-        param: core::ptr::null_mut(),
-    };
-    [EMPTY; MAX_TASKS]
+const EMPTY: TaskControlBlock = TaskControlBlock {
+    stack_top: core::ptr::null_mut(),
+    stack_base: core::ptr::null_mut(),
+    stack_size: 0,
+    priority: 0,
+    base_priority: 0,
+    state: TaskState::Free,
+    delay_until: 0,
+    name: [0; 16],
+    tls: [core::ptr::null_mut(); TLS_SLOTS],
+    mutex_held_count: 0,
+    entry: None,
+    param: core::ptr::null_mut(),
 };
+
+/// The task table.
+static mut TASKS: [TaskControlBlock; MAX_TASKS] = [EMPTY; MAX_TASKS];
 
 /// SDK-style task frames live on each task's own stack.
 ///
@@ -1568,22 +1567,11 @@ unsafe fn destroy_task_slot(idx: usize) {
             return;
         }
 
-        if !TASKS[idx].stack_base.is_null() {
-            memory::free(TASKS[idx].stack_base as *mut c_void);
-        }
-
-        TASKS[idx].stack_top = core::ptr::null_mut();
-        TASKS[idx].stack_base = core::ptr::null_mut();
-        TASKS[idx].stack_size = 0;
-        TASKS[idx].priority = 0;
-        TASKS[idx].base_priority = 0;
-        TASKS[idx].state = TaskState::Free;
-        TASKS[idx].delay_until = 0;
-        TASKS[idx].name = [0; 16];
-        TASKS[idx].tls = [core::ptr::null_mut(); TLS_SLOTS];
-        TASKS[idx].mutex_held_count = 0;
-        TASKS[idx].entry = None;
-        TASKS[idx].param = core::ptr::null_mut();
+        // Idle cleanup has no outer exclusion. Detach the old allocation and
+        // reset every slot field before another task can reuse the Free slot.
+        critical::vPortEnterCritical();
+        let stack_base = TASKS[idx].stack_base;
+        TASKS[idx] = EMPTY;
         TASK_EVENT_WAIT_BITS[idx] = 0;
         TASK_EVENT_WAIT_MATCHED[idx] = false;
         TASK_WAIT_KIND[idx] = WaitObjectKind::None;
@@ -1591,6 +1579,13 @@ unsafe fn destroy_task_slot(idx: usize) {
         PENDING_READY[idx] = false;
         TASK_IS_IDLE[idx] = false;
         STACK_CANARY_REPORTED[idx] = false;
+        critical::vPortExitCritical();
+
+        // The slot may already belong to a new task here. Touch only the
+        // detached allocation; caller-owned main stacks are represented by null.
+        if !stack_base.is_null() {
+            memory::free(stack_base.cast());
+        }
     }
 }
 

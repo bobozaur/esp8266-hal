@@ -16,7 +16,6 @@ the pinned Xtensa GCC linker driver required by the ESP8266 Rust target.
 - C toolchain: `xtensa-lx106-elf-gcc 8.4.0`, crosstool-NG
   `esp-2020r3-49-gd5524c1`
 - Wi-Fi bindings generator: `rust-bindgen 0.70.1`
-- lwIP bindings generator: `rust-bindgen 0.72.1`
 
 The derived archives are built out of band from the pinned SDK/toolchain with all
 Wi-Fi features enabled, then normalized with deterministic archive headers:
@@ -29,8 +28,8 @@ libmbedtls_all.a
 
 `libesp8266_sdk.a` contains the SDK event, lwIP, VFS, flash, and support objects
 still selected by the native Wi-Fi libraries. The former C AP netif bridge and
-generic SDK stub object are intentionally absent; their live behavior is now
-implemented in Rust under `src/wifi`.
+generic SDK stub object are intentionally absent. AP and station frames use
+the Rust receive/transmit paths directly, without an AP lwIP netif lifecycle.
 
 The SDK Xtensa vector/context objects and the former local NMI assembly are not
 vendored. Their required interrupt, context, and NMI sequences now live next to
@@ -54,6 +53,14 @@ TLS and EAP handshake allocations use the application-provided allocator;
 temporary input and output buffers are released and restored around
 cryptographic work to reduce peak memory use.
 
+WPS owns partial initialization and normal teardown through the same cleanup
+path. Its worker queue stores events by value, and completed credentials are
+applied once from a checked stack-local configuration before success is
+published. Temporary probe/association IEs are submitted directly to the SDK's
+copying setter rather than copied through another buffer.
+Incoming WPS fragments have one attempt-owned buffer with checked message and
+append lengths; terminal events release it and quiesce pending transaction work.
+
 The closed ESP8266 archives and linker scripts are byte-for-byte copies from
 the pinned SDK's `components/esp8266/{lib,ld}` directories. `libc.a` and
 `libm.a` are the newlib archives from the toolchain above. No libgcc archive is
@@ -61,7 +68,7 @@ redistributed; the one C ABI helper not supplied by Rust compiler builtins is a
 small Rust implementation. SmartConfig and ESP-NOW archives are linked only
 for their corresponding Cargo features.
 
-`src/bindings.rs` and `src/lwip.rs` are checked-in generated ABI declarations.
+`src/bindings.rs` contains checked-in generated Wi-Fi ABI declarations.
 Manual packed/bitfield types live in `src/lib.rs`, where their layouts can be
 reviewed and tested explicitly.
 
@@ -115,7 +122,8 @@ The build script finishes the three archives before Cargo compiles the tiny
 sys-crate library, so a later target-core diagnostic does not invalidate the
 archive output. Verify the twelve canonical generated inputs byte for byte, then
 remove the obsolete `ap_netif_bridge` and generated `sdk_stubs` members from
-`libesp8266_sdk.a`; those symbols are now provided by Rust. Copy the three
+`libesp8266_sdk.a`. AP no longer needs the bridge's netif symbols; the required
+SDK runtime stubs are provided by Rust. Copy the three
 derived archives into `libs/`, run `./normalize-archives.sh`, and regenerate
 `SHA256SUMS`. The upstream closed archives, newlib archives, linker scripts,
 and generated bindings are direct copies from the pinned inputs described

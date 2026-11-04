@@ -138,8 +138,11 @@ fn main() -> ! {
         Ssid::try_from(EAP_SSID).expect("eap ssid"),
         StationCredential::enterprise(&credentials),
     );
-    if let Some(channel) =
-        parse_u8_literal(EAP_CHANNEL).and_then(|channel| Channel::try_from(channel).ok())
+    if let Some(channel) = EAP_CHANNEL
+        .trim_ascii()
+        .parse::<u8>()
+        .ok()
+        .and_then(|channel| Channel::try_from(channel).ok())
     {
         config = config.with_channel(channel);
     }
@@ -192,17 +195,6 @@ fn log_driver_error(
     esp8266_hal::logger::write_dec_u32(driver.last_disconnect_reason().unwrap_or(0) as u32);
     esp8266_hal::logger::write_newline();
     log_line(message);
-}
-
-fn parse_u8_literal(value: &str) -> Option<u8> {
-    let mut result = 0u8;
-    for byte in value.trim_ascii().bytes() {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        result = result.checked_mul(10)?.checked_add(byte - b'0')?;
-    }
-    Some(result)
 }
 
 fn optional_nul_terminated_bytes(

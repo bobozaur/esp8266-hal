@@ -53,8 +53,8 @@ jobs:
           cargo package -p esp8266-hal --list
       - name: Test the hardware harness
         run: cargo test -p xtask --target x86_64-unknown-linux-gnu
-      - name: Check proc macros without WiFi
-        run: cargo check -p esp8266-hal-proc-macros --target x86_64-unknown-linux-gnu --no-default-features
+      - name: Test proc macros without WiFi
+        run: cargo test -p esp8266-hal-proc-macros --target x86_64-unknown-linux-gnu --no-default-features
       - name: Check async proc-macro diagnostic without WiFi
         run: |
           if cargo check --target x86_64-unknown-linux-gnu --manifest-path tests/fixtures/async-main-no-wifi/Cargo.toml >macro-check.log 2>&1; then
@@ -102,10 +102,10 @@ jobs:
             features: wifi-embassy-net
           - name: access-point
             example: wifi_ap
-            features: wifi-smoltcp,embassy
+            features: embassy
           - name: mixed-mode
             example: wifi_ap_sta
-            features: wifi-embassy-net,wifi-smoltcp
+            features: wifi-embassy-net
           - name: wps
             example: wifi_wps
             features: wifi-wps,embassy
@@ -178,5 +178,7 @@ jobs:
           sed -i "s|path = \"../../..\"|path = \"$GITHUB_WORKSPACE\"|" "$consumer/Cargo.toml"
           cd "$consumer"
           rustup run esp-1.80.0 cargo generate-lockfile
-          rustup run esp-1.80.0 cargo build --locked --release -Zbuild-std=core,alloc
-          xtensa-lx106-elf-size target/xtensa-esp8266-none-elf/release/downstream-wifi-link
+          for features in "" wifi-smoltcp wifi-embassy-net wifi-smoltcp,wifi-embassy-net; do
+            rustup run esp-1.80.0 cargo build --locked --release -Zbuild-std=core,alloc --features "$features"
+            xtensa-lx106-elf-size target/xtensa-esp8266-none-elf/release/downstream-wifi-link
+          done

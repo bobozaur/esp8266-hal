@@ -28,9 +28,6 @@
 mod bindings;
 pub use bindings::*;
 
-/// The narrow lwIP ABI used to register the soft-AP interface.
-pub mod lwip;
-
 // ---------------------------------------------------------------------------
 // Manual constants that bindgen may not emit (they originate from #define
 // macros, not C declarations).

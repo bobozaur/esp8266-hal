@@ -1,4 +1,5 @@
 //! Concrete SDK double for exercising production control/session logic on host.
+extern crate std;
 use super::{resources::Resources, *};
 pub(crate) struct Sdk {
     resources: *const Resources,
@@ -10,6 +11,10 @@ pub(crate) struct Sdk {
     pub(crate) now: u64,
     #[cfg(feature = "wifi-esp-now")]
     pub(crate) esp_now_initialized: bool,
+    #[cfg(feature = "wifi-esp-now")]
+    esp_now_peers: std::vec::Vec<EspNowPeerConfig>,
+    #[cfg(feature = "wifi-esp-now")]
+    pub(crate) peer_count_error: Option<DriverError>,
     #[cfg(feature = "wifi-promiscuous")]
     pub(crate) promiscuous_enabled: bool,
     #[cfg(feature = "wifi-wps")]
@@ -29,6 +34,10 @@ impl Sdk {
             now: 0,
             #[cfg(feature = "wifi-esp-now")]
             esp_now_initialized: false,
+            #[cfg(feature = "wifi-esp-now")]
+            esp_now_peers: std::vec::Vec::new(),
+            #[cfg(feature = "wifi-esp-now")]
+            peer_count_error: None,
             #[cfg(feature = "wifi-promiscuous")]
             promiscuous_enabled: false,
             #[cfg(feature = "wifi-wps")]
@@ -135,12 +144,14 @@ impl Sdk {
     #[cfg(feature = "wifi-esp-now")]
     pub(crate) fn enable_esp_now(&mut self) -> Result<(), DriverError> {
         self.command()?;
+        self.esp_now_peers.clear();
         self.esp_now_initialized = true;
         Ok(())
     }
     #[cfg(feature = "wifi-esp-now")]
     pub(crate) fn disable_esp_now(&mut self) -> Result<(), DriverError> {
         self.command()?;
+        self.esp_now_peers.clear();
         self.esp_now_initialized = false;
         Ok(())
     }
@@ -149,16 +160,47 @@ impl Sdk {
         self.command()
     }
     #[cfg(feature = "wifi-esp-now")]
-    pub(crate) fn add_esp_now_peer(&mut self, _: &EspNowPeerConfig) -> Result<(), DriverError> {
-        self.command()
+    pub(crate) fn contains_esp_now_peer(&self, addr: &[u8; 6]) -> bool {
+        self.esp_now_initialized
+            && self
+                .esp_now_peers
+                .iter()
+                .any(|peer| peer.peer_addr() == addr)
     }
     #[cfg(feature = "wifi-esp-now")]
-    pub(crate) fn modify_esp_now_peer(&mut self, _: &EspNowPeerConfig) -> Result<(), DriverError> {
-        self.command()
+    pub(crate) fn esp_now_peer_count(&self) -> Result<usize, DriverError> {
+        if !self.esp_now_initialized {
+            return Ok(0);
+        }
+        self.peer_count_error
+            .clone()
+            .map_or(Ok(self.esp_now_peers.len()), Err)
     }
     #[cfg(feature = "wifi-esp-now")]
-    pub(crate) fn remove_esp_now_peer(&mut self, _: &[u8; 6]) -> Result<(), DriverError> {
-        self.command()
+    pub(crate) fn add_esp_now_peer(&mut self, peer: &EspNowPeerConfig) -> Result<(), DriverError> {
+        self.command()?;
+        self.esp_now_peers.push(*peer);
+        Ok(())
+    }
+    #[cfg(feature = "wifi-esp-now")]
+    pub(crate) fn modify_esp_now_peer(
+        &mut self,
+        peer: &EspNowPeerConfig,
+    ) -> Result<(), DriverError> {
+        self.command()?;
+        let existing = self
+            .esp_now_peers
+            .iter_mut()
+            .find(|p| p.peer_addr() == peer.peer_addr())
+            .ok_or(DriverError::InvalidState)?;
+        *existing = *peer;
+        Ok(())
+    }
+    #[cfg(feature = "wifi-esp-now")]
+    pub(crate) fn remove_esp_now_peer(&mut self, addr: &[u8; 6]) -> Result<(), DriverError> {
+        self.command()?;
+        self.esp_now_peers.retain(|p| p.peer_addr() != addr);
+        Ok(())
     }
     #[cfg(feature = "wifi-esp-now")]
     pub(crate) fn send_esp_now(&mut self, _: &[u8; 6], _: &[u8]) -> Result<(), DriverError> {

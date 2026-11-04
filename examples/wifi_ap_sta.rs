@@ -15,18 +15,13 @@ use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverStateWithMtu};
 mod support;
 use esp8266_hal::timer::TimerExt;
 use support::dhcp::{DhcpMessageType, DhcpReply, DhcpServer, DhcpServerConfig};
+use support::dhcp_wire::{self, REPLY_HEADERS};
 use support::log_line;
 
 use esp8266_hal::wifi::{
-    AccessPointConfig, ApClientLimit, ApCredential, BeaconInterval, Channel, ClientConfig,
-    Configuration, Controller, DriverError, InitConfig, Ipv4Addr, MixedConfig, Passphrase, Ssid,
+    AccessPointConfig, ApClientLimit, BeaconInterval, Channel, ClientConfig, Configuration,
+    Controller, DriverError, InitConfig, Ipv4Addr, MixedConfig, Passphrase, Ssid,
     StationCredential, Wifi,
-};
-use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::wire::{
-    EthernetAddress, EthernetFrame, EthernetProtocol, IpAddress, IpProtocol,
-    Ipv4Address as SmoltcpIpv4Address, Ipv4Packet, Ipv4Repr, UdpPacket, UdpRepr,
-    ETHERNET_HEADER_LEN, IPV4_HEADER_LEN, UDP_HEADER_LEN,
 };
 use static_cell::StaticCell;
 use xtensa_lx_rt::exception::{Context, ExceptionCause};
@@ -48,9 +43,7 @@ const AP_NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 // Keep this DHCP-only demo at 672 to bound channel and application frame storage.
 const NET_MTU: usize = 672;
 const DHCP_PACKET_BYTES: usize = 576;
-const DHCP_REPLY_FRAME_BYTES: usize =
-    ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN + DHCP_PACKET_BYTES;
-const DHCP_REPLY_HEADERS: usize = ETHERNET_HEADER_LEN + IPV4_HEADER_LEN + UDP_HEADER_LEN;
+const DHCP_REPLY_FRAME_BYTES: usize = REPLY_HEADERS + DHCP_PACKET_BYTES;
 const NET_RX_PACKETS: usize = 1;
 const NET_TX_PACKETS: usize = 1;
 
@@ -112,12 +105,9 @@ fn init_wifi(
         sta_config = sta_config.with_channel(channel);
     }
     let ap_channel = wifi_channel.unwrap_or(Channel::try_from(6).expect("initial AP channel"));
-    let ap_config =
-        AccessPointConfig::builder(Ssid::try_from(AP_SSID).expect("ap ssid"), ap_channel)
-            .credential(ApCredential::Open)
-            .max_clients(ApClientLimit::try_from(4).expect("ap clients"))
-            .beacon_interval(BeaconInterval::try_from(100).expect("beacon"))
-            .build();
+    let ap_config = AccessPointConfig::open(Ssid::try_from(AP_SSID).expect("ap ssid"), ap_channel)
+        .with_max_clients(ApClientLimit::try_from(4).expect("ap clients"))
+        .with_beacon_interval(BeaconInterval::try_from(100).expect("beacon"));
 
     driver
         .set_configuration(&Configuration::Mixed(MixedConfig::new(
@@ -164,7 +154,7 @@ fn start_network(
 async fn run_networks(stack: embassy_net::Stack<'static>, device: &'static mut ApNetDevice) -> ! {
     let rx_frame = AP_RX_FRAME.init([0; NET_MTU]);
     let reply_frame = DHCP_REPLY_FRAME.init([0; DHCP_REPLY_FRAME_BYTES]);
-    let ap_mac = EthernetAddress(device.mac_address());
+    let ap_mac = device.mac_address();
     let config = DhcpServerConfig::new(AP_IP, AP_NETMASK, AP_LEASE_START, 4)
         .expect("dhcp config")
         .router(AP_IP)
@@ -193,11 +183,11 @@ async fn run_networks(stack: embassy_net::Stack<'static>, device: &'static mut A
                     continue;
                 }
             };
-            if let Some(packet) = dhcp_payload(&rx_frame[..frame_len]) {
+            if let Some(packet) = dhcp_wire::payload(&rx_frame[..frame_len]) {
                 match server.handle(
                     Instant::now().as_secs(),
                     packet,
-                    &mut reply_frame[DHCP_REPLY_HEADERS..],
+                    &mut reply_frame[REPLY_HEADERS..],
                 ) {
                     Ok(result) => reply = result,
                     Err(_error) => log_line(b"ap_sta err dhcp-parse"),
@@ -254,75 +244,13 @@ async fn run_networks(stack: embassy_net::Stack<'static>, device: &'static mut A
     }
 }
 
-fn dhcp_payload(frame: &[u8]) -> Option<&[u8]> {
-    let ethernet = EthernetFrame::new_checked(frame).ok()?;
-    if ethernet.ethertype() != EthernetProtocol::Ipv4 {
-        return None;
-    }
-
-    let ipv4 = Ipv4Packet::new_checked(ethernet.payload()).ok()?;
-    if ipv4.next_header() != IpProtocol::Udp {
-        return None;
-    }
-
-    let udp = UdpPacket::new_checked(ipv4.payload()).ok()?;
-    if udp.src_port() == 68 && udp.dst_port() == 67 {
-        Some(udp.payload())
-    } else {
-        None
-    }
-}
-
 async fn transmit_dhcp_reply(
     device: &mut ApNetDevice,
     frame: &mut [u8],
-    ap_mac: EthernetAddress,
+    ap_mac: [u8; 6],
     reply: DhcpReply,
 ) -> Result<(), DriverError> {
-    let src_ip = SmoltcpIpv4Address::from(AP_IP.octets());
-    let payload_len = reply.len();
-    let broadcast = reply.broadcast() || reply.leased_ip() == Ipv4Addr::UNSPECIFIED;
-    let dst_ip = if broadcast {
-        SmoltcpIpv4Address::BROADCAST
-    } else {
-        SmoltcpIpv4Address::from(reply.leased_ip().octets())
-    };
-    let src_ip_addr = IpAddress::Ipv4(src_ip);
-    let dst_ip_addr = IpAddress::Ipv4(dst_ip);
-    let checksum_caps = ChecksumCapabilities::default();
-    let frame_len = DHCP_REPLY_HEADERS + payload_len;
-
-    let mut ethernet = EthernetFrame::new_unchecked(&mut frame[..frame_len]);
-    ethernet.set_dst_addr(if broadcast {
-        EthernetAddress::BROADCAST
-    } else {
-        EthernetAddress(reply.client_mac())
-    });
-    ethernet.set_src_addr(ap_mac);
-    ethernet.set_ethertype(EthernetProtocol::Ipv4);
-
-    let mut ipv4 = Ipv4Packet::new_unchecked(ethernet.payload_mut());
-    Ipv4Repr {
-        src_addr: src_ip,
-        dst_addr: dst_ip,
-        next_header: IpProtocol::Udp,
-        payload_len: UDP_HEADER_LEN + payload_len,
-        hop_limit: 64,
-    }
-    .emit(&mut ipv4, &checksum_caps);
-
-    UdpRepr {
-        src_port: 67,
-        dst_port: 68,
-    }
-    .emit(
-        &mut UdpPacket::new_unchecked(ipv4.payload_mut()),
-        &src_ip_addr,
-        &dst_ip_addr,
-        payload_len,
-        |_| {},
-        &checksum_caps,
-    );
+    let frame_len = dhcp_wire::emit_reply(frame, AP_IP, ap_mac, reply);
 
     // Both interfaces share SDK packet storage. Keep this reply while yielding
     // to the station stack, but bound how long a busy radio can delay the AP.

@@ -520,6 +520,49 @@ mod tests {
         assert!(c.begin_scan(&ScanOptions::all()).is_ok());
     }
     #[test]
+    fn changing_ssid_after_disconnect_cannot_deliver_old_queued_rx() {
+        use super::super::{packet::RawRxRecord, resources::InterfaceId};
+        static OLD: [u8; 64] = [0x11; 64];
+        static NEW: [u8; 64] = [0x22; 64];
+        let r = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&r);
+        let mut c = Controller {
+            sdk: &mut sdk,
+            resources: &r,
+        };
+        c.set_configuration(&station()).unwrap();
+        c.start_blocking(1000).unwrap();
+        r.publish_event(WifiEvent::StaConnected).unwrap();
+        // SAFETY: immutable static backing needs no release hook in this test.
+        let record = |bytes: &'static [u8; 64]| unsafe {
+            RawRxRecord::from_raw(
+                bytes.as_ptr().cast_mut().cast(),
+                64,
+                core::ptr::null_mut(),
+                None,
+            )
+        };
+        r.enqueue_rx(InterfaceId::Station, record(&OLD)).unwrap();
+        let held = r.take_rx(InterfaceId::Station).unwrap();
+        r.enqueue_rx(InterfaceId::Station, record(&OLD)).unwrap();
+        r.publish_event(WifiEvent::StaDisconnected { reason: Some(8) })
+            .unwrap();
+        assert_eq!(held.as_slice(), OLD);
+        assert_eq!(c.stop(), Err(DriverError::Busy));
+        drop(held);
+        c.stop().unwrap();
+        let replacement = Configuration::Station(ClientConfig::new(
+            Ssid::try_from("replacement-ssid").unwrap(),
+            StationCredential::open(),
+        ));
+        c.set_configuration(&replacement).unwrap();
+        c.start_blocking(1000).unwrap();
+        r.publish_event(WifiEvent::StaConnected).unwrap();
+        assert!(r.take_rx(InterfaceId::Station).is_none());
+        r.enqueue_rx(InterfaceId::Station, record(&NEW)).unwrap();
+        assert_eq!(r.take_rx(InterfaceId::Station).unwrap().as_slice(), NEW);
+    }
+    #[test]
     fn connect_waiter_reports_failure_and_drop_does_not_abort_attempt() {
         let r = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
         let mut sdk = Sdk::new(&r);

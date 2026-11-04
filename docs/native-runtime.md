@@ -48,6 +48,26 @@ Queued packets drain before native teardown, and checked-out packets make radio
 stop return `Busy`. Holding packets longer consumes native RX capacity, so
 applications should release them promptly.
 
+Admission, both RX rings and lease counts share one state lock. Packet admission
+and checkout need one CPU/NMI exclusion each. Disconnect and stopped events close
+admission, release queued frames outside the lock, then notify consumers. The
+native event loop serializes these events, so a following connection event cannot
+reopen admission during the drain.
+
+The common native TX copy reserves at least 60 payload bytes and initializes the
+unused tail, while retaining the caller's logical frame length. The pinned
+`ieee80211_output_pbuf` reads fixed IP-field offsets even for shorter Ethernet
+frames, including valid 18-byte EAPOL-Start packets. Both heap and reused fallback
+storage therefore need initialized lookahead; inputs below the 14-byte Ethernet
+header are rejected.
+
+AP RX and TX use direct radio callbacks and descriptors. The private lwIP netif
+and its persistent TCP/IP task are removed: no radio or protocol archive consumes
+that interface, and its output callback only discarded packets. Application IP
+addressing remains entirely within the selected network stack. Two-board AP and
+mixed DHCP, retained-packet pressure, peer rejoin and stop/restart validate this
+path; the refactor plan records the qualification scope.
+
 The native `ieee80211_output_pbuf` returns descriptor exhaustion as byte-valued
 `ERR_MEM` (positive 255), while the Rust static-TX-buffer fallback returns signed
 `-1`. Both map to `WouldBlock`, preserving an adapter's pending frame for retry.
@@ -58,6 +78,22 @@ descriptor recycling, and shared management/AP traffic can consume capacity
 without an application completion event. A completion-only wakeup would therefore
 be insufficient. The existing timer avoids introducing extra notification state
 while still guaranteeing another attempt.
+
+Native queue headers use bounded byte-sized task IDs for their waiters: 56 bytes
+instead of 168 on Xtensa, preserving priority and equal-priority slot selection.
+Task deletion detaches the old stack and resets the complete slot under scheduler
+exclusion before making it reusable; freeing the detached stack touches no slot
+metadata. The ordinary FreeRTOS timer daemon remains necessary for WPA PMKSA
+expiration. SmartConfig's ETS worker also remains; removing it lacks sufficient
+timing and protocol evidence.
+
+WPS uses one cleanup path for partial initialization and normal teardown. Its
+worker queue stores events by value, credentials are applied once from checked
+stack storage, and failed configuration cannot report success. Receive fragments
+have explicit session ownership and checked bounds. Every terminal failure or
+timeout disarms timers and discards partial input before a later attempt. Scan
+parsing borrows the received IE and checks its parser allocation; the 500-byte
+parser state stays off the small radio-task stack.
 
 ## NMI entry and return
 
@@ -155,7 +191,9 @@ fit these ceilings.
 
 SmartConfig uses the hardware NMI path. Its example keeps the provisioning
 session alive through DHCP and ESPTouch acknowledgement, then explicitly stops it.
-Networking after stop is tested separately with a fresh DHCP exchange.
+Networking after stop is tested separately with a fresh DHCP exchange. Earlier
+campaigns passed that check; the latest simplification campaign did not reach it
+because its post-stop fixtures failed to decode provisioning credentials.
 
 Promiscuous reception still polls the native FIQ handler from the timer path.
 That handler masks the NMI-enable register and relies on its hardware interrupt
@@ -170,7 +208,6 @@ removing promiscuous polling remains unqualified.
 | --- | --- | --- |
 | Scheduler, interrupt and newlib adapters | Native tasks require preemption, blocking primitives, context layout and newlib state. | Task/timer progress, peripheral interrupt coexistence and startup allocation failures. |
 | Allocation and volatile NVS adapters | C allocation requires layout recovery and free-DRAM statistics. Volatile storage preserves PHY calibration across radio restarts. | Exhaustion/rollback, shared allocator behavior and repeated initialization. |
-| AP lwIP bridge | The native AP path requires a netif and TCP/IP thread; application IP/DHCP policy remains outside the driver. | AP-client RX/TX and mixed traffic through the selected stack. |
 | PHY, cache and system adapters | Calibration, clocks, MAC addresses and cache-off execution are chip-specific ABI requirements. | Cold/repeated initialization, cache-off call paths and flash/radio coexistence. |
 | Narrow SDK service stubs | Linked native objects reference selected IDF services that are absent from the application stack. | Audit the actual consumers and validate the affected feature before removal. |
 | Historical AES, WPS and enterprise patches | The snapshot includes aligned AES tables, provisioning fixes and TLS certificate/buffer lifetime adaptations. | Encrypted ESP-NOW, WPS PBC/PIN and enterprise authentication with appropriate peers and allocation pressure. |
@@ -183,7 +220,7 @@ authentication fixture leaves that behavior unverified.
 
 The optional `wifi` feature remains necessary: `allocator-api2` enables the
 upstream `alloc` dependency, which requires an application Rust global allocator
-even when Wi-Fi is unused. The current representative dormant-Wi-Fi build adds
+even when Wi-Fi is unused. The committed refactor's representative dormant-Wi-Fi build adds
 7,435 bytes of BSS over the bare example. Global registration does not initialize
 the heap or runtime.
 `Runtime::init` still receives an explicit permanent `WifiAllocator`; applications
@@ -226,7 +263,7 @@ fixtures used for authentication; different credentials change these figures. Th
 cleanly with `OutOfMemory`; it is an exhaustion check, not an operational memory
 configuration.
 
-The packet optimization follow-up changes representative images as follows,
+The packet optimization commit (`51d8b41`) changed representative images as follows,
 with the same feature selections and toolchain:
 
 | Image | IROM change | Static DRAM change | Heap-region change |
@@ -246,7 +283,7 @@ depend on application consumption; these measurements do not establish a
 throughput improvement. SmartConfig keeps its caller-owned TX buffer on the
 existing application stack and introduces no heap allocation.
 
-The follow-up passes AP/mixed DHCP, retained-packet pressure and peer reconnect,
+That commit passed AP/mixed DHCP, retained-packet pressure and peer reconnect,
 20 TCP echo connections, separate-host TCP and direct smoltcp DHCP plus five exact
 UDP payloads, plain/encrypted ESP-NOW, 32 management-frame captures and 100
 create/scan/stop/drop cycles per board. A SmartConfig retry passes provisioning,
@@ -257,7 +294,30 @@ The committed-baseline comparison failed association after decoding credentials.
 These results confirm working provisioning and post-stop networking paths;
 first-attempt reliability and the cause of intermittent failures remain unresolved.
 
-Final two-board stress completed 100 create/start/scan/stop/drop cycles on
+The further simplification batch, compared with `51d8b41` using the pinned
+toolchain and each example's required features, changes linked sections as follows
+(all values are bytes):
+
+| Image | IROM change | Static DRAM change | Heap-region change |
+| --- | ---: | ---: | ---: |
+| AP-only | −33,312 | −1,849 | +1,864 |
+| AP + station | −31,440 | −2,085 | +2,096 |
+| TCP server | −32,456 | −2,297 | +2,304 |
+| WPS | −33,264 | −2,257 | +2,256 |
+
+IROM includes flash-mapped code and data; these are linked section measurements,
+not throughput results. The removal also benefits station-only images because
+the shared controller previously retained the AP bridge's dependencies.
+
+On the same board, a matching standalone AP fixture with no clients has 28,192
+bytes of free heap after startup, versus 22,336 at `51d8b41`: a 5,856-byte gain.
+Its AP-start allocation falls from 4,024 to 1,208 bytes. These include runtime
+allocation effects and must not be added to the section table. The current
+fixture completes 256 self-deleting tasks across two producers with no net heap
+loss after cleanup; this exercises reuse without claiming deterministic
+reproduction of the former race.
+
+The baseline refactor's final two-board stress completed 100 create/start/scan/stop/drop cycles on
 each board and rejected changed native buffer counts. Integrated checks cover
 AP-only and mixed upstream/downstream DHCP, plain and encrypted ESP-NOW,
 promiscuous capture, a separate LAN-host TCP exchange, and 20 byte-exact TCP echo
@@ -274,9 +334,12 @@ and the working AP/client pair left on the boards.
 Association attempts can report RF failures; examples and the lifecycle fixture
 use explicit bounded application retry policies. These checks do not establish
 first-attempt association reliability, arbitrary callback/interrupt stack depth,
-or independently mapped flash-cache coherence. WPS PBC/PIN and SmartConfig
-provisioning, DHCP and acknowledgement pass against an external fixture.
-PEAP/MSCHAPv2 authentication and rejection of an incorrect password pass against
-an external fixture. Compact P-256 client-certificate EAP-TLS also passes,
-including the four-way handshake;
-these results do not qualify arbitrary certificate chains or RSA profiles.
+or independently mapped flash-cache coherence. Those earlier campaigns passed
+WPS PBC/PIN, SmartConfig provisioning with DHCP and acknowledgement,
+PEAP/MSCHAPv2 with incorrect-password rejection, and compact P-256
+client-certificate EAP-TLS with the four-way handshake. These historical results
+do not qualify arbitrary certificate chains or RSA profiles. The latest
+simplification campaign has not requalified WPS or enterprise authentication:
+the external fixture failed association, including with an earlier WPS image.
+The [current review results](../plan.md#further-simplification-review) distinguish
+refreshed hardware coverage from these earlier results.

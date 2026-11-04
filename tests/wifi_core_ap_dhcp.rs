@@ -1,6 +1,8 @@
 #[path = "../examples/support/dhcp.rs"]
 #[allow(dead_code)] // Other application helpers are outside these protocol tests.
 mod dhcp;
+#[path = "../examples/support/dhcp_wire.rs"]
+mod dhcp_wire;
 use core::net::Ipv4Addr;
 use dhcp::{DhcpMessageType, DhcpServer, DhcpServerConfig, DhcpServerError};
 const DHCP_MIN_LEN: usize = 240;
@@ -343,4 +345,169 @@ fn dhcp_release_frees_lease_immediately() {
 
     let reply = server.handle(2, &second, &mut response).unwrap().unwrap();
     assert_eq!(reply.leased_ip(), Ipv4Addr::new(192, 168, 4, 2));
+}
+
+fn request_frame(payload: &[u8]) -> Vec<u8> {
+    let ip_len = 20 + 8 + payload.len();
+    let mut frame = vec![0; 14 + ip_len];
+    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+    frame[14] = 0x45;
+    frame[16..18].copy_from_slice(&(ip_len as u16).to_be_bytes());
+    frame[23] = 17;
+    frame[34..36].copy_from_slice(&68u16.to_be_bytes());
+    frame[36..38].copy_from_slice(&67u16.to_be_bytes());
+    frame[38..40].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    frame[42..].copy_from_slice(payload);
+    fill_ipv4_checksum(&mut frame);
+    frame
+}
+
+fn fill_ipv4_checksum(frame: &mut [u8]) {
+    smoltcp::wire::Ipv4Packet::new_unchecked(&mut frame[14..]).fill_checksum();
+}
+
+#[test]
+fn dhcp_frame_parser_respects_packet_lengths_and_ports() {
+    let request = request_packet(1, None, None);
+    let mut frame = request_frame(&request);
+    frame.extend_from_slice(&[0xa5; 32]);
+    assert_eq!(dhcp_wire::payload(&frame), Some(request.as_slice()));
+    for length in 0..42 + request.len() {
+        assert!(dhcp_wire::payload(&frame[..length]).is_none());
+    }
+    let mut malformed = frame.clone();
+    malformed[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+    assert!(dhcp_wire::payload(&malformed).is_none());
+    malformed = frame.clone();
+    malformed[23] = 6;
+    fill_ipv4_checksum(&mut malformed);
+    assert!(dhcp_wire::payload(&malformed).is_none());
+    malformed = frame.clone();
+    malformed[36..38].copy_from_slice(&68u16.to_be_bytes());
+    assert!(dhcp_wire::payload(&malformed).is_none());
+    malformed = frame.clone();
+    malformed[38..40].copy_from_slice(&7u16.to_be_bytes());
+    assert!(dhcp_wire::payload(&malformed).is_none());
+    malformed = frame;
+    malformed[16..18].copy_from_slice(&19u16.to_be_bytes());
+    assert!(dhcp_wire::payload(&malformed).is_none());
+}
+
+#[test]
+fn dhcp_frame_parser_accepts_ipv4_options_and_ignores_udp_padding() {
+    let request = request_packet(1, None, None);
+    let mut frame = request_frame(&request);
+    drop(frame.splice(34..34, [1, 1, 1, 1]));
+    frame[14] = 0x46;
+    let ip_len = (frame.len() - 14) as u16;
+    frame[16..18].copy_from_slice(&ip_len.to_be_bytes());
+    fill_ipv4_checksum(&mut frame);
+    assert_eq!(dhcp_wire::payload(&frame), Some(request.as_slice()));
+
+    // The IP packet can contain padding after its declared UDP datagram.
+    frame.extend_from_slice(&[0xa5; 8]);
+    frame[16..18].copy_from_slice(&(ip_len + 8).to_be_bytes());
+    fill_ipv4_checksum(&mut frame);
+    assert_eq!(dhcp_wire::payload(&frame), Some(request.as_slice()));
+}
+
+#[test]
+fn dhcp_frame_parser_rejects_invalid_ip_headers_and_fragments() {
+    let request = request_packet(1, None, None);
+    let frame = request_frame(&request);
+    let mut malformed = frame.clone();
+    malformed[14] = 0x65;
+    fill_ipv4_checksum(&mut malformed);
+    assert!(dhcp_wire::payload(&malformed).is_none());
+
+    malformed = frame.clone();
+    malformed[22] ^= 1; // Change TTL without updating the IPv4 checksum.
+    assert!(dhcp_wire::payload(&malformed).is_none());
+
+    for flags_and_offset in [0x2000u16, 1] {
+        malformed = frame.clone();
+        malformed[20..22].copy_from_slice(&flags_and_offset.to_be_bytes());
+        fill_ipv4_checksum(&mut malformed);
+        assert!(dhcp_wire::payload(&malformed).is_none());
+    }
+
+    // Keep a complete UDP datagram behind an illegally short IPv4 header.
+    // Its IP checksum is valid, so rejecting it requires the minimum IHL check.
+    malformed = frame;
+    drop(malformed.drain(26..34));
+    malformed[14] = 0x43;
+    let ip_len = (malformed.len() - 14) as u16;
+    malformed[16..18].copy_from_slice(&ip_len.to_be_bytes());
+    fill_ipv4_checksum(&mut malformed);
+    assert!(dhcp_wire::payload(&malformed).is_none());
+}
+
+#[test]
+fn dhcp_frame_parser_checks_nonzero_udp_checksums_but_accepts_omission() {
+    use smoltcp::wire::{Ipv4Packet, UdpPacket};
+    let request = request_packet(1, None, None);
+    let mut frame = request_frame(&request);
+    assert_eq!(dhcp_wire::payload(&frame), Some(request.as_slice()));
+
+    let mut ip = Ipv4Packet::new_unchecked(&mut frame[14..]);
+    let src_addr = ip.src_addr().into();
+    let dst_addr = ip.dst_addr().into();
+    UdpPacket::new_unchecked(ip.payload_mut()).fill_checksum(&src_addr, &dst_addr);
+    assert_eq!(dhcp_wire::payload(&frame), Some(request.as_slice()));
+
+    frame[46] ^= 1; // A changed DHCP transaction ID is still a valid request.
+    assert!(dhcp_wire::payload(&frame).is_none());
+    frame[40..42].fill(0); // IPv4 permits an explicitly omitted UDP checksum.
+    assert_eq!(dhcp_wire::payload(&frame), Some(&frame[42..]));
+}
+
+#[test]
+fn dhcp_reply_frames_preserve_payload_routing_and_checksums() {
+    use smoltcp::wire::{EthernetAddress, EthernetFrame, EthernetProtocol, Ipv4Packet, UdpPacket};
+
+    for flags in [0, 0x8000] {
+        let mut server = DhcpServer::<4>::new(server_config());
+        let request = request_packet_with_flags(1, None, None, flags);
+        let mut frame = [0xa5; 384];
+        let reply = server
+            .handle(0, &request, &mut frame[dhcp_wire::REPLY_HEADERS..])
+            .unwrap()
+            .unwrap();
+        let original_payload =
+            frame[dhcp_wire::REPLY_HEADERS..dhcp_wire::REPLY_HEADERS + reply.len()].to_vec();
+        let server_mac = [0x02, 0x10, 0x20, 0x30, 0x40, 0x50];
+        let frame_len =
+            dhcp_wire::emit_reply(&mut frame, Ipv4Addr::new(192, 168, 4, 1), server_mac, reply);
+        assert_eq!(frame_len, dhcp_wire::REPLY_HEADERS + reply.len());
+        let ethernet = EthernetFrame::new_checked(&frame[..frame_len]).unwrap();
+        assert_eq!(ethernet.src_addr(), EthernetAddress(server_mac));
+        assert_eq!(ethernet.ethertype(), EthernetProtocol::Ipv4);
+        assert_eq!(
+            ethernet.dst_addr(),
+            if flags == 0 {
+                EthernetAddress(reply.client_mac())
+            } else {
+                EthernetAddress::BROADCAST
+            }
+        );
+        let ipv4 = Ipv4Packet::new_checked(ethernet.payload()).unwrap();
+        assert_eq!(ipv4.src_addr().octets(), [192, 168, 4, 1]);
+        assert_eq!(
+            ipv4.dst_addr().octets(),
+            if flags == 0 {
+                [192, 168, 4, 2]
+            } else {
+                [255; 4]
+            }
+        );
+        assert_eq!(ipv4.hop_limit(), 64);
+        assert!(ipv4.verify_checksum());
+        let udp = UdpPacket::new_checked(ipv4.payload()).unwrap();
+        assert_eq!(udp.src_port(), 67);
+        assert_eq!(udp.dst_port(), 68);
+        assert_ne!(udp.checksum(), 0);
+        assert!(udp.verify_checksum(&ipv4.src_addr().into(), &ipv4.dst_addr().into()));
+        assert_eq!(udp.payload(), original_payload);
+        assert!(frame[frame_len..].iter().all(|&byte| byte == 0));
+    }
 }

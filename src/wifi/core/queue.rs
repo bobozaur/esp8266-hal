@@ -33,7 +33,10 @@ impl<T> Queue<T> {
         if self.len == self.capacity() {
             return Err(item);
         }
-        let tail = (self.head + self.len) % self.capacity();
+        let mut tail = self.head + self.len;
+        if tail >= self.capacity() {
+            tail -= self.capacity();
+        }
         self.entries[tail] = Some(item);
         self.len += 1;
         Ok(())
@@ -44,7 +47,10 @@ impl<T> Queue<T> {
             return None;
         }
         let item = self.entries[self.head].take();
-        self.head = (self.head + 1) % self.capacity();
+        self.head += 1;
+        if self.head == self.capacity() {
+            self.head = 0;
+        }
         self.len -= 1;
         item
     }
@@ -78,5 +84,24 @@ mod tests {
         assert_eq!(queue.pop(), Some(2));
         assert_eq!(queue.pop(), Some(3));
         assert_eq!(queue.capacity(), 2);
+    }
+
+    #[test]
+    fn arbitrary_capacity_wraparound_preserves_fifo_after_repeated_rotation() {
+        for capacity in [1, 3, 5, 7] {
+            let mut queue =
+                Queue::try_new(capacity, super::super::allocator::test_allocator()).unwrap();
+            for value in 0..capacity {
+                queue.try_push(value).unwrap();
+            }
+            for expected in 0..capacity * 8 {
+                assert_eq!(queue.pop(), Some(expected));
+                queue.try_push(expected + capacity).unwrap();
+            }
+            for expected in capacity * 8..capacity * 9 {
+                assert_eq!(queue.pop(), Some(expected));
+            }
+            assert!(queue.pop().is_none());
+        }
     }
 }

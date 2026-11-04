@@ -364,8 +364,8 @@ pub(super) fn raw_esp_now_peer(peer: &EspNowPeerConfig) -> esp8266_wifi_sys::esp
     raw.peer_addr = *peer.peer_addr();
     raw.channel = peer.channel_value();
     raw.ifidx = map_esp_now_interface(peer.interface_value());
-    raw.encrypt = peer.is_encrypted();
     if let Some(lmk) = peer.lmk() {
+        raw.encrypt = true;
         raw.lmk = *lmk;
     }
     raw

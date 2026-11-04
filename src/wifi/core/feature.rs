@@ -24,36 +24,6 @@ pub const ESP_NOW_KEY_LEN: usize = 16;
 pub const SMARTCONFIG_KEY_LEN: usize = 16;
 
 #[cfg(feature = "wifi-esp-now")]
-#[cfg(any(target_arch = "xtensa", test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EspNowPeer {
-    peer_addr: [u8; 6],
-    encrypted: bool,
-}
-
-#[cfg(feature = "wifi-esp-now")]
-#[cfg(any(target_arch = "xtensa", test))]
-impl EspNowPeer {
-    pub(crate) const fn unencrypted(peer_addr: [u8; 6]) -> Self {
-        Self {
-            peer_addr,
-            encrypted: false,
-        }
-    }
-
-    pub(crate) const fn encrypted(peer_addr: [u8; 6]) -> Self {
-        Self {
-            peer_addr,
-            encrypted: true,
-        }
-    }
-
-    pub(crate) const fn peer_addr(&self) -> &[u8; 6] {
-        &self.peer_addr
-    }
-}
-
-#[cfg(feature = "wifi-esp-now")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EspNowInterface {
     Station,
@@ -67,18 +37,6 @@ pub struct EspNowPeerConfig {
     lmk: Option<[u8; ESP_NOW_KEY_LEN]>,
     channel: Option<Channel>,
     interface: EspNowInterface,
-}
-
-#[cfg(feature = "wifi-esp-now")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct EspNowStationPeerConfig {
-    inner: EspNowPeerConfig,
-}
-
-#[cfg(feature = "wifi-esp-now")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct EspNowAccessPointPeerConfig {
-    inner: EspNowPeerConfig,
 }
 
 #[cfg(feature = "wifi-esp-now")]
@@ -112,14 +70,14 @@ impl EspNowPeerConfig {
         self
     }
 
-    pub const fn for_station(mut self) -> EspNowStationPeerConfig {
+    pub const fn for_station(mut self) -> Self {
         self.interface = EspNowInterface::Station;
-        EspNowStationPeerConfig { inner: self }
+        self
     }
 
-    pub const fn for_access_point(mut self) -> EspNowAccessPointPeerConfig {
+    pub const fn for_access_point(mut self) -> Self {
         self.interface = EspNowInterface::AccessPoint;
-        EspNowAccessPointPeerConfig { inner: self }
+        self
     }
 
     pub const fn peer_addr(&self) -> &[u8; 6] {
@@ -145,36 +103,6 @@ impl EspNowPeerConfig {
     #[cfg(any(target_arch = "xtensa", test))]
     pub(crate) const fn interface_value(&self) -> EspNowInterface {
         self.interface
-    }
-
-    #[cfg(any(target_arch = "xtensa", test))]
-    pub(crate) const fn is_encrypted(&self) -> bool {
-        self.lmk.is_some()
-    }
-
-    #[cfg(any(target_arch = "xtensa", test))]
-    pub(crate) const fn peer_record(&self) -> EspNowPeer {
-        if self.is_encrypted() {
-            EspNowPeer::encrypted(self.peer_addr)
-        } else {
-            EspNowPeer::unencrypted(self.peer_addr)
-        }
-    }
-}
-
-#[cfg(feature = "wifi-esp-now")]
-impl EspNowStationPeerConfig {
-    #[cfg(any(target_arch = "xtensa", test))]
-    pub(crate) const fn inner(&self) -> &EspNowPeerConfig {
-        &self.inner
-    }
-}
-
-#[cfg(feature = "wifi-esp-now")]
-impl EspNowAccessPointPeerConfig {
-    #[cfg(any(target_arch = "xtensa", test))]
-    pub(crate) const fn inner(&self) -> &EspNowPeerConfig {
-        &self.inner
     }
 }
 
@@ -274,13 +202,6 @@ impl<'a> WpsFactoryInfo<'a> {
             .any(|field| field.contains(&0))
         {
             return Err(ConfigError::WpsFactoryInfoContainsNul);
-        }
-        // The pinned native WPS library treats these fields as printf formats.
-        if [manufacturer, model_number, model_name, device_name]
-            .iter()
-            .any(|field| field.contains(&b'%'))
-        {
-            return Err(ConfigError::WpsFactoryInfoContainsPercent);
         }
         Ok(Self {
             manufacturer,
@@ -759,63 +680,5 @@ impl PromiscuousRxFrame {
 
     pub const fn is_truncated(&self) -> bool {
         self.len < self.info.original_len
-    }
-}
-
-#[cfg(feature = "wifi-esp-now")]
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) struct EspNowPeerTable {
-    peers: allocator_api2::vec::Vec<EspNowPeer, super::allocator::RuntimeAllocator>,
-    capacity: usize,
-}
-
-#[cfg(feature = "wifi-esp-now")]
-#[cfg(any(target_arch = "xtensa", test))]
-impl EspNowPeerTable {
-    pub fn try_new(
-        capacity: usize,
-        allocator: super::allocator::RuntimeAllocator,
-    ) -> Result<Self, super::InitError> {
-        let mut peers = allocator_api2::vec::Vec::new_in(allocator);
-        peers
-            .try_reserve_exact(capacity)
-            .map_err(|_| super::InitError::OutOfMemory)?;
-        Ok(Self { peers, capacity })
-    }
-    pub fn len(&self) -> usize {
-        self.peers.len()
-    }
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-    pub fn clear(&mut self) {
-        self.peers.clear();
-    }
-    pub fn contains(&self, addr: &[u8; 6]) -> bool {
-        self.peers.iter().any(|peer| peer.peer_addr() == addr)
-    }
-    pub fn insert(&mut self, peer: EspNowPeer) -> Result<bool, DriverError> {
-        if let Some(existing) = self
-            .peers
-            .iter_mut()
-            .find(|p| p.peer_addr() == peer.peer_addr())
-        {
-            let changed = *existing != peer;
-            *existing = peer;
-            return Ok(changed);
-        }
-        if self.peers.len() == self.capacity {
-            return Err(DriverError::PeerOverflow);
-        }
-        self.peers.push(peer);
-        Ok(true)
-    }
-    pub fn remove(&mut self, addr: &[u8; 6]) -> bool {
-        if let Some(index) = self.peers.iter().position(|peer| peer.peer_addr() == addr) {
-            self.peers.swap_remove(index);
-            true
-        } else {
-            false
-        }
     }
 }

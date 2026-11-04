@@ -119,7 +119,7 @@ fn init_wifi(
 
     let mut config = ClientConfig::new(Ssid::try_from(WIFI_SSID.trim()).expect("ssid"), credential);
     if let Some(channel) = WIFI_CHANNEL
-        .and_then(parse_u8_literal)
+        .and_then(|value| value.parse::<u8>().ok())
         .and_then(|channel| Channel::try_from(channel).ok())
     {
         config = config.with_channel(channel);
@@ -229,8 +229,11 @@ async fn app_main(spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtime
 }
 
 async fn run_tcp_client(stack: embassy_net::Stack<'static>) {
-    let host = parse_ipv4_literal(SERVER_HOST).expect("server host");
-    let port = parse_u16_literal(SERVER_PORT).expect("server port");
+    let host = SERVER_HOST
+        .parse::<CoreIpv4Addr>()
+        .expect("server host")
+        .octets();
+    let port = SERVER_PORT.parse::<u16>().expect("server port");
     log_target(host, port);
 
     let rx_buf = TCP_RX_BUF.init([0; TCP_BUF_BYTES]);
@@ -270,17 +273,10 @@ async fn run_tcp_client(stack: embassy_net::Stack<'static>) {
 }
 
 fn parse_static_config() -> Option<StaticIpv4Config> {
-    let address = parse_ipv4_literal(STATIC_IPV4)?;
-    let gateway = parse_ipv4_literal(STATIC_GATEWAY)?;
-    let prefix = parse_u8_literal(STATIC_PREFIX)?;
-    StaticIpv4Config::new(
-        CoreIpv4Addr::new(address[0], address[1], address[2], address[3]),
-        prefix,
-        Some(CoreIpv4Addr::new(
-            gateway[0], gateway[1], gateway[2], gateway[3],
-        )),
-    )
-    .ok()
+    let address = STATIC_IPV4.parse::<CoreIpv4Addr>().ok()?;
+    let gateway = STATIC_GATEWAY.parse::<CoreIpv4Addr>().ok()?;
+    let prefix = STATIC_PREFIX.parse::<u8>().ok()?;
+    StaticIpv4Config::new(address, prefix, Some(gateway)).ok()
 }
 
 fn to_embassy_static_config(config: StaticIpv4Config) -> embassy_net::StaticConfigV4 {
@@ -298,68 +294,6 @@ fn to_embassy_static_config(config: StaticIpv4Config) -> embassy_net::StaticConf
         gateway,
         dns_servers: heapless::Vec::new(),
     }
-}
-
-fn parse_ipv4_literal(value: &str) -> Option<[u8; 4]> {
-    let mut octets = [0_u8; 4];
-    let mut index = 0_usize;
-    let mut value_acc = 0_u16;
-    let mut has_digit = false;
-
-    for byte in value.as_bytes() {
-        match *byte {
-            b'0'..=b'9' => {
-                value_acc = value_acc
-                    .saturating_mul(10)
-                    .saturating_add(u16::from(*byte - b'0'));
-                if value_acc > 255 {
-                    return None;
-                }
-                has_digit = true;
-            }
-            b'.' => {
-                if !has_digit || index >= 3 {
-                    return None;
-                }
-                octets[index] = value_acc as u8;
-                index += 1;
-                value_acc = 0;
-                has_digit = false;
-            }
-            _ => return None,
-        }
-    }
-
-    if !has_digit || index != 3 {
-        return None;
-    }
-    octets[3] = value_acc as u8;
-    Some(octets)
-}
-
-fn parse_u8_literal(value: &str) -> Option<u8> {
-    let parsed = parse_u16_literal(value)?;
-    u8::try_from(parsed).ok()
-}
-
-fn parse_u16_literal(value: &str) -> Option<u16> {
-    let mut acc = 0_u32;
-    let mut has_digit = false;
-    for byte in value.as_bytes() {
-        match *byte {
-            b'0'..=b'9' => {
-                acc = acc
-                    .saturating_mul(10)
-                    .saturating_add(u32::from(*byte - b'0'));
-                if acc > u32::from(u16::MAX) {
-                    return None;
-                }
-                has_digit = true;
-            }
-            _ => return None,
-        }
-    }
-    has_digit.then_some(acc as u16)
 }
 
 #[panic_handler]

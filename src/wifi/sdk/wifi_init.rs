@@ -272,13 +272,16 @@ pub unsafe extern "C" fn esp_wifi_try_rate_from_high() -> bool {
 
 /// Transmit a WiFi frame via the blob's internal TX path.
 ///
-/// Allocates a DRAM buffer with EP_OFFSET headroom, copies the payload,
-/// and calls `ieee80211_output_pbuf`. The buffer is freed by the send
-/// completion callback.
+/// Allocates DRAM with EP_OFFSET headroom and initialized native lookahead,
+/// copies the logical payload, and calls `ieee80211_output_pbuf` without
+/// changing its length. The send completion callback releases the buffer.
 #[no_mangle]
 pub unsafe extern "C" fn esp_wifi_internal_tx(wifi_if: u32, buffer: *mut c_void, len: u16) -> i32 {
     unsafe {
-        let total = len as usize + EP_OFFSET;
+        let Some(payload_capacity) = crate::wifi::tx_buffer::payload_capacity(len as usize) else {
+            return sys::ESP_ERR_INVALID_ARG;
+        };
+        let total = payload_capacity + EP_OFFSET;
         let alloc = super::super::compat::memory::malloc(total);
         let mut used_fallback = false;
         let (dram_buf, cb, arg) = if alloc.is_null() {
@@ -305,7 +308,7 @@ pub unsafe extern "C" fn esp_wifi_internal_tx(wifi_if: u32, buffer: *mut c_void,
                 alloc,
             )
         };
-        core::ptr::copy_nonoverlapping(buffer as *const u8, dram_buf, len as usize);
+        crate::wifi::tx_buffer::copy_frame(buffer.cast(), dram_buf, len as usize);
 
         let mut aio = EspAio {
             fd: wifi_if as i32,

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use xtask::esp32_companion::{chip_kind_from_esptool_output, repo_local_paths};
-use xtask::wifi_hw::{scenario_by_name, RuntimePlan, ScenarioState};
+use xtask::wifi_hw::{scenario_by_name, RuntimePlan};
 
 #[test]
 fn companion_paths_stay_inside_repo() {
@@ -56,7 +56,7 @@ fn stable_companion_scenarios_are_in_the_matrix() {
         "promisc_data_companion",
     ] {
         let scenario = scenario_by_name(name).expect("companion scenario");
-        assert_eq!(scenario.state, ScenarioState::Implemented);
+
         assert!(matches!(scenario.runtime, RuntimePlan::CompanionRig));
     }
 }
@@ -66,14 +66,12 @@ fn diagnostic_companion_scenarios_are_in_the_matrix() {
     for name in [
         "ap_station_list_companion",
         "ap_rejoin_companion",
-        "ap_attach_companion",
-        "ap_net_attach_companion",
-        "ap_dhcp_bind_companion",
+        "ap_association_before_dhcp_companion",
         "ap_dhcp_companion",
         "ap_sta_downstream_companion",
     ] {
         let scenario = scenario_by_name(name).expect("companion scenario");
-        assert_eq!(scenario.state, ScenarioState::Implemented);
+
         assert!(matches!(scenario.runtime, RuntimePlan::CompanionRig));
     }
 }

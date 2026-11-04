@@ -4,25 +4,29 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const IROM_FLASH_OFFSET_ENV: &str = "ESP8266_HAL_IROM_FLASH_OFFSET";
-const EAP_CA_CERT_PEM_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_CA_CERT_PEM_NUL_FILE";
-const EAP_CLIENT_CERT_PEM_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_CLIENT_CERT_PEM_NUL_FILE";
-const EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_PEM_NUL_FILE";
-const EAP_PRIVATE_KEY_PASSWORD_NUL_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_PASSWORD_NUL_FILE";
-const EAP_CA_CERT_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_CA_CERT_DER_FILE";
-const EAP_CLIENT_CERT_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_CLIENT_CERT_DER_FILE";
-const EAP_PRIVATE_KEY_DER_FILE_ENV: &str = "ESP8266_HAL_EAP_PRIVATE_KEY_DER_FILE";
+const EAP_FILE_ENV_VARS: [&str; 7] = [
+    "ESP8266_HAL_EAP_CA_CERT_PEM_NUL_FILE",
+    "ESP8266_HAL_EAP_CLIENT_CERT_PEM_NUL_FILE",
+    "ESP8266_HAL_EAP_PRIVATE_KEY_PEM_NUL_FILE",
+    "ESP8266_HAL_EAP_PRIVATE_KEY_PASSWORD_NUL_FILE",
+    "ESP8266_HAL_EAP_CA_CERT_DER_FILE",
+    "ESP8266_HAL_EAP_CLIENT_CERT_DER_FILE",
+    "ESP8266_HAL_EAP_PRIVATE_KEY_DER_FILE",
+];
 const DEFAULT_IROM_ORIGIN: u32 = 0x4021_0000;
 const IROM_FLASH_BASE: u32 = 0x4020_0000;
 const IROM_WINDOW_SIZE: u32 = 0x10_0000;
 
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_ca_cert_pem_nul_file)");
-    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_client_cert_pem_nul_file)");
-    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_private_key_pem_nul_file)");
-    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_private_key_password_nul_file)");
-    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_ca_cert_der_file)");
-    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_client_cert_der_file)");
-    println!("cargo:rustc-check-cfg=cfg(esp8266_hal_eap_private_key_der_file)");
+    let enterprise = env::var_os("CARGO_FEATURE_WIFI_ENTERPRISE").is_some();
+    for name in EAP_FILE_ENV_VARS {
+        let cfg = name.to_ascii_lowercase();
+        println!("cargo:rustc-check-cfg=cfg({cfg})");
+        println!("cargo:rerun-if-env-changed={name}");
+        if enterprise && env::var_os(name).is_some() {
+            println!("cargo:rustc-cfg={cfg}");
+        }
+    }
 
     let wifi_target = env::var_os("CARGO_FEATURE_WIFI").is_some()
         && env::var("TARGET").as_deref() == Ok("xtensa-esp8266-none-elf");
@@ -66,30 +70,6 @@ fn main() {
 
     println!("cargo:rustc-link-search={}", out.display());
 
-    if env::var_os("CARGO_FEATURE_WIFI_ENTERPRISE").is_some() {
-        if env::var_os(EAP_CA_CERT_PEM_NUL_FILE_ENV).is_some() {
-            println!("cargo:rustc-cfg=esp8266_hal_eap_ca_cert_pem_nul_file");
-        }
-        if env::var_os(EAP_CLIENT_CERT_PEM_NUL_FILE_ENV).is_some() {
-            println!("cargo:rustc-cfg=esp8266_hal_eap_client_cert_pem_nul_file");
-        }
-        if env::var_os(EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV).is_some() {
-            println!("cargo:rustc-cfg=esp8266_hal_eap_private_key_pem_nul_file");
-        }
-        if env::var_os(EAP_PRIVATE_KEY_PASSWORD_NUL_FILE_ENV).is_some() {
-            println!("cargo:rustc-cfg=esp8266_hal_eap_private_key_password_nul_file");
-        }
-        if env::var_os(EAP_CA_CERT_DER_FILE_ENV).is_some() {
-            println!("cargo:rustc-cfg=esp8266_hal_eap_ca_cert_der_file");
-        }
-        if env::var_os(EAP_CLIENT_CERT_DER_FILE_ENV).is_some() {
-            println!("cargo:rustc-cfg=esp8266_hal_eap_client_cert_der_file");
-        }
-        if env::var_os(EAP_PRIVATE_KEY_DER_FILE_ENV).is_some() {
-            println!("cargo:rustc-cfg=esp8266_hal_eap_private_key_der_file");
-        }
-    }
-
     if wifi_target {
         let linker_scripts = PathBuf::from(
             env::var_os("DEP_ESP8266_WIFI_LD_SCRIPTS")
@@ -109,13 +89,6 @@ fn main() {
     println!("cargo:rerun-if-changed=ld/wifi.x");
     println!("cargo:rerun-if-changed=ld/wifi-exception.x");
     println!("cargo:rerun-if-env-changed={IROM_FLASH_OFFSET_ENV}");
-    println!("cargo:rerun-if-env-changed={EAP_CA_CERT_PEM_NUL_FILE_ENV}");
-    println!("cargo:rerun-if-env-changed={EAP_CLIENT_CERT_PEM_NUL_FILE_ENV}");
-    println!("cargo:rerun-if-env-changed={EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV}");
-    println!("cargo:rerun-if-env-changed={EAP_PRIVATE_KEY_PASSWORD_NUL_FILE_ENV}");
-    println!("cargo:rerun-if-env-changed={EAP_CA_CERT_DER_FILE_ENV}");
-    println!("cargo:rerun-if-env-changed={EAP_CLIENT_CERT_DER_FILE_ENV}");
-    println!("cargo:rerun-if-env-changed={EAP_PRIVATE_KEY_DER_FILE_ENV}");
 }
 
 fn alias_x() -> &'static str {

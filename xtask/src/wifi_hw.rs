@@ -16,6 +16,7 @@ use regex::bytes::Regex;
 
 use crate::esp32_companion;
 
+const PROFILE: &str = "release";
 const TARGET: &str = "xtensa-esp8266-none-elf";
 const BUILD_STD: &str = "-Zbuild-std=core,alloc";
 const DEFAULT_UART_BAUD: u32 = 115_200;
@@ -73,39 +74,11 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScenarioState {
-    Implemented,
-    Manual,
-    RigBlocked { reason: &'static str },
-    PendingExample,
-}
-
-impl ScenarioState {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Implemented => "implemented",
-            Self::Manual => "manual",
-            Self::RigBlocked { .. } => "rig-blocked",
-            Self::PendingExample => "pending-example",
-        }
-    }
-
-    pub const fn rig_blocked_reason(self) -> Option<&'static str> {
-        match self {
-            Self::RigBlocked { reason } => Some(reason),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Scenario {
     pub name: &'static str,
     pub description: &'static str,
-    pub example: Option<&'static str>,
+    pub example: &'static str,
     pub features: &'static [&'static str],
-    pub profile: &'static str,
-    pub state: ScenarioState,
     pub runtime: RuntimePlan,
 }
 
@@ -278,7 +251,6 @@ pub enum RuntimePlan {
         response: &'static [u8],
     },
     CompanionRig,
-    Pending,
 }
 
 impl RuntimePlan {
@@ -288,7 +260,6 @@ impl RuntimePlan {
             Self::TcpEcho { .. } => "tcp-echo",
             Self::TcpClient { .. } => "tcp-client",
             Self::CompanionRig => "companion-rig",
-            Self::Pending => "pending",
         }
     }
 }
@@ -296,11 +267,9 @@ impl RuntimePlan {
 const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "sta_connect",
-        description: "associate and report WiFi link-up from the typestate core path",
-        example: Some("wifi_core_connect"),
+        description: "associate and report WiFi link-up from the controller path",
+        example: "wifi_core_connect",
         features: &["interrupt", "rt", "wifi"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(105),
             success_markers: &["wifi core connected"],
@@ -315,10 +284,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "sta_wrong_password",
         description: "fail cleanly when station credentials do not match a secured AP",
-        example: Some("wifi_core_connect"),
+        example: "wifi_core_connect",
         features: &["interrupt", "rt", "wifi"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(75),
             success_markers: &["wifi core connect err"],
@@ -332,11 +299,9 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "sta_wpa2_connect",
-        description: "associate with a visible WPA2-PSK AP through the typestate core path",
-        example: Some("wifi_core_connect"),
+        description: "associate with a visible WPA2-PSK AP through the controller path",
+        example: "wifi_core_connect",
         features: &["interrupt", "rt", "wifi"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(105),
             success_markers: &["wifi core connected"],
@@ -351,10 +316,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "sta_stale_channel_hint",
         description: "associate when a station channel hint points away from the target AP",
-        example: Some("wifi_core_connect"),
+        example: "wifi_core_connect",
         features: &["interrupt", "rt", "wifi"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(105),
             success_markers: &["wifi core connected"],
@@ -368,11 +331,9 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "sta_hidden_ssid",
-        description: "associate with a non-broadcast WPA2 SSID through the typestate core path",
-        example: Some("wifi_core_connect"),
+        description: "associate with a non-broadcast WPA2 SSID through the controller path",
+        example: "wifi_core_connect",
         features: &["interrupt", "rt", "wifi"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(105),
             success_markers: &["wifi core connected"],
@@ -386,11 +347,9 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "sta_scan_connect",
-        description: "associate from the typestate core path without a station channel hint",
-        example: Some("wifi_core_connect"),
+        description: "associate from the controller path without a station channel hint",
+        example: "wifi_core_connect",
         features: &["interrupt", "rt", "wifi"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(105),
             success_markers: &["wifi core connected"],
@@ -404,11 +363,9 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "sta_scan",
-        description: "perform a station active scan through the typestate core path",
-        example: Some("raw_scan"),
+        description: "perform a station active scan through the controller path",
+        example: "raw_scan",
         features: &["interrupt", "rt", "wifi"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(30),
             success_markers: &["scan-ok"],
@@ -418,10 +375,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "sta_dhcp",
         description: "bring the station link up and observe DHCP completion",
-        example: Some("wifi_core_dhcp_probe"),
+        example: "wifi_core_dhcp_probe",
         features: &["interrupt", "rt", "wifi-embassy-net"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(105),
             success_markers: &["dhcp up Cidr", "dhcp:up", "config up"],
@@ -438,10 +393,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "sta_static_ip",
         description: "bring the station link up with a Rust-owned static IPv4 config",
-        example: Some("sta_static_ip"),
+        example: "sta_static_ip",
         features: &["interrupt", "rt", "wifi-embassy-net"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(105),
             success_markers: &["static ip up"],
@@ -458,10 +411,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "tcp_server",
         description: "run the embassy-net TCP server and verify first-attempt echo",
-        example: Some("tcp_server"),
+        example: "tcp_server",
         features: &["interrupt", "rt", "wifi-embassy-net"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::TcpEcho {
             timeout: Duration::from_secs(105),
             port: 1234,
@@ -486,10 +437,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "tcp_client",
         description: "run the embassy-net TCP client and verify outbound connect/send",
-        example: Some("tcp_client"),
+        example: "tcp_client",
         features: &["interrupt", "rt", "wifi-embassy-net"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::TcpClient {
             timeout: Duration::from_secs(135),
             port: 4321,
@@ -514,10 +463,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "eap_sta_assoc",
         description: "associate to the OpenWrt WPA2 Enterprise AP through the RADIUS fixture",
-        example: Some("wifi_eap"),
+        example: "wifi_eap",
         features: &["interrupt", "rt", "wifi-enterprise"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(150),
             success_markers: &["eap-ok"],
@@ -534,10 +481,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "eap_wrong_password",
         description: "observe DUT-correlated RADIUS rejection with a wrong password configured; password-cause qualification also requires a positive control and server inner-method evidence",
-        example: Some("wifi_eap"),
+        example: "wifi_eap",
         features: &["interrupt", "rt", "wifi-enterprise"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(150),
             success_markers: &["eap-negative-disconnected"],
@@ -556,10 +501,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "eap_client_cert",
         description: "validate optional WPA2 Enterprise CA/client-certificate material against an EAP-TLS-capable fixture",
-        example: Some("wifi_eap"),
+        example: "wifi_eap",
         features: &["interrupt", "rt", "wifi-enterprise"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(180),
             success_markers: &["eap-ok"],
@@ -575,111 +518,38 @@ const WIFI_SCENARIOS: &[Scenario] = &[
         },
     },
     Scenario {
-        name: "ap_station_list_companion",
-        description: "join the soft-AP with the ESP32 companion and validate station list/deauth",
-        example: Some("wifi_ap"),
-        features: &["wifi-smoltcp", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::CompanionRig,
-    },
-    Scenario {
         name: "ap_rejoin_companion",
         description: "rejoin the soft-AP with the ESP32 companion after DUT-initiated deauth",
-        example: Some("wifi_ap"),
-        features: &["wifi-smoltcp", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
+        example: "wifi_ap",
+        features: &["embassy"],
         runtime: RuntimePlan::CompanionRig,
     },
     Scenario {
-        name: "ap_attach_companion",
-        description: "join the soft-AP after attaching the AP RX path without embassy-net",
-        example: Some("wifi_ap"),
-        features: &["wifi-smoltcp", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::CompanionRig,
-    },
-    Scenario {
-        name: "ap_net_attach_companion",
-        description: "join the soft-AP after creating the AP network runtime but before entering the DHCP loop",
-        example: Some("wifi_ap"),
-        features: &["wifi-smoltcp", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::CompanionRig,
-    },
-    Scenario {
-        name: "ap_dhcp_bind_companion",
-        description: "join the soft-AP after binding the Rust DHCP socket but before entering the DHCP poll loop",
-        example: Some("wifi_ap"),
-        features: &["wifi-smoltcp", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::CompanionRig,
-    },
-    Scenario {
-        name: "ap_dhcp_companion",
-        description: "join the soft-AP with the ESP32 companion and validate Rust DHCP service",
-        example: Some("wifi_ap"),
-        features: &["wifi-smoltcp", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::CompanionRig,
-    },
-    Scenario {
-        name: "ap_sta_downstream_companion",
-        description: "validate AP+STA mixed mode with the ESP32 companion as downstream client",
-        example: Some("wifi_ap_sta"),
-        features: &["interrupt", "rt", "wifi-embassy-net"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::CompanionRig,
-    },
-    Scenario {
-        name: "esp_now_unicast_companion",
-        description: "exchange ESP-NOW unicast payloads with the ESP32 companion",
-        example: Some("wifi_esp_now_rx"),
-        features: &["wifi-esp-now", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::CompanionRig,
-    },
-    Scenario {
-        name: "esp_now_encrypted_companion",
-        description: "exchange encrypted ESP-NOW payloads with the ESP32 companion",
-        example: Some("wifi_esp_now_rx"),
-        features: &["wifi-esp-now", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
+        name: "ap_association_before_dhcp_companion",
+        description: "associate a client before starting the soft-AP DHCP service",
+        example: "wifi_ap",
+        features: &["embassy"],
         runtime: RuntimePlan::CompanionRig,
     },
     Scenario {
         name: "esp_now_bad_key_companion",
         description: "validate encrypted ESP-NOW failure cases with the ESP32 companion",
-        example: Some("wifi_esp_now_rx"),
+        example: "wifi_esp_now_rx",
         features: &["wifi-esp-now", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
     },
     Scenario {
         name: "promisc_data_companion",
         description: "validate promiscuous data capture with repeatable ESP32 companion traffic",
-        example: Some("wifi_promisc"),
+        example: "wifi_promisc",
         features: &["wifi-promiscuous", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::CompanionRig,
     },
     Scenario {
         name: "ap_start",
         description: "start the soft-AP and validate a client join path",
-        example: Some("wifi_ap"),
-        features: &["wifi-smoltcp", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
+        example: "wifi_ap",
+        features: &["embassy"],
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(10),
             success_markers: &["ap-start-ok"],
@@ -689,72 +559,29 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "ap_station_list",
         description: "join the soft-AP with a client, enumerate it, and deauth all stations",
-        example: Some("wifi_ap"),
-        features: &["wifi-smoltcp", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::UartWatch {
-            timeout: Duration::from_secs(70),
-            success_markers: &["ap-station-list-ok"],
-            failure_markers: &[
-                "ap start err",
-                "ap wait client timeout",
-                "ap deauth err",
-                "panic",
-                "Guru Meditation",
-            ],
-        },
+        example: "wifi_ap",
+        features: &["embassy"],
+        runtime: RuntimePlan::CompanionRig,
     },
     Scenario {
         name: "ap_dhcp",
         description: "join the soft-AP with a client and validate Rust DHCP lease service",
-        example: Some("wifi_ap"),
-        features: &["wifi-smoltcp", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::UartWatch {
-            timeout: Duration::from_secs(90),
-            success_markers: &["ap-dhcp-ok"],
-            failure_markers: &[
-                "ap start err",
-                "ap-net-timeout",
-                "ap-dhcp bind err",
-                "panic",
-                "Guru Meditation",
-            ],
-        },
+        example: "wifi_ap",
+        features: &["embassy"],
+        runtime: RuntimePlan::CompanionRig,
     },
     Scenario {
         name: "ap_sta",
         description: "run AP+STA mixed mode with upstream and downstream connectivity",
-        example: Some("wifi_ap_sta"),
-        features: &["interrupt", "rt", "wifi-embassy-net"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::UartWatch {
-            timeout: Duration::from_secs(45),
-            success_markers: &["ap-sta-ok"],
-            failure_markers: &[
-                "ap_sta err connect-timeout",
-                "ap_sta err connect-disconnected",
-                "ap_sta err connect-backend",
-                "ap_sta err connect-other",
-                "ap_sta err stations",
-                "ap_sta err dhcp",
-                "ap_sta err dhcp-timeout",
-                "DISCONNECT reason=",
-                "panic",
-                "Guru Meditation",
-            ],
-        },
+        example: "wifi_ap_sta",
+        features: &["wifi-embassy-net"],
+        runtime: RuntimePlan::CompanionRig,
     },
     Scenario {
         name: "wps",
         description: "complete WPS PBC enrollment on supported router hardware",
-        example: Some("wifi_wps"),
+        example: "wifi_wps",
         features: &["wifi-wps", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(180),
             success_markers: &["wps-ok"],
@@ -772,10 +599,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "wps_pin",
         description: "complete WPS fixed-PIN enrollment on supported router hardware",
-        example: Some("wifi_wps"),
+        example: "wifi_wps",
         features: &["wifi-wps", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(180),
             success_markers: &["wps-ok"],
@@ -793,10 +618,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "smartconfig",
         description: "complete SmartConfig provisioning from an ESPTouch-compatible sender",
-        example: Some("wifi_smartconfig"),
+        example: "wifi_smartconfig",
         features: &["wifi-smartconfig", "wifi-smoltcp"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(180),
             success_markers: &["smartconfig-ok"],
@@ -822,34 +645,15 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "esp_now_unicast",
         description: "exchange ESP-NOW unicast payloads between two boards",
-        example: Some("wifi_esp_now_rx"),
+        example: "wifi_esp_now_rx",
         features: &["wifi-esp-now", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::UartWatch {
-            timeout: Duration::from_secs(30),
-            success_markers: &["esp-now-tx-ok"],
-            failure_markers: &[
-                "esp-now start err",
-                "esp-now session err",
-                "esp-now channel err",
-                "esp-now pmk err",
-                "esp-now peer err",
-                "esp-now send err",
-                "esp-now send status failed",
-                "esp-now send status timeout",
-                "panic",
-                "Guru Meditation",
-            ],
-        },
+        runtime: RuntimePlan::CompanionRig,
     },
     Scenario {
         name: "esp_now_broadcast",
         description: "send ESP-NOW broadcast payloads from one board and validate SDK send path",
-        example: Some("wifi_esp_now_tx"),
+        example: "wifi_esp_now_tx",
         features: &["wifi-esp-now", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(20),
             success_markers: &["esp-now-tx-ok"],
@@ -870,34 +674,15 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "esp_now_encrypted",
         description: "exchange encrypted ESP-NOW payloads between two boards",
-        example: Some("wifi_esp_now_rx"),
+        example: "wifi_esp_now_rx",
         features: &["wifi-esp-now", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
-        runtime: RuntimePlan::UartWatch {
-            timeout: Duration::from_secs(30),
-            success_markers: &["esp-now-tx-ok"],
-            failure_markers: &[
-                "esp-now start err",
-                "esp-now session err",
-                "esp-now channel err",
-                "esp-now pmk err",
-                "esp-now peer err",
-                "esp-now send err",
-                "esp-now send status failed",
-                "esp-now send status timeout",
-                "panic",
-                "Guru Meditation",
-            ],
-        },
+        runtime: RuntimePlan::CompanionRig,
     },
     Scenario {
         name: "promisc_capture",
         description: "capture management/data/control frames in promiscuous mode",
-        example: Some("wifi_promisc"),
+        example: "wifi_promisc",
         features: &["wifi-promiscuous", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(25),
             success_markers: &["promisc-ok"],
@@ -917,10 +702,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "promisc_filters",
         description: "validate promiscuous packet and control filters",
-        example: Some("wifi_promisc"),
+        example: "wifi_promisc",
         features: &["wifi-promiscuous", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(25),
             success_markers: &["promisc-management-ok"],
@@ -940,10 +723,8 @@ const WIFI_SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "promisc_control_filters",
         description: "validate promiscuous control-frame capture with RF traffic",
-        example: Some("wifi_promisc"),
+        example: "wifi_promisc",
         features: &["wifi-promiscuous", "embassy"],
-        profile: "release",
-        state: ScenarioState::Implemented,
         runtime: RuntimePlan::UartWatch {
             timeout: Duration::from_secs(25),
             success_markers: &["promisc-control-ok"],
@@ -970,6 +751,14 @@ pub fn scenario_names() -> Vec<&'static str> {
 }
 
 pub fn scenario_by_name(name: &str) -> Option<&'static Scenario> {
+    let name = match name {
+        "ap_station_list_companion" => "ap_station_list",
+        "ap_dhcp_companion" => "ap_dhcp",
+        "ap_sta_downstream_companion" => "ap_sta",
+        "esp_now_unicast_companion" => "esp_now_unicast",
+        "esp_now_encrypted_companion" => "esp_now_encrypted",
+        name => name,
+    };
     WIFI_SCENARIOS.iter().find(|scenario| scenario.name == name)
 }
 
@@ -1316,21 +1105,15 @@ fn list(format: OutputFormat) -> Result<()> {
         OutputFormat::Text => {
             for scenario in WIFI_SCENARIOS {
                 println!(
-                    "{:<28} {:<16} runtime={} matrix_lane={} resources={} example={} profile={} features={} description={}{}",
+                    "{:<28} implemented runtime={} matrix_lane={} resources={} example={} profile={} features={} description={}",
                     scenario.name,
-                    scenario.state.label(),
                     scenario.runtime.label(),
                     scenario_matrix_lane_label(scenario),
                     scenario_resource_labels(scenario).join(","),
-                    scenario.example.unwrap_or("-"),
-                    scenario.profile,
+                    scenario.example,
+                    PROFILE,
                     scenario.features.join(","),
                     scenario.description,
-                    scenario
-                        .state
-                        .rig_blocked_reason()
-                        .map(|reason| format!(" reason={reason}"))
-                        .unwrap_or_default(),
                 );
             }
         }
@@ -1344,17 +1127,13 @@ fn list(format: OutputFormat) -> Result<()> {
                 };
                 let resources = scenario_resource_labels(scenario);
                 println!(
-                    "  {{\"name\":\"{}\",\"state\":\"{}\",\"runtime\":\"{}\",\"matrix_lane\":\"{}\",\"resources\":[{}],\"example\":{},\"profile\":\"{}\",\"features\":[{}],\"description\":\"{}\",\"reason\":{}}}{}",
+                    "  {{\"name\":\"{}\",\"state\":\"implemented\",\"runtime\":\"{}\",\"matrix_lane\":\"{}\",\"resources\":[{}],\"example\":{},\"profile\":\"{}\",\"features\":[{}],\"description\":\"{}\",\"reason\":null}}{}",
                     json_escape(scenario.name),
-                    scenario.state.label(),
                     scenario.runtime.label(),
                     scenario_matrix_lane_label(scenario),
                     json_string_array(&resources),
-                    scenario
-                        .example
-                        .map(json_string)
-                        .unwrap_or_else(|| "null".to_owned()),
-                    json_escape(scenario.profile),
+                    json_string(scenario.example),
+                    json_escape(PROFILE),
                     scenario
                         .features
                         .iter()
@@ -1362,11 +1141,6 @@ fn list(format: OutputFormat) -> Result<()> {
                         .collect::<Vec<_>>()
                         .join(","),
                     json_escape(scenario.description),
-                    scenario
-                        .state
-                        .rig_blocked_reason()
-                        .map(json_string)
-                        .unwrap_or_else(|| "null".to_owned()),
                     comma
                 );
             }
@@ -1561,20 +1335,6 @@ fn run_matrix(
         println!("wifi-hw matrix: opt-in skipped {}: {reason}", scenario.name);
     }
 
-    for scenario in WIFI_SCENARIOS
-        .iter()
-        .filter(|scenario| matches!(scenario.state, ScenarioState::RigBlocked { .. }))
-    {
-        println!(
-            "wifi-hw matrix: rig-blocked {}: {}",
-            scenario.name,
-            scenario
-                .state
-                .rig_blocked_reason()
-                .expect("rig-blocked scenario reason")
-        );
-    }
-
     if failures.is_empty() {
         println!("wifi-hw matrix: pass");
         return Ok(());
@@ -1594,7 +1354,6 @@ fn run_matrix(
 fn matrix_default_scenarios() -> Vec<&'static Scenario> {
     WIFI_SCENARIOS
         .iter()
-        .filter(|scenario| scenario.state == ScenarioState::Implemented)
         .filter(|scenario| matrix_opt_in_skip_reason(scenario).is_none())
         .collect()
 }
@@ -1602,7 +1361,6 @@ fn matrix_default_scenarios() -> Vec<&'static Scenario> {
 fn matrix_opt_in_skipped_scenarios() -> Vec<(&'static Scenario, &'static str)> {
     WIFI_SCENARIOS
         .iter()
-        .filter(|scenario| scenario.state == ScenarioState::Implemented)
         .filter_map(|scenario| matrix_opt_in_skip_reason(scenario).map(|reason| (scenario, reason)))
         .collect()
 }
@@ -1834,12 +1592,6 @@ fn focused_run_attempt_limit(scenario: &Scenario) -> usize {
     }
 }
 
-fn allow_rig_blocked_scenarios() -> bool {
-    env::var("ESP8266_HAL_WIFI_HW_ALLOW_RIG_BLOCKED")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
-}
-
 fn run_scenario_with_retries(
     label: &str,
     scenario: &Scenario,
@@ -1884,22 +1636,6 @@ fn run_scenario_with_root(
     serial_port: &Path,
     companion_port: &Path,
 ) -> Result<()> {
-    if scenario.state == ScenarioState::PendingExample {
-        bail!(
-            "scenario `{}` is registered but not implemented yet (expected example `{}`)",
-            scenario.name,
-            scenario.example.unwrap_or("-")
-        );
-    }
-    if !allow_rig_blocked_scenarios() {
-        if let ScenarioState::RigBlocked { reason } = scenario.state {
-            bail!(
-                "scenario `{}` is blocked by the current hardware rig: {reason}; see research.md",
-                scenario.name,
-            );
-        }
-    }
-
     if scenario.name == "eap_wrong_password" {
         if !eap_diagnostics_enabled() {
             bail!(
@@ -1929,9 +1665,7 @@ fn run_scenario_with_root(
         return run_companion_scenario_with_root(scenario, root, serial_port, companion_port);
     }
 
-    let example = scenario
-        .example
-        .ok_or_else(|| anyhow!("scenario `{}` has no example", scenario.name))?;
+    let example = scenario.example;
     let run_dir = prepare_run_dir(root, scenario.name)?;
 
     write_manifest(&run_dir, scenario, serial_port)?;
@@ -1945,7 +1679,7 @@ fn run_scenario_with_root(
 
         (|| -> Result<()> {
             build_example(&run_dir, example, scenario, &build_env)?;
-            let images = elf2image(&run_dir, example, scenario)?;
+            let images = elf2image(&run_dir, example)?;
             flash_images(&run_dir, &images, serial_port)?;
             let mut eap_diagnostics = start_eap_diagnostics(&run_dir, scenario)?;
 
@@ -2037,7 +1771,6 @@ fn run_scenario_with_root(
                     "scenario `{}` requires the companion-rig runner but was not dispatched to it",
                     scenario.name
                 ),
-                RuntimePlan::Pending => bail!("scenario `{}` has no runtime plan", scenario.name),
             };
 
             if let Some(diagnostics) = eap_diagnostics.as_mut() {
@@ -2084,9 +1817,7 @@ fn is_promisc_rig_scenario(name: &str) -> bool {
 }
 
 fn run_wps_router_scenario(scenario: &Scenario, root: &Path, serial_port: &Path) -> Result<()> {
-    let example = scenario
-        .example
-        .ok_or_else(|| anyhow!("scenario `{}` has no example", scenario.name))?;
+    let example = scenario.example;
     let run_dir = prepare_run_dir(root, scenario.name)?;
     write_manifest(&run_dir, scenario, serial_port)?;
 
@@ -2105,7 +1836,7 @@ fn run_wps_router_scenario(scenario: &Scenario, root: &Path, serial_port: &Path)
     ));
 
     build_example(&run_dir, example, scenario, &build_env)?;
-    let images = elf2image(&run_dir, example, scenario)?;
+    let images = elf2image(&run_dir, example)?;
 
     append_router_manifest(&run_dir, &fixture)?;
 
@@ -2922,9 +2653,7 @@ fn run_smartconfig_router_scenario(
     serial_port: &Path,
     companion_port: &Path,
 ) -> Result<()> {
-    let example = scenario
-        .example
-        .ok_or_else(|| anyhow!("scenario `{}` has no example", scenario.name))?;
+    let example = scenario.example;
     let run_dir = prepare_run_dir(root, scenario.name)?;
     write_manifest(&run_dir, scenario, serial_port)?;
     let sender = SmartConfigSenderKind::from_env()?;
@@ -2941,7 +2670,7 @@ fn run_smartconfig_router_scenario(
     let build_env = sender.build_env();
 
     build_example(&run_dir, example, scenario, &build_env)?;
-    let images = elf2image(&run_dir, example, scenario)?;
+    let images = elf2image(&run_dir, example)?;
     flash_images(&run_dir, &images, serial_port)?;
 
     let fixture = RouterSmartConfigFixture::new()?;
@@ -3802,9 +3531,7 @@ fn run_companion_scenario_with_root(
     serial_port: &Path,
     companion_port: &Path,
 ) -> Result<()> {
-    let example = scenario
-        .example
-        .ok_or_else(|| anyhow!("scenario `{}` has no example", scenario.name))?;
+    let example = scenario.example;
     let run_dir = prepare_run_dir(root, scenario.name)?;
     write_manifest(&run_dir, scenario, serial_port)?;
 
@@ -3824,52 +3551,49 @@ fn run_companion_scenario_with_root(
 
     if matches!(
         scenario.name,
-        "esp_now_unicast"
-            | "esp_now_encrypted"
-            | "esp_now_unicast_companion"
-            | "esp_now_encrypted_companion"
-            | "esp_now_bad_key_companion"
+        "esp_now_unicast" | "esp_now_encrypted" | "esp_now_bad_key_companion"
     ) {
         extra_env.push(("ESP8266_HAL_ESPNOW_PEER", companion.mac.clone()));
     }
 
-    let mut mixed_companion_ap =
-        if matches!(scenario.name, "ap_sta" | "ap_sta_downstream_companion") {
-            let session = start_companion_ap_session(&run_dir, companion_port, false)?;
-            extra_env.extend(
-                session
-                    .build_env
-                    .iter()
-                    .map(|(key, value)| (*key, value.clone())),
-            );
-            Some(session)
-        } else {
-            None
-        };
+    let mut mixed_companion_ap = if scenario.name == "ap_sta" {
+        let session = start_companion_ap_session(&run_dir, companion_port, false)?;
+        extra_env.extend(
+            session
+                .build_env
+                .iter()
+                .map(|(key, value)| (*key, value.clone())),
+        );
+        Some(session)
+    } else {
+        None
+    };
 
     build_example(&run_dir, example, scenario, &extra_env)?;
-    let images = elf2image(&run_dir, example, scenario)?;
+    let images = elf2image(&run_dir, example)?;
     flash_images(&run_dir, &images, serial_port)?;
 
     let result = match scenario.name {
-        "ap_station_list" | "ap_station_list_companion" => {
-            run_ap_station_list_companion(&run_dir, serial_port, &companion)
+        "ap_station_list" | "ap_rejoin_companion" => run_ap_station_list_flow(
+            &run_dir,
+            serial_port,
+            &companion,
+            scenario.name == "ap_rejoin_companion",
+        ),
+        "ap_association_before_dhcp_companion" => {
+            run_ap_association_before_dhcp_companion(&run_dir, serial_port, &companion)
         }
-        "ap_rejoin_companion" => run_ap_rejoin_companion(&run_dir, serial_port, &companion),
-        "ap_attach_companion" => run_ap_attach_companion(&run_dir, serial_port, &companion),
-        "ap_net_attach_companion" => run_ap_net_attach_companion(&run_dir, serial_port, &companion),
-        "ap_dhcp_bind_companion" => run_ap_dhcp_bind_companion(&run_dir, serial_port, &companion),
-        "ap_dhcp" | "ap_dhcp_companion" => run_ap_dhcp_companion(&run_dir, serial_port, &companion),
-        "ap_sta" | "ap_sta_downstream_companion" => {
+        "ap_dhcp" => run_ap_dhcp_companion(&run_dir, serial_port, &companion),
+        "ap_sta" => {
             let session = mixed_companion_ap
                 .as_mut()
                 .expect("mixed companion AP started before build");
             run_ap_sta_downstream_companion(&run_dir, serial_port, session)
         }
-        "esp_now_unicast" | "esp_now_unicast_companion" => {
+        "esp_now_unicast" => {
             run_esp_now_companion(&run_dir, serial_port, &companion, EspNowMode::Unicast)
         }
-        "esp_now_encrypted" | "esp_now_encrypted_companion" => {
+        "esp_now_encrypted" => {
             run_esp_now_companion(&run_dir, serial_port, &companion, EspNowMode::Encrypted)
         }
         "esp_now_bad_key_companion" => {
@@ -4228,22 +3952,6 @@ fn companion_session_join_with_retry(
     Err(last_error.unwrap_or_else(|| anyhow!("companion session join attempts exhausted")))
 }
 
-fn run_ap_station_list_companion(
-    run_dir: &Path,
-    serial_port: &Path,
-    companion: &CompanionRig,
-) -> Result<()> {
-    run_ap_station_list_flow(run_dir, serial_port, companion, false)
-}
-
-fn run_ap_rejoin_companion(
-    run_dir: &Path,
-    serial_port: &Path,
-    companion: &CompanionRig,
-) -> Result<()> {
-    run_ap_station_list_flow(run_dir, serial_port, companion, true)
-}
-
 fn run_ap_station_list_flow(
     run_dir: &Path,
     serial_port: &Path,
@@ -4294,46 +4002,52 @@ fn run_ap_station_list_flow(
                 }
                 if !joined && text.contains("ap stations:0") {
                     thread::sleep(Duration::from_secs(2));
-                    let response = match companion_join_with_retry(
+                    let response = companion_join_with_retry(
                         &mut companion_log,
                         companion,
                         "STA_JOIN ssid=esp8266-hal-ap pass=open timeout_ms=12000 wait_ip=0 channel=6",
                         10,
                         None,
-                    ) {
-                        Ok(response) => response,
-                        Err(error) => {
-                            let _ = drain_uart_for_failure(
-                                port.as_mut(),
-                                &mut uart_log,
-                                &mut buffer,
-                                Duration::from_secs(6),
-                            );
-                            if String::from_utf8_lossy(&buffer).contains(SUCCESS_MARKER) {
-                                return Ok(());
-                            }
-                            return Err(error);
+                    );
+                    if response.is_err() {
+                        let _ = drain_uart_for_failure(
+                            port.as_mut(),
+                            &mut uart_log,
+                            &mut buffer,
+                            Duration::from_secs(6),
+                        );
+                    }
+                    let text = String::from_utf8_lossy(&buffer);
+                    if let Some(marker) = FAILURE_MARKERS
+                        .iter()
+                        .find(|marker| text.contains(**marker))
+                    {
+                        bail!(
+                            "uart reported failure marker `{marker}`; see {}",
+                            uart_path.display()
+                        );
+                    }
+                    match response {
+                        Ok(response) if response_field(&response, "connected") == Some("1") => {}
+                        Ok(response) => {
+                            bail!("companion did not report link association: {response}")
                         }
-                    };
-                    if response_field(&response, "connected") != Some("1") {
-                        bail!("companion did not report link association: {response}");
+                        Err(_) if text.contains(SUCCESS_MARKER) => {}
+                        Err(error) => return Err(error),
                     }
                     joined = true;
                 }
-                if text.contains(SUCCESS_MARKER) {
-                    if rejoin_after_deauth {
-                        let response = companion_join_with_retry(
+                let text = String::from_utf8_lossy(&buffer);
+                if joined && text.contains(SUCCESS_MARKER) {
+                    return finish_ap_station_list(rejoin_after_deauth, || {
+                        companion_join_with_retry(
                             &mut companion_log,
                             companion,
                             "STA_JOIN ssid=esp8266-hal-ap pass=open timeout_ms=12000 wait_ip=0 channel=6",
                             6,
                             None,
-                        )?;
-                        if response_field(&response, "connected") != Some("1") {
-                            bail!("companion did not report rejoin association: {response}");
-                        }
-                    }
-                    return Ok(());
+                        )
+                    });
                 }
             }
             Ok(_) => {}
@@ -4348,93 +4062,28 @@ fn run_ap_station_list_flow(
     )
 }
 
-fn run_ap_attach_companion(
-    run_dir: &Path,
-    serial_port: &Path,
-    companion: &CompanionRig,
+fn finish_ap_station_list(
+    rejoin_after_deauth: bool,
+    rejoin: impl FnOnce() -> Result<String>,
 ) -> Result<()> {
-    const READY_MARKER: &str = "ap-link-ready";
-    const FAILURE_MARKERS: &[&str] = &["ap start err", "ap-link err", "panic", "Guru Meditation"];
-
-    let mut port = open_serial_port(serial_port)?;
-    pulse_reset(port.as_mut())?;
-    let uart_path = run_dir.join("uart.log");
-    let mut uart_log = File::create(&uart_path)
-        .with_context(|| format!("failed to create {}", uart_path.display()))?;
-    let mut companion_log = open_companion_log(run_dir)?;
-    let start = Instant::now();
-    let timeout = Duration::from_secs(70);
-    let mut buffer = Vec::with_capacity(32 * 1024);
-
-    while start.elapsed() < timeout {
-        let mut chunk = [0_u8; 4096];
-        match port.read(&mut chunk) {
-            Ok(read) if read > 0 => {
-                uart_log.write_all(&chunk[..read])?;
-                buffer.extend_from_slice(&chunk[..read]);
-                if buffer.len() > 32 * 1024 {
-                    let excess = buffer.len() - 32 * 1024;
-                    buffer.drain(0..excess);
-                }
-
-                let text = String::from_utf8_lossy(&buffer);
-                if let Some(marker) = FAILURE_MARKERS
-                    .iter()
-                    .find(|marker| text.contains(**marker))
-                {
-                    bail!(
-                        "uart reported failure marker `{marker}`; see {}",
-                        uart_path.display()
-                    );
-                }
-                if text.contains(READY_MARKER) {
-                    thread::sleep(Duration::from_secs(2));
-                    let response = match companion_join_with_retry(
-                        &mut companion_log,
-                        companion,
-                        "STA_JOIN ssid=esp8266-hal-ap pass=open timeout_ms=12000 wait_ip=0 channel=6",
-                        6,
-                        None,
-                    ) {
-                        Ok(response) => response,
-                        Err(error) => {
-                            let _ = drain_uart_for_failure(
-                                port.as_mut(),
-                                &mut uart_log,
-                                &mut buffer,
-                                Duration::from_secs(6),
-                            );
-                            return Err(error);
-                        }
-                    };
-                    if response_field(&response, "connected") != Some("1") {
-                        bail!("companion did not report link association: {response}");
-                    }
-                    return Ok(());
-                }
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(error) => return Err(error).context("failed while reading UART"),
+    if rejoin_after_deauth {
+        let response = rejoin()?;
+        if response_field(&response, "connected") != Some("1") {
+            bail!("companion did not report rejoin association: {response}");
         }
     }
-
-    bail!(
-        "timed out waiting for AP attach companion flow; see {}",
-        uart_path.display()
-    )
+    Ok(())
 }
 
-fn run_ap_net_attach_companion(
+fn run_ap_association_before_dhcp_companion(
     run_dir: &Path,
     serial_port: &Path,
     companion: &CompanionRig,
 ) -> Result<()> {
-    const READY_MARKER: &str = "ap-net-attach-ready";
+    const READY_MARKER: &str = "ap-association-ready";
     const FAILURE_MARKERS: &[&str] = &[
         "ap start err",
-        "ap-net link err",
-        "ap-net mac err",
+        "ap wait client timeout",
         "panic",
         "Guru Meditation",
     ];
@@ -4448,6 +4097,7 @@ fn run_ap_net_attach_companion(
     let start = Instant::now();
     let timeout = Duration::from_secs(70);
     let mut buffer = Vec::with_capacity(32 * 1024);
+    let mut joined = false;
 
     while start.elapsed() < timeout {
         let mut chunk = [0_u8; 4096];
@@ -4470,7 +4120,7 @@ fn run_ap_net_attach_companion(
                         uart_path.display()
                     );
                 }
-                if text.contains(READY_MARKER) {
+                if !joined && text.contains(READY_MARKER) {
                     thread::sleep(Duration::from_secs(2));
                     let response = match companion_join_with_retry(
                         &mut companion_log,
@@ -4493,6 +4143,9 @@ fn run_ap_net_attach_companion(
                     if response_field(&response, "connected") != Some("1") {
                         bail!("companion did not report link association: {response}");
                     }
+                    joined = true;
+                }
+                if joined && text.contains("ap-associated-before-dhcp") {
                     return Ok(());
                 }
             }
@@ -4503,91 +4156,7 @@ fn run_ap_net_attach_companion(
     }
 
     bail!(
-        "timed out waiting for AP net-attach companion flow; see {}",
-        uart_path.display()
-    )
-}
-
-fn run_ap_dhcp_bind_companion(
-    run_dir: &Path,
-    serial_port: &Path,
-    companion: &CompanionRig,
-) -> Result<()> {
-    const READY_MARKER: &str = "ap-dhcp-bind-ready";
-    const FAILURE_MARKERS: &[&str] = &[
-        "ap start err",
-        "ap-net link err",
-        "ap-net mac err",
-        "ap-dhcp bind err",
-        "panic",
-        "Guru Meditation",
-    ];
-
-    let mut port = open_serial_port(serial_port)?;
-    pulse_reset(port.as_mut())?;
-    let uart_path = run_dir.join("uart.log");
-    let mut uart_log = File::create(&uart_path)
-        .with_context(|| format!("failed to create {}", uart_path.display()))?;
-    let mut companion_log = open_companion_log(run_dir)?;
-    let start = Instant::now();
-    let timeout = Duration::from_secs(70);
-    let mut buffer = Vec::with_capacity(32 * 1024);
-
-    while start.elapsed() < timeout {
-        let mut chunk = [0_u8; 4096];
-        match port.read(&mut chunk) {
-            Ok(read) if read > 0 => {
-                uart_log.write_all(&chunk[..read])?;
-                buffer.extend_from_slice(&chunk[..read]);
-                if buffer.len() > 32 * 1024 {
-                    let excess = buffer.len() - 32 * 1024;
-                    buffer.drain(0..excess);
-                }
-
-                let text = String::from_utf8_lossy(&buffer);
-                if let Some(marker) = FAILURE_MARKERS
-                    .iter()
-                    .find(|marker| text.contains(**marker))
-                {
-                    bail!(
-                        "uart reported failure marker `{marker}`; see {}",
-                        uart_path.display()
-                    );
-                }
-                if text.contains(READY_MARKER) {
-                    thread::sleep(Duration::from_secs(2));
-                    let response = match companion_join_with_retry(
-                        &mut companion_log,
-                        companion,
-                        "STA_JOIN ssid=esp8266-hal-ap pass=open timeout_ms=12000 wait_ip=0 channel=6",
-                        6,
-                        None,
-                    ) {
-                        Ok(response) => response,
-                        Err(error) => {
-                            let _ = drain_uart_for_failure(
-                                port.as_mut(),
-                                &mut uart_log,
-                                &mut buffer,
-                                Duration::from_secs(6),
-                            );
-                            return Err(error);
-                        }
-                    };
-                    if response_field(&response, "connected") != Some("1") {
-                        bail!("companion did not report link association: {response}");
-                    }
-                    return Ok(());
-                }
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(error) => return Err(error).context("failed while reading UART"),
-        }
-    }
-
-    bail!(
-        "timed out waiting for AP DHCP bind companion flow; see {}",
+        "timed out waiting for AP association-before-DHCP companion flow; see {}",
         uart_path.display()
     )
 }
@@ -4629,6 +4198,15 @@ fn run_ap_dhcp_companion(
                 }
 
                 let text = String::from_utf8_lossy(&buffer);
+                if let Some(marker) = FAILURE_MARKERS
+                    .iter()
+                    .find(|marker| text.contains(**marker))
+                {
+                    bail!(
+                        "uart reported failure marker `{marker}`; see {}",
+                        uart_path.display()
+                    );
+                }
                 if joined && text.contains(SUCCESS_MARKER) {
                     return Ok(());
                 }
@@ -4660,15 +4238,6 @@ fn run_ap_dhcp_companion(
                 if joined && text.contains(SUCCESS_MARKER) {
                     return Ok(());
                 }
-                if let Some(marker) = FAILURE_MARKERS
-                    .iter()
-                    .find(|marker| text.contains(**marker))
-                {
-                    bail!(
-                        "uart reported failure marker `{marker}`; see {}",
-                        uart_path.display()
-                    );
-                }
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
@@ -4682,25 +4251,31 @@ fn run_ap_dhcp_companion(
     )
 }
 
+fn mixed_mode_complete(uart: &str, lease: Option<&str>) -> Result<bool> {
+    if let Some(marker) = ["ap_sta err", "panic", "Guru Meditation"]
+        .iter()
+        .find(|marker| uart.contains(**marker))
+    {
+        bail!("uart reported failure marker `{marker}`");
+    }
+    let Some(lease) = lease else { return Ok(false) };
+    let address = lease
+        .parse::<Ipv4Addr>()
+        .context("invalid companion DHCP lease")?;
+    let [a, b, c, host] = address.octets();
+    if [a, b, c] != [192, 168, 4] || !(2..=5).contains(&host) {
+        bail!("unexpected mixed-mode companion DHCP lease `{lease}`");
+    }
+    Ok(["ap-sta-ok", "ap-sta-downstream-ok"]
+        .iter()
+        .all(|marker| uart.lines().any(|line| line.trim() == *marker)))
+}
+
 fn run_ap_sta_downstream_companion(
     run_dir: &Path,
     serial_port: &Path,
     companion: &mut CompanionApSession,
 ) -> Result<()> {
-    const SUCCESS_MARKER: &str = "ap-sta-downstream-ok";
-    const FAILURE_MARKERS: &[&str] = &[
-        "ap_sta err connect-timeout",
-        "ap_sta err connect-disconnected",
-        "ap_sta err connect-backend",
-        "ap_sta err connect-other",
-        "ap_sta err stations",
-        "ap_sta err dhcp",
-        "ap_sta err dhcp-timeout",
-        "ap_sta err downstream-timeout",
-        "panic",
-        "Guru Meditation",
-    ];
-
     let mut port = open_serial_port(serial_port)?;
     pulse_reset(port.as_mut())?;
     let uart_path = run_dir.join("uart.log");
@@ -4710,7 +4285,7 @@ fn run_ap_sta_downstream_companion(
     let timeout = Duration::from_secs(70);
     let deadline = start + timeout;
     let mut buffer = Vec::with_capacity(32 * 1024);
-    let mut joined = false;
+    let mut lease = None::<String>;
 
     while start.elapsed() < timeout {
         let mut chunk = [0_u8; 4096];
@@ -4724,16 +4299,12 @@ fn run_ap_sta_downstream_companion(
                 }
 
                 let text = String::from_utf8_lossy(&buffer);
-                if let Some(marker) = FAILURE_MARKERS
-                    .iter()
-                    .find(|marker| text.contains(**marker))
+                if mixed_mode_complete(&text, lease.as_deref())
+                    .with_context(|| format!("see {}", uart_path.display()))?
                 {
-                    bail!(
-                        "uart reported failure marker `{marker}`; see {}",
-                        uart_path.display()
-                    );
+                    return Ok(());
                 }
-                if !joined && text.contains("ap-sta-dhcp-ready") {
+                if lease.is_none() && text.contains("ap-sta-dhcp-ready") {
                     let response = match companion_session_join_with_retry(
                         companion,
                         "STA_JOIN_KEEP_AP ssid=esp8266-hal-apsta pass=open timeout_ms=30000 wait_ip=1 channel=6",
@@ -4750,19 +4321,17 @@ fn run_ap_sta_downstream_companion(
                                 &mut buffer,
                                 Duration::from_secs(6),
                             );
-                            if String::from_utf8_lossy(&buffer).contains(SUCCESS_MARKER) {
-                                return Ok(());
-                            }
                             return Err(error);
                         }
                     };
-                    if response_field(&response, "ip").is_none() {
-                        bail!("companion did not report a mixed-mode DHCP lease: {response}");
+                    lease = Some(
+                        response_field(&response, "ip")
+                            .context("companion did not report a mixed-mode DHCP lease")?
+                            .to_owned(),
+                    );
+                    if mixed_mode_complete(&text, lease.as_deref())? {
+                        return Ok(());
                     }
-                    joined = true;
-                }
-                if joined && text.contains(SUCCESS_MARKER) {
-                    return Ok(());
                 }
             }
             Ok(_) => {}
@@ -4775,108 +4344,6 @@ fn run_ap_sta_downstream_companion(
         "timed out waiting for AP+STA downstream companion flow; see {}",
         uart_path.display()
     )
-}
-
-#[allow(dead_code)]
-fn run_wps_companion(run_dir: &Path, serial_port: &Path, companion: &CompanionRig) -> Result<()> {
-    let mut companion_log = open_companion_log(run_dir)?;
-    let mut companion_commands = esp32_companion::CommandSession::open(&companion.port)?;
-    ensure_companion_session_ready(&mut companion_log, &mut companion_commands)?;
-    let wps_response = companion_session_command(
-        &mut companion_log,
-        &mut companion_commands,
-        &format!(
-            "WPS_AP_START ssid=esp8266-hal-wps pass=esp8266wps channel=6 mode=pin pin={WPS_PIN}"
-        ),
-        Duration::from_secs(10),
-    )?;
-    ensure_ok_response(&wps_response, "WPS_AP_START")?;
-    thread::sleep(Duration::from_millis(2_000));
-
-    let mut port = open_serial_port(serial_port)?;
-    pulse_reset(port.as_mut())?;
-
-    let uart_path = run_dir.join("uart.log");
-    let mut uart_log = File::create(&uart_path)
-        .with_context(|| format!("failed to create {}", uart_path.display()))?;
-    let start = Instant::now();
-    let mut buffer = Vec::with_capacity(32 * 1024);
-    let registrar_started = true;
-
-    while start.elapsed() < Duration::from_secs(150) {
-        let mut chunk = [0_u8; 4096];
-        match port.read(&mut chunk) {
-            Ok(read) if read > 0 => {
-                uart_log.write_all(&chunk[..read])?;
-                buffer.extend_from_slice(&chunk[..read]);
-                if buffer.len() > 32 * 1024 {
-                    let excess = buffer.len() - 32 * 1024;
-                    buffer.drain(0..excess);
-                }
-
-                let text = String::from_utf8_lossy(&buffer);
-
-                if text.contains("wps-ok") {
-                    let response = companion_session_command(
-                        &mut companion_log,
-                        &mut companion_commands,
-                        "WPS_AP_WAIT timeout_ms=10000",
-                        Duration::from_secs(12),
-                    )?;
-                    ensure_ok_response(&response, "WPS_AP_WAIT")?;
-                    return Ok(());
-                }
-                if let Some(marker) = [
-                    "wps sta start err",
-                    "wps session err",
-                    "wps start err",
-                    "wps-failed",
-                    "wps-timeout",
-                    "panic",
-                    "Guru Meditation",
-                ]
-                .iter()
-                .find(|marker| text.contains(**marker))
-                {
-                    let registrar = companion_session_command(
-                        &mut companion_log,
-                        &mut companion_commands,
-                        "WPS_AP_WAIT timeout_ms=1000",
-                        Duration::from_secs(3),
-                    )
-                    .unwrap_or_else(|error| format!("WPS_AP_WAIT query failed: {error:#}"));
-                    bail!(
-                        "uart reported failure marker `{marker}`; registrar `{registrar}`; see {}",
-                        uart_path.display()
-                    );
-                }
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(error) => return Err(error).context("failed while reading UART"),
-        }
-    }
-
-    if registrar_started {
-        bail!(
-            "timed out waiting for WPS PIN enrollment; see {}",
-            uart_path.display()
-        );
-    }
-    bail!(
-        "timed out waiting for ESP8266 WPS output; see {}",
-        uart_path.display()
-    )
-}
-
-#[allow(dead_code)]
-fn extract_wps_pin(text: &str) -> Option<&str> {
-    let start = text.find("wps pin=")? + "wps pin=".len();
-    let pin = text.get(start..start + 8)?;
-    pin.as_bytes()
-        .iter()
-        .all(|byte| byte.is_ascii_digit())
-        .then_some(pin)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4895,7 +4362,7 @@ fn esp_now_companion_tx_command(mode: EspNowMode, dut_mac: &str) -> String {
             "ESPNOW_TX channel=6 peer={dut_mac} encrypt=1 lmk=42424242424242424242424242424242 pmk={ESPNOW_SHARED_PMK_HEX} payload=657370383236362d68616c2d6573702d6e6f77 timeout_ms=10000"
         ),
         EspNowMode::BadKey => format!(
-            "ESPNOW_TX channel=6 peer={dut_mac} encrypt=1 lmk=41414141414141414141414141414141 pmk={ESPNOW_SHARED_PMK_HEX} payload=6261646b6579 timeout_ms=10000"
+            "ESPNOW_TX channel=6 peer={dut_mac} encrypt=1 lmk=41414141414141414141414141414141 pmk={ESPNOW_SHARED_PMK_HEX} payload=657370383236362d68616c2d6573702d6e6f77 timeout_ms=10000"
         ),
     }
 }
@@ -5216,8 +4683,8 @@ fn write_manifest(run_dir: &Path, scenario: &Scenario, serial_port: &Path) -> Re
     })?;
     writeln!(file, "scenario={}", scenario.name)?;
     writeln!(file, "description={}", scenario.description)?;
-    writeln!(file, "example={}", scenario.example.unwrap_or("-"))?;
-    writeln!(file, "profile={}", scenario.profile)?;
+    writeln!(file, "example={}", scenario.example)?;
+    writeln!(file, "profile={}", PROFILE)?;
     writeln!(file, "features={}", scenario.features.join(","))?;
     writeln!(file, "runtime={}", scenario.runtime.label())?;
     writeln!(file, "matrix_lane={}", scenario_matrix_lane_label(scenario))?;
@@ -5245,7 +4712,7 @@ fn build_example(
     let command = format!(
         "set -euo pipefail; {}cargo build --{} --example {} --target {} {} --no-default-features --features {}",
         env_prefix,
-        scenario.profile,
+        PROFILE,
         example,
         TARGET,
         BUILD_STD,
@@ -5329,38 +4796,18 @@ fn build_env_prefix(
         }
     }
 
-    if matches!(
-        scenario.name,
-        "ap_station_list" | "ap_station_list_companion" | "ap_rejoin_companion"
-    ) {
+    if matches!(scenario.name, "ap_station_list" | "ap_rejoin_companion") {
         prefix.push_str("ESP8266_HAL_AP_WAIT_CLIENT=1 ");
     }
 
-    if scenario.name == "ap_attach_companion" {
-        prefix.push_str("ESP8266_HAL_AP_ATTACH_ONLY=1 ");
+    if scenario.name == "ap_association_before_dhcp_companion" {
+        prefix.push_str("ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_WAIT_BEFORE_DHCP=1 ");
     }
 
-    if scenario.name == "ap_net_attach_companion" {
-        prefix.push_str(
-            "ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_DELAY_BEFORE_NET_MS=0 ESP8266_HAL_AP_DHCP_GRACE_MS=3000 ESP8266_HAL_AP_NET_ATTACH_ONLY=1 ",
-        );
-    }
-
-    if scenario.name == "ap_dhcp_bind_companion" {
-        prefix.push_str(
-            "ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_DELAY_BEFORE_NET_MS=0 ESP8266_HAL_AP_DHCP_GRACE_MS=3000 ESP8266_HAL_AP_DHCP_BIND_ONLY=1 ",
-        );
-    }
-
-    if scenario.name == "ap_dhcp" || scenario.name == "ap_dhcp_companion" {
-        let delay_ms =
-            env::var("ESP8266_HAL_AP_DELAY_BEFORE_NET_MS").unwrap_or_else(|_| "5000".to_owned());
+    if scenario.name == "ap_dhcp" {
         let dhcp_grace = env::var("ESP8266_HAL_AP_DHCP_GRACE_MS").ok();
         let dhcp_poll = env::var("ESP8266_HAL_AP_DHCP_POLL_MS").ok();
-        prefix.push_str(&format!(
-            "ESP8266_HAL_AP_DHCP=1 ESP8266_HAL_AP_DELAY_BEFORE_NET_MS={} ",
-            delay_ms
-        ));
+        prefix.push_str("ESP8266_HAL_AP_DHCP=1 ");
         if let Some(dhcp_grace) = dhcp_grace {
             prefix.push_str(&shell_env_assignment(
                 "ESP8266_HAL_AP_DHCP_GRACE_MS",
@@ -5377,17 +4824,13 @@ fn build_env_prefix(
         }
     }
 
-    if scenario.name == "ap_sta" || scenario.name == "ap_sta_downstream_companion" {
+    if scenario.name == "ap_sta" {
         prefix.push_str("ESP8266_HAL_AP_STA_WAIT_CLIENT=1 ");
     }
 
     if matches!(
         scenario.name,
-        "esp_now_unicast"
-            | "esp_now_encrypted"
-            | "esp_now_unicast_companion"
-            | "esp_now_encrypted_companion"
-            | "esp_now_bad_key_companion"
+        "esp_now_unicast" | "esp_now_encrypted" | "esp_now_bad_key_companion"
     ) {
         let peer = extra_env
             .iter()
@@ -5399,7 +4842,7 @@ fn build_env_prefix(
 
     if matches!(
         scenario.name,
-        "esp_now_encrypted" | "esp_now_encrypted_companion" | "esp_now_bad_key_companion"
+        "esp_now_encrypted" | "esp_now_bad_key_companion"
     ) {
         prefix.push_str("ESP8266_HAL_ESPNOW_ENCRYPTED=1 ");
     }
@@ -5893,7 +5336,7 @@ fn shell_env_assignment(key: &str, value: &str) -> String {
     format!("{key}='{escaped}'")
 }
 
-fn elf2image(run_dir: &Path, example: &str, scenario: &Scenario) -> Result<Vec<FlashImage>> {
+fn elf2image(run_dir: &Path, example: &str) -> Result<Vec<FlashImage>> {
     let log_path = run_dir.join("elf2image.log");
     let mut log = File::create(&log_path)
         .with_context(|| format!("failed to create {}", log_path.display()))?;
@@ -5902,7 +5345,7 @@ fn elf2image(run_dir: &Path, example: &str, scenario: &Scenario) -> Result<Vec<F
     let example_path = repo
         .join("target")
         .join(TARGET)
-        .join(scenario.profile)
+        .join(PROFILE)
         .join("examples")
         .join(example);
     let esptool = esptool_command();
@@ -6052,31 +5495,29 @@ fn flash_images_fingerprint(images: &[FlashImage]) -> Result<String> {
     Ok(fingerprint.finish())
 }
 
-fn flash_cache_key(serial_port: &Path) -> String {
-    let key: String = serial_port
-        .to_string_lossy()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
+fn flash_cache_key(serial_port: &Path) -> Result<String> {
+    let device = fs::canonicalize(serial_port)
+        .with_context(|| format!("failed to resolve serial device {}", serial_port.display()))?;
+    // Escape the path bytes injectively; aliases resolve to the same physical path.
+    Ok(device
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'-' | b'_') {
+                char::from(*byte).to_string()
             } else {
-                '_'
+                format!("%{byte:02x}")
             }
         })
-        .collect();
-
-    if key.is_empty() {
-        "serial".to_owned()
-    } else {
-        key
-    }
+        .collect())
 }
 
 fn flash_cache_path(serial_port: &Path) -> Result<PathBuf> {
     Ok(repo_root()?
         .join("target")
         .join("wifi-hw-flash-cache")
-        .join(format!("{}.fingerprint", flash_cache_key(serial_port))))
+        .join(format!("{}.fingerprint", flash_cache_key(serial_port)?)))
 }
 
 fn read_flash_cache(path: &Path) -> Result<Option<String>> {
@@ -6097,6 +5538,49 @@ fn write_flash_cache(path: &Path, fingerprint: &str) -> Result<()> {
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlashAction {
+    SkippedUnchanged,
+    BlockedChanged,
+    Written,
+}
+
+impl FlashAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SkippedUnchanged => "skipped-unchanged",
+            Self::BlockedChanged => "blocked-changed",
+            Self::Written => "written",
+        }
+    }
+}
+
+fn flash_cached(
+    cache_path: &Path,
+    fingerprint: &str,
+    skip_unchanged: bool,
+    fail_if_changed: bool,
+    write: impl FnOnce() -> Result<()>,
+) -> Result<FlashAction> {
+    if (skip_unchanged || fail_if_changed)
+        && read_flash_cache(cache_path)?.as_deref() == Some(fingerprint)
+    {
+        return Ok(FlashAction::SkippedUnchanged);
+    }
+    if fail_if_changed {
+        return Ok(FlashAction::BlockedChanged);
+    }
+    // Even a failed spawn or partial write invalidates the old physical contents.
+    match fs::remove_file(cache_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("failed to invalidate flash cache"),
+    }
+    write()?;
+    write_flash_cache(cache_path, fingerprint)?;
+    Ok(FlashAction::Written)
+}
+
 fn flash_images(run_dir: &Path, images: &[FlashImage], serial_port: &Path) -> Result<()> {
     let log_path = run_dir.join("flash.log");
     let mut log = File::create(&log_path)
@@ -6106,77 +5590,67 @@ fn flash_images(run_dir: &Path, images: &[FlashImage], serial_port: &Path) -> Re
     let skip_enabled = skip_unchanged_flash_enabled();
     let fail_if_changed = fail_if_flash_changed_enabled();
     let cache_path = flash_cache_path(serial_port)?;
-    let cached_fingerprint = read_flash_cache(&cache_path)?;
     writeln!(log, "image_fingerprint={fingerprint}")?;
     writeln!(log, "skip_unchanged_flash={skip_enabled}")?;
     writeln!(log, "fail_if_flash_changed={fail_if_changed}")?;
     writeln!(log, "cache_path={}", cache_path.display())?;
     append_manifest_line(run_dir, "flash_image_fingerprint", &fingerprint)?;
 
-    if skip_enabled && cached_fingerprint.as_deref() == Some(fingerprint.as_str()) {
-        writeln!(log, "flash_action=skipped-unchanged")?;
-        append_manifest_line(run_dir, "flash_action", "skipped-unchanged")?;
-        eprintln!(
+    let action = flash_cached(
+        &cache_path,
+        &fingerprint,
+        skip_enabled,
+        fail_if_changed,
+        || {
+            let esptool = esptool_command();
+            let mut command = Command::new(&esptool);
+            command
+                .arg("--chip")
+                .arg("esp8266")
+                .arg("--port")
+                .arg(serial_port)
+                .arg("--baud")
+                .arg(DEFAULT_FLASH_BAUD.to_string())
+                .arg("write-flash");
+
+            let mut log_args = Vec::new();
+            for image in images {
+                let address = format!("0x{:05x}", image.address);
+                command.arg(&address).arg(&image.path);
+                log_args.push(address);
+                log_args.push(image.path.display().to_string());
+            }
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            writeln!(
+                log,
+                "$ {} --chip esp8266 --port {} --baud {} write-flash {}",
+                esptool.to_string_lossy(),
+                serial_port.display(),
+                DEFAULT_FLASH_BAUD,
+                log_args.join(" ")
+            )?;
+            let output = command.output().context("failed to flash images")?;
+            log.write_all(&output.stdout)?;
+            log.write_all(&output.stderr)?;
+            if !output.status.success() {
+                bail!("flash failed; see {}", log_path.display());
+            }
+            Ok(())
+        },
+    )?;
+    writeln!(log, "flash_action={}", action.label())?;
+    append_manifest_line(run_dir, "flash_action", action.label())?;
+    match action {
+        FlashAction::BlockedChanged => bail!(
+            "flash image fingerprint changed for {}; current={fingerprint}; unset {FAIL_IF_FLASH_CHANGED_ENV} to write",
+            serial_port.display()
+        ),
+        FlashAction::SkippedUnchanged => eprintln!(
             "wifi-hw: skipping unchanged flash on {} ({fingerprint})",
             serial_port.display()
-        );
-        return Ok(());
+        ),
+        FlashAction::Written => {}
     }
-
-    if fail_if_changed {
-        let cached = cached_fingerprint.as_deref().unwrap_or("<missing>");
-        writeln!(log, "flash_action=blocked-changed")?;
-        writeln!(log, "cached_fingerprint={cached}")?;
-        append_manifest_line(run_dir, "flash_action", "blocked-changed")?;
-        bail!(
-            "flash image fingerprint changed for {}; cached={cached} current={fingerprint}; unset {FAIL_IF_FLASH_CHANGED_ENV} to write",
-            serial_port.display()
-        );
-    }
-
-    let esptool = esptool_command();
-    let mut command = Command::new(&esptool);
-    command
-        .arg("--chip")
-        .arg("esp8266")
-        .arg("--port")
-        .arg(serial_port)
-        .arg("--baud")
-        .arg(DEFAULT_FLASH_BAUD.to_string())
-        .arg("write-flash");
-
-    let mut log_args = Vec::new();
-    for image in images {
-        let address = format!("0x{:05x}", image.address);
-        command.arg(&address).arg(&image.path);
-        log_args.push(address);
-        log_args.push(image.path.display().to_string());
-    }
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    writeln!(
-        log,
-        "$ {} --chip esp8266 --port {} --baud {} write-flash {}",
-        esptool.to_string_lossy(),
-        serial_port.display(),
-        DEFAULT_FLASH_BAUD,
-        log_args.join(" ")
-    )?;
-
-    let output = command.output().context("failed to flash images")?;
-    log.write_all(&output.stdout)?;
-    log.write_all(&output.stderr)?;
-
-    if !output.status.success() {
-        bail!("flash failed; see {}", log_path.display());
-    }
-
-    if skip_enabled {
-        write_flash_cache(&cache_path, &fingerprint)?;
-    }
-    writeln!(log, "flash_action=written")?;
-    append_manifest_line(run_dir, "flash_action", "written")?;
-
     Ok(())
 }
 
@@ -6208,9 +5682,6 @@ fn watch_uart(
                 }
 
                 let text = String::from_utf8_lossy(&buffer);
-                if success_markers.iter().any(|marker| text.contains(marker)) {
-                    return Ok(());
-                }
                 if let Some(marker) = failure_markers
                     .iter()
                     .find(|marker| text.contains(**marker))
@@ -6219,6 +5690,9 @@ fn watch_uart(
                         "uart reported failure marker `{marker}`; see {}",
                         log_path.display()
                     );
+                }
+                if success_markers.iter().any(|marker| text.contains(marker)) {
+                    return Ok(());
                 }
             }
             Ok(_) => {}
@@ -6934,15 +6408,16 @@ mod tests {
         bounded_companion_command_timeout, build_env_prefix, command_field,
         contains_radius_access_reject, eap_station_mac, eap_tcpdump_filter_args,
         ensure_esp_now_attempt_completed, env_flag_default, esp_now_companion_tx_command,
-        flash_cache_key, flash_images_fingerprint, flash_skip_status_from_value,
-        focused_run_attempt_limit, matrix_secondary_lane_candidate, parse_matrix_options,
-        parse_proc_cmdline, parse_radius_listener_pids, partition_matrix_lanes, path_presence,
-        promisc_raw_kind, radius_default_eap_type, scenario_by_name, scenario_matrix_lane_label,
-        scenario_requires_radius, scenario_resource_labels, scenario_uses_companion_resource,
-        scenario_uses_router, smartconfig_sender_script, smartconfig_station_mac,
-        ss_line_has_udp_port, udp_port_status, validate_smartconfig_ack, verify_eap_access_reject,
-        wrong_channel_hint, EspNowMode, FlashImage, SmartConfigSenderKind, UdpPortStatus,
-        WpsRouterMode, DEFAULT_MATRIX_ATTEMPTS, EAP_CA_CERT_DER_FILE_ENV, EAP_CA_CERT_FILE_ENV,
+        finish_ap_station_list, flash_cache_key, flash_cached, flash_images_fingerprint,
+        flash_skip_status_from_value, focused_run_attempt_limit, matrix_secondary_lane_candidate,
+        mixed_mode_complete, parse_matrix_options, parse_proc_cmdline, parse_radius_listener_pids,
+        partition_matrix_lanes, path_presence, promisc_raw_kind, radius_default_eap_type,
+        read_flash_cache, scenario_by_name, scenario_matrix_lane_label, scenario_requires_radius,
+        scenario_resource_labels, scenario_uses_companion_resource, scenario_uses_router,
+        smartconfig_sender_script, smartconfig_station_mac, ss_line_has_udp_port, udp_port_status,
+        validate_smartconfig_ack, verify_eap_access_reject, write_flash_cache, wrong_channel_hint,
+        EspNowMode, FlashAction, FlashImage, SmartConfigSenderKind, UdpPortStatus, WpsRouterMode,
+        DEFAULT_MATRIX_ATTEMPTS, EAP_CA_CERT_DER_FILE_ENV, EAP_CA_CERT_FILE_ENV,
         EAP_CA_CERT_PEM_NUL_FILE_ENV, EAP_CLIENT_CERT_DER_FILE_ENV, EAP_CLIENT_CERT_FILE_ENV,
         EAP_CLIENT_CERT_PEM_NUL_FILE_ENV, EAP_PRIVATE_KEY_DER_FILE_ENV, EAP_PRIVATE_KEY_FILE_ENV,
         EAP_PRIVATE_KEY_PEM_NUL_FILE_ENV, EAP_RADIUS_CONFIG_ROOT_ENV, EAP_TLS_ROOT_ENV,
@@ -7017,6 +6492,14 @@ mod tests {
         }
         assert!(encrypted.contains("lmk=42424242424242424242424242424242"));
         assert!(bad_key.contains("lmk=41414141414141414141414141414141"));
+        assert_eq!(
+            encrypted.replace("lmk=42424242424242424242424242424242", "lmk=KEY"),
+            bad_key.replace("lmk=41414141414141414141414141414141", "lmk=KEY")
+        );
+        assert_eq!(
+            command_field(&encrypted, "payload"),
+            Some("657370383236362d68616c2d6573702d6e6f77")
+        );
     }
 
     #[test]
@@ -7078,12 +6561,161 @@ mod tests {
     }
 
     #[test]
-    fn flash_cache_key_is_stable_for_serial_paths() {
-        assert_eq!(flash_cache_key(Path::new("/dev/ttyUSB0")), "_dev_ttyUSB0");
+    fn flash_cache_tracks_ordinary_writes_between_skip_runs() {
+        let dir = unique_test_dir("flash-cache-sequence");
+        let cache = dir.join("cache");
+        let mut physical_image = "unknown";
+        for (image, skip, expected) in [
+            ("A", true, FlashAction::Written),
+            ("A", true, FlashAction::SkippedUnchanged),
+            ("B", false, FlashAction::Written),
+            ("A", true, FlashAction::Written),
+        ] {
+            let action = flash_cached(&cache, image, skip, false, || {
+                assert!(read_flash_cache(&cache)?.is_none());
+                physical_image = image;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(action, expected);
+            assert_eq!(physical_image, image);
+            assert_eq!(read_flash_cache(&cache).unwrap().as_deref(), Some(image));
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flash_cache_is_invalidated_before_failed_or_partial_writes() {
+        let dir = unique_test_dir("flash-cache-failure");
+        let cache = dir.join("cache");
+        for partial in [false, true] {
+            write_flash_cache(&cache, "A").unwrap();
+            let mut physical_image = "A";
+            let result = flash_cached(&cache, "B", false, false, || {
+                assert!(read_flash_cache(&cache)?.is_none());
+                if partial {
+                    physical_image = "partial B";
+                }
+                Err(anyhow::anyhow!("fake writer failure"))
+            });
+            assert!(result.is_err());
+            assert!(read_flash_cache(&cache).unwrap().is_none());
+            let result = flash_cached(&cache, "A", true, false, || {
+                physical_image = "A";
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(result, FlashAction::Written);
+            assert_eq!(physical_image, "A");
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flash_cache_guard_and_skip_combinations_preserve_physical_state() {
+        let dir = unique_test_dir("flash-cache-guards");
+        let cache = dir.join("cache");
+        for skip in [false, true] {
+            for guard in [false, true] {
+                for cached in [None, Some("A"), Some("B")] {
+                    let _ = fs::remove_file(&cache);
+                    if let Some(cached) = cached {
+                        write_flash_cache(&cache, cached).unwrap();
+                    }
+                    let mut wrote = false;
+                    let result = flash_cached(&cache, "A", skip, guard, || {
+                        wrote = true;
+                        Ok(())
+                    })
+                    .unwrap();
+                    let expected = if cached == Some("A") && (skip || guard) {
+                        FlashAction::SkippedUnchanged
+                    } else if guard {
+                        FlashAction::BlockedChanged
+                    } else {
+                        FlashAction::Written
+                    };
+                    assert_eq!(
+                        result, expected,
+                        "skip={skip} guard={guard} cached={cached:?}"
+                    );
+                    assert_eq!(wrote, expected == FlashAction::Written);
+                    assert_eq!(
+                        read_flash_cache(&cache).unwrap().as_deref(),
+                        if wrote { Some("A") } else { cached }
+                    );
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flash_cache_keys_unify_serial_aliases_without_path_collisions() {
+        let dir = unique_test_dir("flash-cache-alias");
+        let device = dir.join("tty USB0");
+        let alias = dir.join("by-id");
+        let other = dir.join("tty_USB0");
+        fs::write(&device, "").unwrap();
+        fs::write(&other, "").unwrap();
+        std::os::unix::fs::symlink(&device, &alias).unwrap();
         assert_eq!(
-            flash_cache_key(Path::new("/dev/serial/by-id/usb chip")),
-            "_dev_serial_by-id_usb_chip"
+            flash_cache_key(&device).unwrap(),
+            flash_cache_key(&alias).unwrap()
         );
+        assert_ne!(
+            flash_cache_key(&device).unwrap(),
+            flash_cache_key(&other).unwrap()
+        );
+        let device_cache = dir.join(format!("{}.fingerprint", flash_cache_key(&device).unwrap()));
+        let alias_cache = dir.join(format!("{}.fingerprint", flash_cache_key(&alias).unwrap()));
+        flash_cached(&device_cache, "A", false, false, || Ok(())).unwrap();
+        assert_eq!(
+            flash_cached(&alias_cache, "A", true, false, || panic!("alias must skip")).unwrap(),
+            FlashAction::SkippedUnchanged
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mixed_mode_requires_lease_and_both_uart_outcomes_with_failure_precedence() {
+        let complete = "ap-sta-ok\nap-sta-downstream-ok\r\n";
+        assert!(mixed_mode_complete(complete, Some("192.168.4.2")).unwrap());
+        for uart in ["", "ap-sta-ok\n", "ap-sta-downstream-ok\n"] {
+            assert!(!mixed_mode_complete(uart, Some("192.168.4.2")).unwrap());
+        }
+        assert!(!mixed_mode_complete(complete, None).unwrap());
+        for invalid in ["192.168.4.1", "192.168.4.6", "192.168.5.2", "192.168.4.bad"] {
+            assert!(mixed_mode_complete(complete, Some(invalid)).is_err());
+        }
+        for failure in [
+            "ap_sta err connect",
+            "ap_sta err dhcp-send",
+            "panic",
+            "Guru Meditation",
+        ] {
+            assert!(
+                mixed_mode_complete(&format!("{complete}{failure}"), Some("192.168.4.2")).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn station_list_rejoin_requires_the_post_deauth_join_to_succeed() {
+        let mut called = false;
+        let result = finish_ap_station_list(true, || {
+            called = true;
+            Err(anyhow::anyhow!("second join failed"))
+        });
+        assert!(called);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("second join failed"));
+        assert!(finish_ap_station_list(true, || Ok("OK STA_JOIN connected=0".to_owned())).is_err());
+        finish_ap_station_list(true, || Ok("OK STA_JOIN connected=1".to_owned())).unwrap();
+        finish_ap_station_list(false, || panic!("station-list must not rejoin")).unwrap();
     }
 
     #[test]

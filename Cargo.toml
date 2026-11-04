@@ -42,12 +42,12 @@ esp8266-wifi-sys = { version = "=0.1.0", path = "esp8266-wifi-sys", default-feat
 portable-atomic = { version = "1", default-features = false, optional = true }
 heapless = { version = "0.8", optional = true }
 allocator-api2 = { version = "=0.2.18", default-features = false, features = ["alloc"], optional = true }
+# smoltcp 0.12 requires a socket when Ethernet is enabled. UDP is the minimal
+# baseline; applications select additional protocols on their smoltcp dependency.
 smoltcp = { version = "0.12", default-features = false, features = [
   "medium-ethernet",
   "proto-ipv4",
-  "socket-tcp",
   "socket-udp",
-  "socket-dhcpv4",
 ], optional = true }
 embassy-executor = { version = "=0.6.3", default-features = false, features = ["task-arena-size-1024", "integrated-timers"], optional = true }
 embassy-time = { version = "=0.3.2", default-features = false, features = [
@@ -79,6 +79,13 @@ embassy-net = { version = "=0.5.0", default-features = false, features = [
 ] }
 embedded-io-async = "0.6"
 embassy-futures = "0.1"
+smoltcp = { version = "0.12", default-features = false, features = [
+  "medium-ethernet",
+  "proto-ipv4",
+  "socket-tcp",
+  "socket-udp",
+  "socket-dhcpv4",
+] }
 
 [target.'cfg(not(target_arch = "xtensa"))'.dev-dependencies]
 proptest = { version = "=1.6.0", default-features = false, features = ["std"] }
@@ -130,11 +137,11 @@ required-features = ["wifi"]
 
 [[example]]
 name = "wifi_ap"
-required-features = ["wifi-smoltcp", "embassy"]
+required-features = ["embassy"]
 
 [[example]]
 name = "wifi_ap_sta"
-required-features = ["wifi-embassy-net", "wifi-smoltcp"]
+required-features = ["wifi-embassy-net"]
 
 [[example]]
 name = "wifi_promisc"
@@ -182,7 +189,6 @@ embassy = [
 wifi-smoltcp = ["wifi", "dep:smoltcp"]
 wifi-embassy-net = [
   "embassy",
-  "dep:smoltcp",
   "dep:embassy-net-driver-channel",
   "dep:embassy-futures",
 ]

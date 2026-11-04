@@ -8,6 +8,7 @@ use esp8266_hal::{
 };
 
 pub mod dhcp;
+pub mod dhcp_wire;
 pub mod ip;
 
 struct Allocator(esp_alloc::EspHeap);
@@ -63,14 +64,7 @@ pub fn log_line(message: &[u8]) {
 
 pub fn log_debug(value: &impl core::fmt::Debug) {
     use core::fmt::Write;
-    struct Logger;
-    impl core::fmt::Write for Logger {
-        fn write_str(&mut self, message: &str) -> core::fmt::Result {
-            esp8266_hal::logger::write_bytes(message.as_bytes());
-            Ok(())
-        }
-    }
-    let _ = write!(Logger, "{value:?}");
+    let _ = write!(esp8266_hal::logger::UartWriter, "{value:?}");
 }
 
 /// Example policy: at most three 20-second attempts with explicit cleanup.

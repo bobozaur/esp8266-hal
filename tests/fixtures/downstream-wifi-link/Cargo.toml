@@ -6,10 +6,18 @@ publish = false
 
 [workspace]
 
+[features]
+wifi-smoltcp = ["esp8266-hal/wifi-smoltcp", "dep:smoltcp"]
+wifi-embassy-net = ["esp8266-hal/wifi-embassy-net", "dep:embassy-net-driver"]
+
 [dependencies]
 esp8266-hal = { path = "../../..", default-features = false, features = ["wifi"] }
 panic-halt = "1"
 esp-alloc = "=0.4.0"
+# Import adapter traits without supplying protocol/socket features that could
+# hide an incomplete dependency declaration in the HAL.
+smoltcp = { version = "0.12", default-features = false, optional = true }
+embassy-net-driver = { version = "0.2", default-features = false, optional = true }
 
 [profile.release]
 codegen-units = 8
