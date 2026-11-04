@@ -1,13 +1,13 @@
 # ESP8266 HAL refactor plan
 
 Status: the baseline refactor is committed as `f31504b`, and the packet
-optimizations as `51d8b41`. The further simplification batch is implemented and
-reviewed. Technical and report reviews have converged with no unresolved
-material source finding. Current evidence and qualification gaps are recorded under
-“Further simplification review”; earlier sections retain their campaign scope.
-WPS, enterprise authentication and SmartConfig post-stop networking are not
-requalified by this batch. Publication is separate.
-Updated: 2026-11-04.
+optimizations as `51d8b41`. The further simplification batch is committed as
+`9d95759`. Technical and report reviews have converged with no unresolved
+material source finding. The protocol retry below requalifies SmartConfig
+provisioning and PEAP; WPS, certificate-based EAP-TLS, confirmed password
+rejection and SmartConfig post-stop networking remain open. Earlier sections
+retain their campaign scope. Publication is separate.
+Updated: 2026-11-05.
 
 The decisions below were agreed during discussion. The user subsequently
 authorized autonomous planning, adversarial review to saturation, implementation
@@ -363,6 +363,50 @@ latency are not established by the resource measurements. Actual-C fault tests
 pass through the retained [optional native WPS runner](esp8266-wifi-sys/tests/native-wps/README.md).
 It uses the canonical sources with an external pinned SDK and newlib headers;
 it runs separately from ordinary Cargo checks and does not qualify radio behavior.
+
+## Protocol qualification retry
+
+The current committed implementation was retried against a nearby external AP,
+including an isolated network with local DHCP and a Wi-Fi provisioning sender.
+No production code changed during this investigation.
+
+| Check | Current result |
+| --- | --- |
+| Ordinary station association and DHCP | Pass against the nearby AP |
+| SmartConfig provisioning | Pass: credentials decoded, station connected, DHCP completed, and the sender validated the acknowledgement |
+| PEAP | Pass: device completion correlated with server EAP success and the completed four-way handshake |
+| WPS PBC and PIN | Not requalified: connection attempts still fail, including unacknowledged association responses reported by the AP |
+| Compact certificate EAP-TLS | Not requalified: the final attempt failed during association, before TLS could be evaluated |
+| Wrong-password rejection | Not requalified: disconnection occurred before password verification; the device's generic negative marker is insufficient evidence |
+| SmartConfig post-stop networking | Not requalified: the retry decoded credentials but failed during association, before shutdown or fresh DHCP after stop |
+
+The successful SmartConfig setup used an isolated network and legacy Wi-Fi rates.
+Several fixture conditions changed, so this pass does not identify a single
+cause or establish first-attempt reliability. Earlier captures include delayed
+DHCP traffic and a matching offer without a request. The AP also exposed a
+station teardown/authentication race after reflashing. Explicit station cleanup
+did not eliminate later unacknowledged association responses.
+
+An exact earlier, historically passing WPS image also failed in this retry,
+while a different earlier candidate passed once. The evidence does not isolate
+the router, radio conditions or device behavior as the sole cause, and does not
+establish a regression in the simplification batch. No speculative driver fix
+was made. WPS stack high-water usage remains unmeasured because its probe did
+not reach successful enrollment.
+
+The remaining release checks are WPS PBC/PIN, EAP-TLS, confirmed password
+rejection and fresh DHCP after stopping SmartConfig. Resolve the intermittent
+association failure or use an independent working AP before treating these as
+protocol-specific failures. The earlier broad host, target and two-board results
+remain valid within their recorded scope.
+
+Temporary AP, DHCP, firewall and workstation Wi-Fi changes are removed. Router
+configuration and staged UCI match the initial snapshot, the original services
+and uplink remain active, and workstation routes and Wi-Fi settings are restored.
+The disconnected board had booted its current AP image before removal; a fresh
+reserved-flash comparison could not be completed after it was disconnected.
+The remaining board boots the current AP example, its reserved 16 KiB matches
+the original backup, and its serial settings are restored.
 
 ## Packet optimization follow-up
 
