@@ -536,20 +536,17 @@ static int eap_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)
         return ESP_FAIL;
     }
 #ifdef USE_WPA2_TASK
-    if (len > 384) {
-        return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);
-    }
     {
         struct wpa2_rx_param *param = (struct wpa2_rx_param *)os_zalloc(sizeof(struct wpa2_rx_param));   /* free in task */
 
         if (!param) {
-            return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);
+            return ESP_ERR_NO_MEM;
         }
 
         param->buf = (u8 *)os_zalloc(len);   /* free in task */
         if (!param->buf) {
             os_free(param);
-            return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);
+            return ESP_ERR_NO_MEM;
         }
         param->bssid = bssid;
         memcpy(param->buf, buf, len);

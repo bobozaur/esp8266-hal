@@ -3,10 +3,12 @@
 Status: the baseline refactor is committed as `f31504b`, and the packet
 optimizations as `51d8b41`. The further simplification batch is committed as
 `9d95759`. Technical and report reviews have converged with no unresolved
-material source finding. The protocol retry below requalifies SmartConfig
-provisioning and PEAP; WPS, certificate-based EAP-TLS, confirmed password
-rejection and SmartConfig post-stop networking remain open. Earlier sections
-retain their campaign scope. Publication is separate.
+material source finding. Subsequent hardware troubleshooting found and repaired
+an enterprise receive-dispatch defect. PEAP, explicit password rejection,
+compact certificate EAP-TLS and WPS PBC/PIN now pass against an independent AP.
+SmartConfig provisioning and fresh DHCP after stop also pass. The dispatch repair
+and qualification results are included below. Earlier sections retain their
+campaign scope. Publication is separate.
 Updated: 2026-11-05.
 
 The decisions below were agreed during discussion. The user subsequently
@@ -364,7 +366,7 @@ pass through the retained [optional native WPS runner](esp8266-wifi-sys/tests/na
 It uses the canonical sources with an external pinned SDK and newlib headers;
 it runs separately from ordinary Cargo checks and does not qualify radio behavior.
 
-## Protocol qualification retry
+## Protocol qualification retry before the dispatch repair
 
 The current committed implementation was retried against a nearby external AP,
 including an isolated network with local DHCP and a Wi-Fi provisioning sender.
@@ -394,8 +396,8 @@ establish a regression in the simplification batch. No speculative driver fix
 was made. WPS stack high-water usage remains unmeasured because its probe did
 not reach successful enrollment.
 
-The remaining release checks are WPS PBC/PIN, EAP-TLS, confirmed password
-rejection and fresh DHCP after stopping SmartConfig. Resolve the intermittent
+The remaining release checks at the end of this retry were WPS PBC/PIN, EAP-TLS,
+confirmed password rejection and fresh DHCP after stopping SmartConfig. Resolve the intermittent
 association failure or use an independent working AP before treating these as
 protocol-specific failures. The earlier broad host, target and two-board results
 remain valid within their recorded scope.
@@ -406,6 +408,61 @@ and uplink remain active, and workstation routes and Wi-Fi settings are restored
 The disconnected board had booted its current AP image before removal; a fresh
 reserved-flash comparison could not be completed after it was disconnected.
 The remaining board boots the current AP example, its reserved 16 KiB matches
+the original backup, and its serial settings are restored.
+
+## Independent AP qualification and enterprise dispatch repair
+
+An independent AP separated authentication defects from the earlier association
+failures. The unchanged firmware completed WPS PBC/PIN and compact certificate
+EAP-TLS, but PEAP stalled after its first cryptographic exchange. The AP confirmed
+that its subsequent TLS messages were acknowledged over the air.
+
+The native adaptation dispatched EAP packets larger than 384 bytes directly on
+the smaller Wi-Fi task stack. Smaller packets used the dedicated WPA2 worker.
+Changing only the AP's EAP fragment size from 512 to 256 made PEAP pass. A private
+probe then measured the Wi-Fi task's free-stack high-water value falling from
+1124 bytes to zero during the failing TLS call.
+
+The repair restores the pinned SDK's worker dispatch for every EAP packet when
+`USE_WPA2_TASK` is enabled. Both RX allocation failures return `ESP_ERR_NO_MEM`
+instead of falling back to the smaller stack. No stack size or public API changes.
+Only the corresponding native archive member changed; the other 83 members and
+their order remain identical. Canonical-source reconstruction and checksums pass.
+The measured PEAP image removes 88 flash bytes with unchanged static RAM usage.
+
+| Check | Result after repair |
+| --- | --- |
+| PEAP, 512-byte EAP fragments | Pass: device completion, server EAP success and completed four-way handshake |
+| Wrong-password rejection | Pass: device disconnect and server MSCHAPv2 invalid-response rejection |
+| Compact certificate EAP-TLS | Pass: client certificate verified by the server, EAP success and completed four-way handshake |
+| WPS PBC and PIN | Pass with freshly rebuilt examples against the independent AP |
+| SmartConfig post-stop networking | Pass: credentials, association, DHCP, sender-validated acknowledgement, then a new DHCP exchange after stopping provisioning and waiting 12 seconds |
+| Host workflow and packages | All 22 checks pass; package verification succeeds offline |
+| Target builds and downstream consumers | All required configurations pass, including optional components together and all four downstream adapter combinations |
+
+The first TLS server fixture automatically included its trusted root in an
+825-byte Certificate message, exceeding the 768-byte incoming record limit.
+A compact server certificate reduced the message to 744 bytes without removing
+CA validation or client-certificate verification. Certificate-time checks remain
+disabled in these no-RTC device fixtures. These results qualify the tested compact
+profiles, not arbitrary certificate chains or RSA profiles.
+
+The SmartConfig pass used the same rebuilt firmware as the failed attempts and
+the previously working Wi-Fi sender. The packet capture confirms a second DHCP
+exchange with new transaction identifiers after stop. Limited-broadcast and
+device-bound sender variants did not complete decoding. Their exact failure
+mechanism remains unresolved; the successful run does not establish reliability
+across arbitrary senders or APs.
+
+The successful WPS PIN stack probe observed 2184 free worker-stack bytes; this
+is a sample, not a worst-case stack bound. The independent AP passes do not explain
+every earlier association failure on the original fixture. Private diagnostics
+remain outside the production sources. The temporary AP, DHCP service, firewall
+rule, monitor interface, client profile and tooling container have been removed.
+Router configuration and staged UCI match their saved state, the original Wi-Fi
+services and uplink are active, and workstation radio, interface and routes are
+restored. The separate client host was inspected without modification.
+The connected board boots the current AP example; its reserved 16 KiB matches
 the original backup, and its serial settings are restored.
 
 ## Packet optimization follow-up

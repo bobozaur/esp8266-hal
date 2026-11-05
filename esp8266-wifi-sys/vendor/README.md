@@ -12,7 +12,7 @@ the pinned Xtensa GCC linker driver required by the ESP8266 Rust target.
 - Driver source tree used to derive this snapshot:
   `2624d1c959f71b98ff93c4f611f987a9c3d9fc71`
 - Baseline snapshot generated: 2026-07-22
-- Derived archives rebuilt: 2026-11-04
+- Derived archives rebuilt: 2026-11-05
 - C toolchain: `xtensa-lx106-elf-gcc 8.4.0`, crosstool-NG
   `esp-2020r3-49-gd5524c1`
 - Wi-Fi bindings generator: `rust-bindgen 0.70.1`
@@ -52,6 +52,10 @@ null dereference. It does not change the original initialization error.
 TLS and EAP handshake allocations use the application-provided allocator;
 temporary input and output buffers are released and restored around
 cryptographic work to reduce peak memory use.
+
+Enterprise EAP receive processing always uses the dedicated WPA2 worker when
+`USE_WPA2_TASK` is enabled. Allocation failures return `ESP_ERR_NO_MEM`; packet
+size or heap pressure must not move TLS work onto the smaller Wi-Fi task stack.
 
 WPS owns partial initialization and normal teardown through the same cleanup
 path. Its worker queue stores events by value, and completed credentials are

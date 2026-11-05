@@ -68,22 +68,24 @@
 -	}
 --- a/esp_wpa2_patched.c
 +++ b/esp_wpa2_patched.c
-@@ -11,7 +11,11 @@
- // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- // See the License for the specific language governing permissions and
- // limitations under the License.
+@@ -14 +14,5 @@
+-
 +//
 +// Modified by esp8266-hal for its vendored Rust-first Wi-Fi runtime. See
 +// ../README.md for the pinned source and reproduction details.
- 
++
 +#line 15
- #include <string.h>
- 
- #include "freertos/FreeRTOS.h"
-@@ -1174,4 +1178,3 @@
-     *disable = wifi_sta_get_enterprise_disable_time_check();
-     return ESP_OK;
- }
+@@ -535,3 +538,0 @@
+-    if (len > 384) {
+-        return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);
+-    }
+@@ -542 +543 @@
+-            return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);
++            return ESP_ERR_NO_MEM;
+@@ -548 +549 @@
+-            return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);
++            return ESP_ERR_NO_MEM;
+@@ -1177 +1177,0 @@
 -
 --- a/esp_wps_patched.c
 +++ b/esp_wps_patched.c

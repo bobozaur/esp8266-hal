@@ -187,13 +187,18 @@ fragmentation does not increase the TLS record-content limits. Arbitrary
 certificate chains or RSA profiles are not qualified, even when their key sizes
 fit these ceilings.
 
+A small leaf certificate alone does not establish compatibility: the server may
+include additional chain certificates in its TLS records. Enterprise receive
+processing uses the dedicated WPA2 task for every EAP packet; packet size and
+allocation failure must not move cryptographic work onto the smaller Wi-Fi stack.
+
 ## Provisioning and polled radio interrupts
 
 SmartConfig uses the hardware NMI path. Its example keeps the provisioning
 session alive through DHCP and ESPTouch acknowledgement, then explicitly stops it.
-Networking after stop is tested separately with a fresh DHCP exchange. Earlier
-campaigns passed that check; the latest simplification campaign did not reach it
-because its post-stop fixtures failed to decode provisioning credentials.
+Networking after stop is tested separately. The current qualification completes
+a fresh DHCP exchange after stopping provisioning and waiting 12 seconds, with
+new transaction identifiers confirmed in the packet capture.
 
 Promiscuous reception still polls the native FIQ handler from the timer path.
 That handler masks the NMI-enable register and relies on its hardware interrupt
