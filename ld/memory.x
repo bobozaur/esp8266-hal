@@ -1,10 +1,11 @@
 /* ESP8266: 96 KiB of DRAM and 32 KiB of instruction RAM with cache enabled.
  * The ROM boot stack is inherited by xtensa-lx-rt. Reserve its upper 8 KiB
- * permanently; this linker budget does not move or reclaim the active stack.
+ * by default; applications may override STACK_SIZE at link time. This budget
+ * does not move or reclaim the active stack.
  */
 ENTRY(ESP8266Reset)
 
-STACK_SIZE = 8k;
+PROVIDE(STACK_SIZE = 8k);
 DRAM_END = 0x40000000;
 _heap_end = DRAM_END - STACK_SIZE;
 
@@ -52,6 +53,8 @@ SECTIONS {
 }
 
 ASSERT(_heap_start <= _heap_end, "Static DRAM overlaps the reserved application stack");
+ASSERT(STACK_SIZE > 0 && STACK_SIZE < 0x18000 && (STACK_SIZE & 15) == 0,
+       "STACK_SIZE must be positive, 16-byte aligned and smaller than DRAM");
 _text_heap_end = ORIGIN(iram_seg) + LENGTH(iram_seg);
 
 /* Application handlers have extern C fn() ABI, separate from the runtime's

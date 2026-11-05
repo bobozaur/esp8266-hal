@@ -61,7 +61,7 @@ pub(crate) struct Sdk {
     sta_rx_registered: bool,
     ap_rx_registered: bool,
     #[cfg(feature = "wifi-enterprise")]
-    wpa2_enterprise_enabled: bool,
+    wpa2_enterprise_configured: bool,
     #[cfg(feature = "wifi-promiscuous")]
     pub(crate) promiscuous_enabled: bool,
     #[cfg(feature = "wifi-esp-now")]
@@ -99,7 +99,7 @@ impl Sdk {
             sta_rx_registered: false,
             ap_rx_registered: false,
             #[cfg(feature = "wifi-enterprise")]
-            wpa2_enterprise_enabled: false,
+            wpa2_enterprise_configured: false,
             #[cfg(feature = "wifi-promiscuous")]
             promiscuous_enabled: false,
             #[cfg(feature = "wifi-esp-now")]
@@ -142,7 +142,7 @@ impl Sdk {
         if let Some(credentials) = config.credential().enterprise_credentials() {
             self.enable_wpa2_enterprise(credentials)
         } else {
-            self.disable_wpa2_enterprise_if_enabled()
+            Ok(())
         }
     }
 
@@ -151,13 +151,12 @@ impl Sdk {
         &mut self,
         credentials: &Wpa2EnterpriseCredentials<'_>,
     ) -> Result<(), DriverError> {
-        self.disable_wpa2_enterprise_if_enabled()?;
-        self.clear_wpa2_enterprise_credentials();
+        // Mode selection has already cleared the previous credentials.
         // Material is static by the configuration contract; retain cleanup
         // responsibility even if native setup fails partway through.
-        self.wpa2_enterprise_enabled = true;
+        self.wpa2_enterprise_configured = true;
         if let Err(error) = self.enable_wpa2_enterprise_inner(credentials) {
-            let _ = self.disable_wpa2_enterprise_if_enabled();
+            let _ = self.clear_wpa2_enterprise();
             return Err(error);
         }
         Ok(())
@@ -253,15 +252,15 @@ impl Sdk {
     }
 
     #[cfg(feature = "wifi-enterprise")]
-    pub(crate) fn disable_wpa2_enterprise_if_enabled(&mut self) -> Result<(), DriverError> {
-        if !self.wpa2_enterprise_enabled {
+    pub(crate) fn clear_wpa2_enterprise(&mut self) -> Result<(), DriverError> {
+        if !self.wpa2_enterprise_configured {
             return Ok(());
         }
 
         crate::wifi::EspError::check(unsafe { esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_disable() })
             .map_err(map_enterprise_esp_error)?;
         self.clear_wpa2_enterprise_credentials();
-        self.wpa2_enterprise_enabled = false;
+        self.wpa2_enterprise_configured = false;
         Ok(())
     }
 
@@ -427,6 +426,17 @@ impl Sdk {
         crate::wifi::compat::port::set_wdev_tick_poll_enabled(false);
         if stop_result.is_ok() {
             self.started = false;
+            #[cfg(feature = "wifi-enterprise")]
+            if self.wpa2_enterprise_configured {
+                // Stop the EAP worker and release handshake state, retaining
+                // credential inputs so ordinary start can enable it again.
+                result = result.and(
+                    crate::wifi::EspError::check(unsafe {
+                        esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_disable()
+                    })
+                    .map_err(map_enterprise_esp_error),
+                );
+            }
             self.detach_ap_rx();
             self.detach_sta_rx();
             if self.ap_rx_registered || self.sta_rx_registered {
@@ -456,9 +466,13 @@ impl Sdk {
         // quarantined so a later resource layout can never be observed by a
         // stale trampoline.
         self.registration = None;
+        if self.quiesce().is_err() {
+            return false;
+        }
         #[cfg(feature = "wifi-enterprise")]
-        let _ = self.disable_wpa2_enterprise_if_enabled();
-        let _ = self.quiesce();
+        if self.clear_wpa2_enterprise().is_err() {
+            return false;
+        }
         crate::wifi::compat::port::set_wdev_tick_poll_enabled(false);
         let deinitialized =
             crate::wifi::EspError::check(unsafe { esp8266_wifi_sys::esp_wifi_deinit() }).is_ok();
@@ -486,7 +500,7 @@ impl Sdk {
         #[cfg(feature = "wifi-wps")]
         let callbacks_detached = callbacks_detached && !self.wps_enabled;
         #[cfg(feature = "wifi-enterprise")]
-        let callbacks_detached = callbacks_detached && !self.wpa2_enterprise_enabled;
+        let callbacks_detached = callbacks_detached && !self.wpa2_enterprise_configured;
 
         if deinitialized {
             unsafe { crate::wifi::compat::critical::clear_wdev_ready() };
@@ -542,11 +556,6 @@ impl Sdk {
             }
             sdk_initialized = true;
 
-            #[cfg(feature = "wifi-smartconfig")]
-            if unsafe { crate::wifi::compat::timer::start_ets_timer_task() } != 1 {
-                return Err(InitError::BackendUnavailable);
-            }
-
             crate::wifi::EspError::check(unsafe {
                 esp8266_wifi_sys::esp_wifi_set_storage(esp8266_wifi_sys::WIFI_STORAGE_RAM)
             })
@@ -577,6 +586,10 @@ impl Sdk {
 
     pub(crate) fn set_mode(&mut self, mode: RawMode) -> Result<(), DriverError> {
         self.ensure_initialized()?;
+        // Every configuration replaces the previous enterprise inputs, including
+        // credential-free station mode used for scanning and provisioning.
+        #[cfg(feature = "wifi-enterprise")]
+        self.clear_wpa2_enterprise()?;
         crate::wifi::EspError::check(unsafe {
             esp8266_wifi_sys::esp_wifi_set_mode(raw_mode(mode))
         })
@@ -587,15 +600,14 @@ impl Sdk {
 
     pub(crate) fn start(&mut self) -> Result<(), DriverError> {
         self.ensure_initialized()?;
-        // Ordinary stop retains configuration. Re-enable idempotently if native
-        // stop disabled the enterprise state machine without clearing its inputs.
+        // Ordinary stop releases enterprise handshake state but retains its
+        // credential inputs for the next start.
         #[cfg(feature = "wifi-enterprise")]
-        if self.wpa2_enterprise_enabled {
+        if self.wpa2_enterprise_configured {
             crate::wifi::EspError::check(unsafe {
                 esp8266_wifi_sys::esp_wifi_sta_wpa2_ent_enable()
             })
             .map_err(map_esp_driver_error)?;
-            self.wpa2_enterprise_enabled = true;
         }
         self.apply_station_power_save_for_mode()?;
         self.register_event_handler()?;
@@ -657,8 +669,6 @@ impl Sdk {
 
 impl Sdk {
     pub(crate) fn configure_ap(&mut self, config: &AccessPointConfig) -> Result<(), DriverError> {
-        #[cfg(feature = "wifi-enterprise")]
-        self.disable_wpa2_enterprise_if_enabled()?;
         self.set_mode(RawMode::Ap)?;
         let mut raw = esp8266_wifi_sys::wifi_config_t {
             ap: raw_ap_config(config),
@@ -1242,10 +1252,6 @@ impl Sdk {
         config: &SmartConfigStartConfig,
     ) -> Result<(), DriverError> {
         self.register_smartconfig_event_handler()?;
-        if unsafe { crate::wifi::compat::timer::start_ets_timer_task() } != 1 {
-            let _ = self.unregister_smartconfig_event_handler();
-            return Err(DriverError::OutOfMemory);
-        }
         // Keep config and AES key live even if native code retains either pointer.
         let raw = self
             .resources()

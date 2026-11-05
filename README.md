@@ -44,8 +44,12 @@ global allocator. Registration does not initialize the heap or runtime, and
 ordinary `#[esp8266_hal::main]` entry does not start the runtime or Wi-Fi.
 The [shared example setup](examples/support/mod.rs) implements `WifiAllocator`
 using an application-owned `esp_alloc::EspHeap` over linker-defined unused DRAM.
-The [linker memory map](ld/memory.x) reserves the application's original stack
-permanently.
+The [linker memory map](ld/memory.x) permanently reserves 8 KiB for the
+application stack by default. Applications may override the absolute
+`STACK_SIZE` linker symbol; it must be positive, 16-byte aligned and fit within
+DRAM without overlapping static data. The [`wifi_eap`](examples/wifi_eap.rs)
+example reserves 4 KiB based on measured stack use. A smaller reservation needs
+validation against the application's own call and interrupt depth.
 
 `Runtime` initializes once per boot and reserves Timer2/FRC2, the CPU compare
 interrupt and the software scheduling interrupt. Timer1 remains available to the
@@ -116,12 +120,19 @@ cargo run -p xtask --target x86_64-unknown-linux-gnu -- wifi-hw list
 Validation covers repeated lifecycle/scanning on two boards, bounded connection
 recovery, AP and mixed-mode DHCP, TCP traffic, plain/encrypted ESP-NOW,
 promiscuous capture, flash, timers and UART interrupts. Host tests and target
-links cover every retained feature. WPS PBC/PIN and SmartConfig provisioning,
-DHCP and acknowledgement also pass against an external fixture. Enterprise
-PEAP and client-certificate authentication pass with compact P-256 certificates;
-the wrong-password case is rejected. The native TLS build has fixed
-[record and memory limits](docs/native-runtime.md#tls-memory-limits), and larger
-RSA certificate profiles remain unqualified. The
+links cover every retained feature. Current hardware checks pass WPS PBC/PIN,
+SmartConfig provisioning with DHCP and acknowledgement, and PEAP with
+wrong-password rejection. Current EAP-TLS interoperability checks pass with
+conventional P-256 server/client intermediate chains and an RSA-2048 server
+leaf with a client intermediate chain, including EAP success and the WPA
+four-way handshake. P-256 EAP-TLS, PEAP and wrong-password rejection also pass
+with 64-byte EAP fragments. Invalid certificate material is rejected, with
+subsequent connections succeeding without rebooting. Stop/start and reconnect
+reuse the configured credentials. Intermittent transport failures against one AP
+remain unexplained. The native TLS build has
+2 KiB incoming and outgoing record-content limits; certificate chains and
+cryptographic work must also fit the available heap. See the
+[record and memory limits](docs/native-runtime.md#tls-memory-limits). The
 [refactor plan](plan.md) records results and qualification limits.
 
 The refactor establishes no general performance or size improvement. Section

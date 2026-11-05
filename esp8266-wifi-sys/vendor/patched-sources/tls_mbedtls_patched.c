@@ -26,6 +26,7 @@
 #include "crypto/md5.h"
 #include "crypto/sha256.h"
 #include "crypto/sha384.h"
+#include "mbedtls/asn1.h"
 #include "mbedtls/ssl_internal.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
@@ -39,7 +40,6 @@
 
 #define TLS_RANDOM_LEN 32
 #define TLS_MASTER_SECRET_LEN 48
-#define MAX_CIPHERSUITE 32
 
 /* Throw a compilation error if basic requirements in mbedtls are not enabled */
 #if !defined(MBEDTLS_SSL_TLS_C)
@@ -62,9 +62,6 @@ struct tls_data {
 	size_t in_ext_len;
 	size_t in_ext_pos;
 	struct wpabuf *in_ext_owner;
-	const u8 *in_ext_extra_data;
-	size_t in_ext_extra_len;
-	size_t in_ext_extra_pos;
 	int in_buf_restore_pending;
 	/* Data from mbedtls */
 	struct wpabuf *out_data;
@@ -79,24 +76,21 @@ typedef struct tls_context {
 	mbedtls_x509_crt *cacert_ptr;       /*!< Pointer to the cacert being used. */
 	mbedtls_x509_crt clientcert;        /*!< Container for X.509 client certificate */
 	mbedtls_pk_context clientkey;       /*!< Private key of client certificate */
-	int ciphersuite[MAX_CIPHERSUITE];
+	/* EAP configuration borrows static application material for this lifetime.
+	 * Parse it only after server verification has released its CA chain. */
+	const unsigned char *client_cert_blob;
+	size_t client_cert_blob_len;
+	const unsigned char *private_key_blob;
+	size_t private_key_blob_len;
+	const char *private_key_passwd;
 } tls_context_t;
 
 struct tls_connection {
 	tls_context_t *tls;
 	struct tls_data tls_io_data;
 	unsigned char randbytes[2 * TLS_RANDOM_LEN];
+	int failed;
 };
-
-void esp8266_hal_tls_set_extra_input(struct tls_connection *conn,
-					     const u8 *data, size_t len)
-{
-	if (conn == NULL)
-		return;
-	conn->tls_io_data.in_ext_extra_data = data;
-	conn->tls_io_data.in_ext_extra_len = len;
-	conn->tls_io_data.in_ext_extra_pos = 0;
-}
 
 void esp8266_hal_tls_set_input_owner(struct tls_connection *conn,
 					     struct wpabuf *owner)
@@ -122,38 +116,22 @@ static void tls_mbedtls_cleanup(tls_context_t *tls)
 	mbedtls_ssl_free(&tls->ssl);
 }
 
-static void tls_mbedtls_conn_delete(tls_context_t *tls)
-{
-	if (tls != NULL) {
-		tls_mbedtls_cleanup(tls);
-	}
-}
-
-#define ESP8266_HAL_TLS_CLIENT_FLIGHT_OUT_PREALLOC_BYTES 704
-
-static int esp8266_hal_tls_prealloc_client_flight_out(struct tls_connection *conn)
-{
-	struct tls_data *data = &conn->tls_io_data;
-
-	if (data->out_data != NULL)
-		return 0;
-
-	data->out_data = wpabuf_alloc(ESP8266_HAL_TLS_CLIENT_FLIGHT_OUT_PREALLOC_BYTES);
-
-	return data->out_data == NULL ? MBEDTLS_ERR_SSL_ALLOC_FAILED : 0;
-}
-
 static int tls_mbedtls_write(void *ctx, const unsigned char *buf, size_t len)
 {
 	struct tls_connection *conn = (struct tls_connection *)ctx;
 	struct tls_data *data = &conn->tls_io_data;
 
 	if (data->out_data) {
-		int resize_ret;
-		resize_ret = wpabuf_resize(&data->out_data, len);
-		if (resize_ret < 0) {
+		size_t used = wpabuf_len(data->out_data);
+		size_t needed = used + len;
+		if (needed < used || needed > SIZE_MAX - 255)
 			return MBEDTLS_ERR_SSL_ALLOC_FAILED;
-		}
+		/* Small record appends must not copy the whole certificate flight
+		 * repeatedly. Bound spare capacity to 255 bytes on this small heap. */
+		if (len > wpabuf_tailroom(data->out_data) &&
+		    wpabuf_resize(&data->out_data,
+				  ((needed + 255) & ~(size_t)255) - used) < 0)
+			return MBEDTLS_ERR_SSL_ALLOC_FAILED;
 	} else {
 		data->out_data = wpabuf_alloc(len);
 	}
@@ -192,26 +170,20 @@ static int tls_mbedtls_read(void *ctx, unsigned char *buf, size_t len)
 				data->in_ext_pos = 0;
 				wpabuf_free(data->in_ext_owner);
 				data->in_ext_owner = NULL;
-			}
-			continue;
-		}
-
-		if (data->in_ext_extra_data) {
-			available = data->in_ext_extra_len -
-				    data->in_ext_extra_pos;
-			chunk = len - copied;
-			if (chunk > available)
-				chunk = available;
-			os_memcpy(buf + copied,
-				  data->in_ext_extra_data +
-				  data->in_ext_extra_pos,
-				  chunk);
-			copied += chunk;
-			data->in_ext_extra_pos += chunk;
-			if (data->in_ext_extra_pos >= data->in_ext_extra_len) {
-				data->in_ext_extra_data = NULL;
-				data->in_ext_extra_len = 0;
-				data->in_ext_extra_pos = 0;
+			} else if (data->in_ext_owner &&
+				   data->in_ext_pos > data->in_ext_len - data->in_ext_pos) {
+				/* Release consumed flight bytes before certificate parsing.
+				 * Keeping the smaller tail avoids retaining two full copies. */
+				size_t remaining = data->in_ext_len - data->in_ext_pos;
+				struct wpabuf *tail = wpabuf_alloc_copy(
+					data->in_ext_data + data->in_ext_pos, remaining);
+				if (tail) {
+					wpabuf_free(data->in_ext_owner);
+					data->in_ext_owner = tail;
+					data->in_ext_data = wpabuf_head_u8(tail);
+					data->in_ext_len = remaining;
+					data->in_ext_pos = 0;
+				}
 			}
 			continue;
 		}
@@ -268,10 +240,40 @@ static int esp8266_hal_x509_crt_parse_blob(mbedtls_x509_crt *crt,
 					    const unsigned char *blob,
 					    size_t len)
 {
-	if (esp8266_hal_x509_blob_is_pem(blob, len))
-		return mbedtls_x509_crt_parse(crt, blob, len);
+	unsigned char *cursor;
+	const unsigned char *end;
+	int ret;
 
-	return mbedtls_x509_crt_parse_der(crt, blob, len);
+	if (crt == NULL || blob == NULL || len == 0)
+		return MBEDTLS_ERR_X509_BAD_INPUT_DATA;
+
+	if (esp8266_hal_x509_blob_is_pem(blob, len)) {
+		ret = mbedtls_x509_crt_parse(crt, blob, len);
+		/* Positive means only part of the PEM bundle parsed successfully. */
+		return ret > 0 ? MBEDTLS_ERR_X509_INVALID_FORMAT : ret;
+	}
+
+	/* The SDK parser appends one owned certificate, ignoring trailing DER.
+	 * Bound each call to one complete SEQUENCE and account for every byte. */
+	cursor = (unsigned char *)blob;
+	end = blob + len;
+	while (cursor < end) {
+		const unsigned char *start = cursor;
+		size_t cert_len;
+
+		ret = mbedtls_asn1_get_tag(&cursor, end, &cert_len,
+					 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE);
+		if (ret != 0)
+			return MBEDTLS_ERR_X509_INVALID_FORMAT + ret;
+
+		ret = mbedtls_x509_crt_parse_der(crt, start,
+					       (size_t)(cursor - start) + cert_len);
+		if (ret != 0)
+			return ret;
+		cursor += cert_len;
+	}
+
+	return 0;
 }
 
 static void esp8266_hal_tls_drop_verified_ca(tls_context_t *tls)
@@ -288,11 +290,11 @@ static void esp8266_hal_tls_drop_verified_ca(tls_context_t *tls)
 	tls->cacert_ptr = NULL;
 }
 
-static int set_pki_context(tls_context_t *tls, const struct tls_connection_params *cfg)
+static int set_pki_context(tls_context_t *tls)
 {
 	int ret;
 
-	if (cfg->client_cert_blob == NULL || cfg->private_key_blob  == NULL) {
+	if (tls->client_cert_blob == NULL || tls->private_key_blob  == NULL) {
 		wpa_printf(MSG_ERROR, "%s: config not correct", __func__);
 		return -1;
 	}
@@ -301,16 +303,16 @@ static int set_pki_context(tls_context_t *tls, const struct tls_connection_param
 	mbedtls_pk_init(&tls->clientkey);
 
 	ret = esp8266_hal_x509_crt_parse_blob(&tls->clientcert,
-						 cfg->client_cert_blob,
-						 cfg->client_cert_blob_len);
+						 tls->client_cert_blob,
+						 tls->client_cert_blob_len);
 	if (ret < 0) {
 		wpa_printf(MSG_ERROR, "mbedtls_x509_crt_parse returned -0x%x", -ret);
 		return ret;
 	}
 
-	ret = mbedtls_pk_parse_key(&tls->clientkey, cfg->private_key_blob, cfg->private_key_blob_len,
-				   (const unsigned char *)cfg->private_key_passwd,
-				   cfg->private_key_passwd ? os_strlen(cfg->private_key_passwd) : 0);
+	ret = mbedtls_pk_parse_key(&tls->clientkey, tls->private_key_blob, tls->private_key_blob_len,
+				   (const unsigned char *)tls->private_key_passwd,
+				   tls->private_key_passwd ? os_strlen(tls->private_key_passwd) : 0);
 	if (ret < 0) {
 		wpa_printf(MSG_ERROR, "mbedtls_pk_parse_keyfile returned -0x%x", -ret);
 		return ret;
@@ -382,162 +384,6 @@ static void tls_enable_sha1_config(tls_context_t *tls)
 	mbedtls_ssl_conf_sig_hashes(&tls->conf, tls_sig_hashes_for_eap);
 }
 
-static const int eap_ciphersuite_preference[] =
-{
-#if defined(MBEDTLS_KEY_EXCHANGE_DHE_RSA_ENABLED)
-#if defined(MBEDTLS_SHA512_C) && defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_DHE_RSA_WITH_AES_256_CCM,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
-	MBEDTLS_TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
-#endif
-#if defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_DHE_RSA_WITH_CAMELLIA_256_GCM_SHA384,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256,
-	MBEDTLS_TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA,
-#endif
-
-#if defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_CCM,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_CCM_8,
-#endif
-#endif
-#if defined(MBEDTLS_KEY_EXCHANGE_DHE_PSK_ENABLED)
-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_GCM_SHA384,
-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_CCM,
-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_CBC_SHA384,
-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_CBC_SHA,
-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_CCM_8,
-
-	MBEDTLS_TLS_DHE_PSK_WITH_AES_128_GCM_SHA256,
-	MBEDTLS_TLS_DHE_PSK_WITH_AES_128_CCM,
-	MBEDTLS_TLS_DHE_PSK_WITH_AES_128_CBC_SHA256,
-	MBEDTLS_TLS_DHE_PSK_WITH_AES_128_CCM_8,
-#endif
-#if defined(MBEDTLS_SHA512_C) && defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_RSA_WITH_AES_256_GCM_SHA384,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_RSA_WITH_AES_256_CCM,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_RSA_WITH_AES_256_CBC_SHA256,
-	MBEDTLS_TLS_RSA_WITH_AES_256_CBC_SHA,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_RSA_WITH_AES_256_CCM_8,
-#endif
-
-#if defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_RSA_WITH_AES_128_GCM_SHA256,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_RSA_WITH_AES_128_CCM,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_RSA_WITH_AES_128_CBC_SHA256,
-	MBEDTLS_TLS_RSA_WITH_AES_128_CBC_SHA,
-#endif
-#if defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_ECDH_RSA_WITH_AES_128_GCM_SHA256,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_ECDH_RSA_WITH_AES_128_CBC_SHA256,
-	MBEDTLS_TLS_ECDH_RSA_WITH_AES_128_CBC_SHA,
-#endif
-#if defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_ECDH_ECDSA_WITH_AES_128_GCM_SHA256,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA256,
-	MBEDTLS_TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_RSA_WITH_AES_128_CCM_8,
-#endif
-
-#if defined(MBEDTLS_KEY_EXCHANGE_PSK_ENABLED)
-#if defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_RSA_PSK_WITH_AES_128_GCM_SHA256,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_RSA_PSK_WITH_AES_128_CBC_SHA256,
-	MBEDTLS_TLS_RSA_PSK_WITH_AES_128_CBC_SHA,
-#endif
-	/* The PSK suites */
-#if defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_PSK_WITH_AES_256_GCM_SHA384,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_PSK_WITH_AES_256_CCM,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_PSK_WITH_AES_256_CBC_SHA384,
-	MBEDTLS_TLS_PSK_WITH_AES_256_CBC_SHA,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_PSK_WITH_AES_256_CCM_8,
-#endif
-
-#if defined(MBEDTLS_GCM_C)
-	MBEDTLS_TLS_PSK_WITH_AES_128_GCM_SHA256,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_PSK_WITH_AES_128_CCM,
-#endif
-#if defined(MBEDTLS_CIPHER_MODE_CBC)
-	MBEDTLS_TLS_PSK_WITH_AES_128_CBC_SHA256,
-	MBEDTLS_TLS_PSK_WITH_AES_128_CBC_SHA,
-#endif
-#if defined(MBEDTLS_CCM_C)
-	MBEDTLS_TLS_PSK_WITH_AES_128_CCM_8,
-#endif
-#endif
-
-#if defined(MBEDTLS_DES_C)
-	/* 3DES suites */
-	MBEDTLS_TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA,
-	MBEDTLS_TLS_DHE_PSK_WITH_3DES_EDE_CBC_SHA,
-	MBEDTLS_TLS_RSA_WITH_3DES_EDE_CBC_SHA,
-	MBEDTLS_TLS_RSA_PSK_WITH_3DES_EDE_CBC_SHA,
-	MBEDTLS_TLS_PSK_WITH_3DES_EDE_CBC_SHA,
-#endif
-#if defined(MBEDTLS_ARC4_C)
-	/* RC4 suites */
-	MBEDTLS_TLS_DHE_PSK_WITH_RC4_128_SHA,
-	MBEDTLS_TLS_RSA_WITH_RC4_128_SHA,
-	MBEDTLS_TLS_RSA_WITH_RC4_128_MD5,
-	MBEDTLS_TLS_RSA_PSK_WITH_RC4_128_SHA,
-	MBEDTLS_TLS_PSK_WITH_RC4_128_SHA,
-#endif
-};
-
-static void tls_set_ciphersuite(tls_context_t *tls)
-{
-	/* Only set ciphersuite if cert's key length is high or ciphersuites are set by user */
-	if (tls->ciphersuite[0]) {
-		mbedtls_ssl_conf_ciphersuites(&tls->conf, tls->ciphersuite);
-	} else if (mbedtls_pk_get_bitlen(&tls->clientkey) > 2048 ||
-		(tls->cacert_ptr && mbedtls_pk_get_bitlen(&tls->cacert_ptr->pk) > 2048)) {
-		mbedtls_ssl_conf_ciphersuites(&tls->conf, eap_ciphersuite_preference);
-	}
-}
-
 static int set_client_config(const struct tls_connection_params *cfg, tls_context_t *tls)
 {
 	int ret;
@@ -570,18 +416,15 @@ static int set_client_config(const struct tls_connection_params *cfg, tls_contex
 		mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_NONE);
 	}
 
+	/* The SDK blobs and password borrow the HAL's static credential bytes;
+	 * the caller's temporary tls_connection_params itself is not retained. */
 	if (cfg->client_cert_blob != NULL && cfg->private_key_blob != NULL) {
-		ret = set_pki_context(tls, cfg);
-		if (ret != 0) {
-			wpa_printf(MSG_ERROR, "Failed to set client pki context");
-			return ret;
-		}
+		tls->client_cert_blob = cfg->client_cert_blob;
+		tls->client_cert_blob_len = cfg->client_cert_blob_len;
+		tls->private_key_blob = cfg->private_key_blob;
+		tls->private_key_blob_len = cfg->private_key_blob_len;
+		tls->private_key_passwd = cfg->private_key_passwd;
 	}
-
-	/* Usages of default ciphersuites can take a lot of time on low end device
-	 * and can cause watchdog. Enabling the ciphers which are secured enough
-	 * but doesn't take that much processing power */
-	tls_set_ciphersuite(tls);
 
 	return 0;
 }
@@ -658,11 +501,11 @@ void tls_connection_deinit(void *tls_ctx, struct tls_connection *conn)
 	if (conn == NULL)
 		return;
 
-	/* Free ssl ctx and data */
-	tls_mbedtls_conn_delete((tls_context_t *) conn->tls);
+	/* A failed read may leave an owned input tail. Output belongs to EAP. */
+	wpabuf_free(conn->tls_io_data.in_data);
+	wpabuf_free(conn->tls_io_data.in_ext_owner);
+	tls_mbedtls_cleanup(conn->tls);
 	os_free(conn->tls);
-	conn->tls = NULL;
-	/* Data in in ssl ctx, free connection */
 	os_free(conn);
 }
 
@@ -695,60 +538,9 @@ int tls_connection_set_verify(void *tls_ctx, struct tls_connection *conn,
 	return -1;
 }
 
-static int esp8266_hal_tls_release_in_buf_for_client_flight(mbedtls_ssl_context *ssl)
-{
-	if (ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT)
-		return 0;
-
-	if (ssl->in_buf == NULL || ssl->in_offt != NULL || ssl->in_left != 0)
-		return 0;
-
-	if (ssl->in_hslen != 0 && ssl->in_hslen < ssl->in_msglen)
-		return 0;
-
-	os_memset(ssl->in_buf, 0, MBEDTLS_SSL_IN_BUFFER_LEN);
-	mbedtls_free(ssl->in_buf);
-	ssl->in_buf = NULL;
-	ssl->in_hdr = NULL;
-	ssl->in_ctr = NULL;
-	ssl->in_len = NULL;
-	ssl->in_iv = NULL;
-	ssl->in_msg = NULL;
-	ssl->in_msglen = 0;
-	ssl->in_hslen = 0;
-
-	return 1;
-}
-
-static int esp8266_hal_tls_restore_in_buf_after_client_flight(mbedtls_ssl_context *ssl)
-{
-	ssl->in_buf = mbedtls_calloc(1, MBEDTLS_SSL_IN_BUFFER_LEN);
-	if (ssl->in_buf == NULL)
-		return MBEDTLS_ERR_SSL_ALLOC_FAILED;
-
-	ssl->in_left = 0;
-#if defined(MBEDTLS_SSL_PROTO_DTLS)
-	ssl->next_record_offset = 0;
-	if (ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM) {
-		ssl->in_hdr = ssl->in_buf;
-		ssl->in_ctr = ssl->in_hdr + 3;
-		ssl->in_len = ssl->in_hdr + 11;
-		ssl->in_iv = ssl->in_hdr + 13;
-		ssl->in_msg = ssl->in_iv;
-	} else
-#endif
-	{
-		ssl->in_hdr = ssl->in_buf + 8;
-		ssl->in_ctr = ssl->in_hdr - 8;
-		ssl->in_len = ssl->in_hdr + 3;
-		ssl->in_iv = ssl->in_hdr + 5;
-		ssl->in_msg = ssl->in_iv;
-	}
-	ssl->in_msglen = 0;
-	ssl->in_hslen = 0;
-
-	return 0;
-}
+/* Shared pre-encryption buffer ownership, implemented in ssl_tls. */
+int esp8266_hal_ssl_release_input(mbedtls_ssl_context *ssl);
+int esp8266_hal_ssl_restore_input(mbedtls_ssl_context *ssl, int released);
 
 int esp8266_hal_tls_restore_deferred_input(struct tls_connection *conn)
 {
@@ -759,10 +551,42 @@ int esp8266_hal_tls_restore_deferred_input(struct tls_connection *conn)
 	if (!conn->tls_io_data.in_buf_restore_pending)
 		return 0;
 
-	ret = esp8266_hal_tls_restore_in_buf_after_client_flight(&conn->tls->ssl);
+	ret = esp8266_hal_ssl_restore_input(&conn->tls->ssl, 1);
 	if (ret == 0)
 		conn->tls_io_data.in_buf_restore_pending = 0;
 
+	return ret;
+}
+
+/* All step entry points share preparation: a server flight may contain
+ * several records, so CLIENT_CERTIFICATE is not reached only by the final loop. */
+static int tls_handshake_step(struct tls_connection *conn)
+{
+	tls_context_t *tls = conn->tls;
+	int ret;
+
+	if (conn->failed)
+		return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+
+	if (tls->ssl.state == MBEDTLS_SSL_CLIENT_CERTIFICATE) {
+		os_memcpy(conn->randbytes, tls->ssl.handshake->randbytes,
+			  sizeof(conn->randbytes));
+		if (esp8266_hal_ssl_release_input(&tls->ssl))
+			conn->tls_io_data.in_buf_restore_pending = 1;
+		if (tls->client_cert_blob != NULL) {
+			ret = set_pki_context(tls);
+			if (ret != 0) {
+				mbedtls_ssl_send_alert_message(&tls->ssl,
+					MBEDTLS_SSL_ALERT_LEVEL_FATAL,
+					MBEDTLS_SSL_ALERT_MSG_INTERNAL_ERROR);
+				return ret;
+			}
+		}
+	}
+
+	ret = mbedtls_ssl_handshake_step(&tls->ssl);
+	if (ret >= 0)
+		esp8266_hal_tls_drop_verified_ca(tls);
 	return ret;
 }
 
@@ -786,26 +610,22 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 		conn->tls_io_data.in_ext_len = wpabuf_len(in_data);
 		conn->tls_io_data.in_ext_pos = 0;
 	}
-	ret = mbedtls_ssl_handshake_step(&tls->ssl);
-	if (ret >= 0)
-		esp8266_hal_tls_drop_verified_ca(tls);
+	ret = tls_handshake_step(conn);
 	if (ret < 0) {
 		wpa_printf(MSG_ERROR, "%s:%d", __func__, __LINE__);
 		goto end;
 	}
 
 	/* Multiple reads */
-	while (conn->tls_io_data.in_data || conn->tls_io_data.in_ext_data ||
-	       conn->tls_io_data.in_ext_extra_data) {
-		ret = mbedtls_ssl_handshake_step(&tls->ssl);
+	while (conn->tls_io_data.in_data || conn->tls_io_data.in_ext_data) {
+		ret = tls_handshake_step(conn);
 		if (ret < 0)
 			break;
-		esp8266_hal_tls_drop_verified_ca(tls);
 	}
 
 	/* State machine just started, get client hello */
 	if (tls->ssl.state == MBEDTLS_SSL_CLIENT_HELLO) {
-		ret = mbedtls_ssl_handshake_step(&tls->ssl);
+		ret = tls_handshake_step(conn);
 	}
 
 	if (ret < 0) {
@@ -815,45 +635,23 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 
 	/* Already read sever data till hello done */
 	if (tls->ssl.state == MBEDTLS_SSL_SERVER_HELLO_DONE) {
-		ret = mbedtls_ssl_handshake_step(&tls->ssl);
-		if (ret >= 0)
-			esp8266_hal_tls_drop_verified_ca(tls);
+		ret = tls_handshake_step(conn);
 		if (ret < 0)
 			goto end;
 	}
 
 	if (tls->ssl.state == MBEDTLS_SSL_CLIENT_CERTIFICATE) {
-		/* Read random data before session completes, not present after handshake */
-		if (tls->ssl.handshake) {
-			os_memcpy(conn->randbytes, tls->ssl.handshake->randbytes,
-				  TLS_RANDOM_LEN * 2);
-		}
-
-		/* trigger state machine multiple times to reach till finish */
-		int esp8266_hal_client_flight_in_buf_released;
-		esp8266_hal_client_flight_in_buf_released =
-			esp8266_hal_tls_release_in_buf_for_client_flight(&tls->ssl);
-		if (esp8266_hal_client_flight_in_buf_released)
-			conn->tls_io_data.in_buf_restore_pending = 1;
-		if (tls->clientcert.raw.p != NULL) {
-			ret = esp8266_hal_tls_prealloc_client_flight_out(conn);
-			if (ret != 0)
-				goto esp8266_hal_client_flight_done;
-		}
 		while (tls->ssl.state <= MBEDTLS_SSL_CLIENT_FINISHED) {
-			ret = mbedtls_ssl_handshake_step(&tls->ssl);
-			if (ret < 0) {
+			ret = tls_handshake_step(conn);
+			if (ret < 0)
 				break;
-			}
 		}
-	esp8266_hal_client_flight_done:
-		(void)esp8266_hal_client_flight_in_buf_released;
 	}
 
 	/* Trigger state machine till handshake is complete or error occures */
 	if (tls->ssl.state == MBEDTLS_SSL_FLUSH_BUFFERS) {
 		while (tls->ssl.state < MBEDTLS_SSL_HANDSHAKE_OVER) {
-			ret = mbedtls_ssl_handshake_step(&tls->ssl);
+			ret = tls_handshake_step(conn);
 			if (ret < 0) {
 				break;
 			}
@@ -861,20 +659,19 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 	}
 
 	if (!conn->tls_io_data.out_data) {
-		wpa_printf(MSG_INFO, "application data is null, adding one byte for ack");
-		u8 *dummy = os_zalloc(1);
-		conn->tls_io_data.out_data = wpabuf_alloc_ext_data(dummy, 0);
+		conn->tls_io_data.out_data = wpabuf_alloc(0);
 	}
 
 end:
+	if (ret < 0 && ret != MBEDTLS_ERR_SSL_WANT_READ &&
+	    ret != MBEDTLS_ERR_SSL_WANT_WRITE &&
+	    ret != MBEDTLS_ERR_SSL_CRYPTO_IN_PROGRESS)
+		conn->failed = 1;
 	conn->tls_io_data.in_ext_data = NULL;
 	conn->tls_io_data.in_ext_len = 0;
 	conn->tls_io_data.in_ext_pos = 0;
 	wpabuf_free(conn->tls_io_data.in_ext_owner);
 	conn->tls_io_data.in_ext_owner = NULL;
-	conn->tls_io_data.in_ext_extra_data = NULL;
-	conn->tls_io_data.in_ext_extra_len = 0;
-	conn->tls_io_data.in_ext_extra_pos = 0;
 	return conn->tls_io_data.out_data;
 }
 
@@ -919,9 +716,6 @@ struct wpabuf * tls_connection_decrypt(void *tls_ctx,
 	conn->tls_io_data.in_ext_data = NULL;
 	conn->tls_io_data.in_ext_len = 0;
 	conn->tls_io_data.in_ext_pos = 0;
-	conn->tls_io_data.in_ext_extra_data = NULL;
-	conn->tls_io_data.in_ext_extra_len = 0;
-	conn->tls_io_data.in_ext_extra_pos = 0;
 	if (!conn->tls_io_data.in_data) {
 		return NULL;
 	}
@@ -947,18 +741,11 @@ int tls_connection_resumed(void *tls_ctx, struct tls_connection *conn)
 	return 0;
 }
 
-/* cipher array should contain cipher number in mbedtls num as per IANA
- * Please see cipherlist is u8, therefore only initial ones are supported */
 int tls_connection_set_cipher_list(void *tls_ctx, struct tls_connection *conn,
 				   u8 *ciphers)
 {
-	int i = 0;
-
-	while (*ciphers != 0 && i < MAX_CIPHERSUITE) {
-		conn->tls->ciphersuite[i] = ciphers[i];
-		i++;
-	}
-	return 0;
+	/* This backend uses the configured mbedTLS defaults. */
+	return -1;
 }
 
 int tls_get_version(void *tls_ctx, struct tls_connection *conn,
@@ -1008,7 +795,7 @@ int tls_connection_enable_workaround(void *tls_ctx,
 
 int tls_connection_get_failed(void *tls_ctx, struct tls_connection *conn)
 {
-	return 0;
+	return conn->failed;
 }
 
 int tls_connection_get_read_alerts(void *tls_ctx, struct tls_connection *conn)
@@ -1132,6 +919,7 @@ int tls_connection_shutdown(void *tls_ctx, struct tls_connection *conn)
 	/* outdata may have dangling pointer */
 	conn->tls_io_data.out_data = NULL;
 
+	conn->failed = 0;
 	return mbedtls_ssl_session_reset(&conn->tls->ssl);
 }
 

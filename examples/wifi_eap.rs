@@ -1,5 +1,10 @@
 #![no_std]
 #![no_main]
+#![feature(asm_experimental_arch)]
+
+// This example's measured main-stack peak is below 3 KiB. Reserve 4 KiB so
+// conventional certificate chains fit alongside the separate EAP worker.
+core::arch::global_asm!(".global STACK_SIZE", ".set STACK_SIZE, 4096");
 
 use panic_halt as _;
 

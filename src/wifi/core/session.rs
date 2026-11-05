@@ -396,7 +396,14 @@ impl Drop for SmartConfigSession<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "wifi-esp-now",
+        feature = "wifi-promiscuous",
+        feature = "wifi-wps"
+    )
+))]
 mod tests {
     use super::super::{allocator::test_allocator, QueueConfig};
     use super::*;

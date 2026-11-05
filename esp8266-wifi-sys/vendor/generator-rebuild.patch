@@ -1,12 +1,24 @@
 diff --git a/esp8266-wifi-sys/build.rs b/esp8266-wifi-sys/build.rs
-index 7ce09d3..8e679df 100644
+index 7ce09d3..33010ce 100644
 --- a/esp8266-wifi-sys/build.rs
 +++ b/esp8266-wifi-sys/build.rs
-@@ -41,2 +41,3 @@ fn main() {
+@@ -39,4 +39,5 @@ fn main() {
+     // Step 1: Generate sdkconfig.h
+     let sdkconfig_h = out_dir.join("sdkconfig.h");
      generate_sdkconfig(&sdkconfig_h);
 +    let _ = prefer_canonical(sdkconfig_h);
      let _ = fs::remove_file(out_dir.join("esp_wifi_driver.h"));
-@@ -571,6 +571,17 @@ fn init_cc_build(build: &mut cc::Build, gcc: Option<&str>, include_paths: &[Path
+@@ -74,5 +75,9 @@ fn main() {
+     // Rebuild triggers
+     println!("cargo:rerun-if-env-changed=ESP8266_RTOS_SDK");
++    println!("cargo:rerun-if-env-changed=ESP8266_WIFI_CANONICAL_PATCHED_SOURCES");
++    if let Ok(directory) = env::var("ESP8266_WIFI_CANONICAL_PATCHED_SOURCES") {
++        println!("cargo:rerun-if-changed={directory}");
++    }
+     println!("cargo:rerun-if-env-changed={WPS_ENROLLEE_TRACE_ENV}");
+     println!("cargo:rerun-if-env-changed={EAP_TRACE_ENV}");
+     println!("cargo:rerun-if-env-changed={MBEDTLS_SOFTWARE_AES_ENV}");
+@@ -571,6 +576,17 @@ fn init_cc_build(build: &mut cc::Build, gcc: Option<&str>, include_paths: &[Path
          .extra_warnings(false)
          .flag("-mlongcalls");
  
@@ -24,7 +36,7 @@ index 7ce09d3..8e679df 100644
      for inc in include_paths {
          build.include(inc);
      }
-@@ -2073,7 +2084,7 @@ fn patch_eap_core_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -2073,7 +2089,7 @@ fn patch_eap_core_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
          "eap.c config copied trace",
      );
      fs::write(&patched, patched_text).expect("failed to write patched eap.c");
@@ -33,7 +45,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_esp_wpa2_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -2218,7 +2229,7 @@ fn patch_esp_wpa2_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -2218,7 +2234,7 @@ fn patch_esp_wpa2_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
          "esp_wpa2.c EAP stack request free guard",
      );
      fs::write(&patched, patched_text).expect("failed to write patched esp_wpa2.c");
@@ -42,7 +54,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_esp_wpa2_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -2267,7 +2278,7 @@ fn patch_esp_wpa2_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -2267,7 +2283,7 @@ fn patch_esp_wpa2_source(source: &Path, out_dir: &Path) -> PathBuf {
          "esp_wpa2.c EAP stack request free guard",
      );
      fs::write(&patched, patched_text).expect("failed to write patched esp_wpa2.c");
@@ -51,7 +63,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_eap_peap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -2316,7 +2327,7 @@ fn patch_eap_peap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -2316,7 +2332,7 @@ fn patch_eap_peap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
          "eap_peap.c helper return trace",
      );
      fs::write(&patched, patched_text).expect("failed to write patched eap_peap.c");
@@ -60,7 +72,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_eap_tls_common_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -2401,7 +2412,7 @@ fn patch_eap_tls_common_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -2401,7 +2417,7 @@ fn patch_eap_tls_common_source(source: &Path, out_dir: &Path) -> PathBuf {
          "eap_tls_common.c helper output release",
      );
      fs::write(&patched, patched_text).expect("failed to write patched eap_tls_common.c");
@@ -69,7 +81,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_eap_tls_common_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -2552,7 +2563,7 @@ fn patch_eap_tls_common_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -2552,7 +2568,7 @@ fn patch_eap_tls_common_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
          "eap_tls_common.c output call trace",
      );
      fs::write(&patched, patched_text).expect("failed to write patched eap_tls_common.c");
@@ -78,7 +90,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_tls_mbedtls_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -2800,7 +2811,7 @@ fn patch_tls_mbedtls_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -2800,7 +2816,7 @@ fn patch_tls_mbedtls_source(source: &Path, out_dir: &Path) -> PathBuf {
          "tls_mbedtls.c decrypt clear extra input",
      );
      fs::write(&patched, patched_text).expect("failed to write patched tls_mbedtls.c");
@@ -87,7 +99,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_tls_mbedtls_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -3096,7 +3107,7 @@ fn patch_tls_mbedtls_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf
+@@ -3096,7 +3112,7 @@ fn patch_tls_mbedtls_eap_trace_source(source: &Path, out_dir: &Path) -> PathBuf
          "tls_mbedtls.c decrypt clear extra input trace",
      );
      fs::write(&patched, patched_text).expect("failed to write patched tls_mbedtls.c");
@@ -96,7 +108,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_aes_internal_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -3110,7 +3121,7 @@ fn patch_aes_internal_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -3110,7 +3126,7 @@ fn patch_aes_internal_source(source: &Path, out_dir: &Path) -> PathBuf {
          "aes-internal.c aligned IROM tables",
      );
      fs::write(&patched, patched_text).expect("failed to write patched aes-internal.c");
@@ -105,7 +117,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_aes_internal_user_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -3122,7 +3133,7 @@ fn patch_aes_internal_user_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -3122,7 +3138,7 @@ fn patch_aes_internal_user_source(source: &Path, out_dir: &Path) -> PathBuf {
      let patched = out_dir.join(format!("{}_aligned_irom.c", file_name.replace('-', "_")));
      let source_text = fs::read_to_string(source).expect("failed to read AES helper source");
      fs::write(&patched, source_text).expect("failed to write patched AES helper source");
@@ -114,7 +126,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_aes_i_header(source: &Path, out_dir: &Path) {
-@@ -3351,7 +3362,7 @@ fn patch_esp_wps_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -3351,7 +3367,7 @@ fn patch_esp_wps_source(source: &Path, out_dir: &Path) -> PathBuf {
          "esp_wps.c WPS failure diagnostic reason",
      );
      fs::write(&patched, patched_text).expect("failed to write patched esp_wps.c");
@@ -123,7 +135,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_wps_attr_build_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -3370,7 +3381,7 @@ fn patch_wps_attr_build_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -3370,7 +3386,7 @@ fn patch_wps_attr_build_source(source: &Path, out_dir: &Path) -> PathBuf {
          "wps_attr_build.c public-key null guard",
      );
      fs::write(&patched, patched_text).expect("failed to write patched wps_attr_build.c");
@@ -132,7 +144,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_wps_enrollee_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -3423,7 +3434,7 @@ fn patch_wps_enrollee_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -3423,7 +3439,7 @@ fn patch_wps_enrollee_source(source: &Path, out_dir: &Path) -> PathBuf {
          "wps_enrollee.c M8 final branch trace",
      );
      fs::write(&patched, patched_text).expect("failed to write patched wps_enrollee.c");
@@ -141,7 +153,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_ssl_tls_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -3472,7 +3483,7 @@ fn patch_ssl_tls_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -3472,7 +3488,7 @@ fn patch_ssl_tls_source(source: &Path, out_dir: &Path) -> PathBuf {
          "ssl_tls.c drop verified peer cert raw der",
      );
      fs::write(&patched, patched_text).expect("failed to write patched ssl_tls.c");
@@ -150,7 +162,7 @@ index 7ce09d3..8e679df 100644
  }
  
  fn patch_ssl_cli_source(source: &Path, out_dir: &Path) -> PathBuf {
-@@ -3521,6 +3532,26 @@ fn patch_ssl_cli_source(source: &Path, out_dir: &Path) -> PathBuf {
+@@ -3521,6 +3537,26 @@ fn patch_ssl_cli_source(source: &Path, out_dir: &Path) -> PathBuf {
          "ssl_cli.c certificate verify sign reserve",
      );
      fs::write(&patched, patched_text).expect("failed to write patched ssl_cli.c");

@@ -344,7 +344,7 @@ static int eap_peer_tls_reassemble_fragment(struct eap_ssl_data *data,
 		return -1;
 	}
 
-	if (tls_in_len + in_len > 65536) {
+	if (data->tls_in_left > 65536 || tls_in_len + in_len > 65536) {
 		/*
 		 * Limit length to avoid rogue servers from causing large
 		 * memory allocations.
@@ -363,16 +363,11 @@ static int eap_peer_tls_reassemble_fragment(struct eap_ssl_data *data,
 		return -1;
 	}
 
-	if (data->tls_in && in_len == data->tls_in_left) {
-		extern void esp8266_hal_tls_set_extra_input(struct tls_connection *conn,
-								  const u8 *data,
-								  size_t len);
-		if (in_data)
-			esp8266_hal_tls_set_extra_input(data->conn, wpabuf_head_u8(in_data), in_len);
-		data->tls_in_left = 0;
-		return 0;
-	}
-	if (wpabuf_resize(&data->tls_in, in_len) < 0) {
+	/* The first fragment declares the whole flight. Reserve it once so
+	 * growth never needs both the old and new buffers on this small heap. */
+	if (data->tls_in == NULL)
+		data->tls_in = wpabuf_alloc(data->tls_in_left);
+	if (data->tls_in == NULL) {
 		wpa_printf(MSG_INFO, "SSL: Could not allocate memory for TLS "
 			   "data");
 		eap_peer_tls_reset_input(data);
@@ -658,7 +653,7 @@ int eap_peer_tls_process_helper(struct eap_sm *sm, struct eap_ssl_data *data,
 		/* TODO: clean pin if engine used? */
 	}
 
-	if (data->tls_out == NULL || wpabuf_len(data->tls_out) == 0) {
+	if (wpabuf_len(data->tls_out) == 0) {
 		/*
 		 * TLS negotiation should now be complete since all other cases
 		 * needing more data should have been caught above based on
@@ -667,7 +662,7 @@ int eap_peer_tls_process_helper(struct eap_sm *sm, struct eap_ssl_data *data,
 		wpa_printf(MSG_DEBUG, "SSL: No data to be sent out");
 		wpabuf_free(data->tls_out);
 		data->tls_out = NULL;
-		return 1;
+		return ret < 0 ? ret : 1;
 	}
 
 	/* Send the pending message (in fragments, if needed). */

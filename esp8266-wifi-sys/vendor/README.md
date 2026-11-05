@@ -49,13 +49,36 @@ The canonical TLS backend accepts a null connection during teardown. EAP
 initialization failure can leave or reset the connection pointer to null before
 shared cleanup runs; the guard preserves that failure path without a native
 null dereference. It does not change the original initialization error.
-TLS and EAP handshake allocations use the application-provided allocator;
-temporary input and output buffers are released and restored around
-cryptographic work to reduce peak memory use.
+TLS and EAP handshake allocations use the application-provided allocator. EAP
+reassembly reserves the declared flight once; TLS borrows the worker-owned
+request and compacts consumed input tails. The backend retains static raw client
+certificate, key and password material, parsing it at `CLIENT_CERTIFICATE` after
+server verification. Parsed CA, client certificate and key allocations are freed
+after their respective last uses. Shared pre-encryption helpers release and
+restore idle record buffers around cryptographic work. Output growth rounds
+capacity to 256-byte increments with at most 255 spare bytes.
+Certificate parsing consumes every DER certificate and rejects malformed trailing
+bytes and partially invalid PEM bundles. Fatal TLS errors remain EAP failures even
+when TLS produces no output; a nonfatal empty response still requests an ACK.
+
+The canonical TLS record-content limits are 2,048 bytes in each direction; EAP
+fragmentation does not increase that cap. MPI/RSA and elliptic-curve limits remain
+2,048 and 256 bits. Conventional P-256 intermediate chains and RSA-2048 server
+leaf/client intermediate-chain authentication pass on hardware with the measured
+stack budgets documented in the
+[native runtime notes](../../docs/native-runtime.md#tls-memory-limits). Arbitrary
+chains and application heap budgets are not qualified.
 
 Enterprise EAP receive processing always uses the dedicated WPA2 worker when
-`USE_WPA2_TASK` is enabled. Allocation failures return `ESP_ERR_NO_MEM`; packet
+`USE_WPA2_TASK` is enabled. It requests a 4,096-byte stack; the Rust runtime adds
+176 bytes of context storage. Allocation failures return `ESP_ERR_NO_MEM`; packet
 size or heap pressure must not move TLS work onto the smaller Wi-Fi task stack.
+Commands are queued by value. Staged initialization rolls back partial ownership;
+teardown closes admission and waits for worker and producer completion before
+freeing peer state. Scheduler-suspended callbacks request exit without freeing
+live state. Credential inputs survive disable for reuse on the next enable.
+The `wifi_eap` example separately reserves a measured 4 KiB application stack;
+the library default remains 8 KiB and can be overridden through `STACK_SIZE`.
 
 WPS owns partial initialization and normal teardown through the same cleanup
 path. Its worker queue stores events by value, and completed credentials are
@@ -75,6 +98,12 @@ for their corresponding Cargo features.
 `src/bindings.rs` contains checked-in generated Wi-Fi ABI declarations.
 Manual packed/bitfield types live in `src/lib.rs`, where their layouts can be
 reviewed and tested explicitly.
+
+Optional [native EAP](../tests/native-eap/README.md) and
+[native WPS](../tests/native-wps/README.md) host regression harnesses compile the
+canonical C against controlled dependencies. They cover input bounds, fragment
+and allocation ownership; hardware cryptography, scheduling and stack depth
+require separate validation. Normal Cargo builds do not run them.
 
 ## Reproduction
 
@@ -152,7 +181,7 @@ The current tree can be verified without any SDK checkout:
 ```sh
 ESP8266_RTOS_SDK=/not/used LIBCLANG_PATH=/not/used \
 CARGO_INCREMENTAL=0 cargo build --release --example tcp_server \
-  -Zbuild-std=core \
+  -Zbuild-std=core,alloc \
   --no-default-features \
   --features interrupt,rt,wifi-embassy-net
 

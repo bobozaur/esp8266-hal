@@ -246,8 +246,8 @@ Explicit aliases in
 [`ld/wifi.x`](../ld/wifi.x) replace blanket duplicate-symbol suppression; see
 [the native adaptation notes](native-runtime.md).
 
-The pinned TLS record-content budgets are 768 bytes incoming and 512 bytes
-outgoing. MPI values are limited to 256 bytes, bounding RSA moduli at 2048 bits;
+The pinned TLS record-content budgets are 2,048 bytes incoming and outgoing.
+MPI values are limited to 256 bytes, bounding RSA moduli at 2048 bits;
 EC groups are limited to 256 bits. Certificate chains and cryptographic work
 must also fit the shared heap. Use compact certificates and compatible record
 sizes; key-size limits alone do not qualify a certificate or RSA profile. See
@@ -261,16 +261,16 @@ Section sizes exclude runtime heap and stacks; see the
 [cost and evidence notes](native-runtime.md#cost-and-current-evidence). The idle
 stack overflow and NMI exclusion defects are corrected. Integrated validation
 covers the available radio, network and peripheral fixtures; it does not establish
-first-attempt association reliability. Earlier campaigns passed WPS PBC/PIN,
-SmartConfig provisioning with DHCP and acknowledgement, PEAP/MSCHAPv2 with
-incorrect-password rejection, and compact P-256 client-certificate EAP-TLS with
-the four-way handshake. The latest simplification campaign has not requalified
-WPS or enterprise authentication: association failed against the available
-external fixture, including with an earlier WPS image. SmartConfig passed DHCP
-and acknowledgement once, but its post-stop fixtures did not decode credentials;
-fresh DHCP after stop remains unqualified in this campaign. See the
-[current campaign results](../plan.md#further-simplification-review) for coverage
-and remaining limits. Examples keep bounded retry policy in application code.
+first-attempt association reliability. Current checks pass WPS PBC/PIN,
+SmartConfig provisioning with DHCP and acknowledgement, fresh DHCP after stop,
+PEAP/MSCHAPv2 with incorrect-password rejection, and P-256/RSA-2048 certificate
+profiles with the four-way handshake. Malformed certificate material is rejected,
+and valid configuration reconnects without rebooting. Stop/start and ordinary
+reconnect preserve configured enterprise credentials. The SDK's Wi-Fi task owns
+ETS timer dispatch; the redundant HAL timer worker is removed. Intermittent
+transport failures against one AP remain unexplained. See the
+[current campaign results](../plan.md#remaining-interoperability-work) for tested
+profiles and limits. Examples keep bounded retry policy in application code.
 
 Before publishing HAL 0.6, publish the currently unpublished dependency versions:
 PAC `esp8266` 0.7, `esp8266-hal-proc-macros` 0.2 and `esp8266-wifi-sys` 0.1. Local

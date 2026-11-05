@@ -7,15 +7,18 @@ material source finding. Subsequent hardware troubleshooting found and repaired
 an enterprise receive-dispatch defect. PEAP, explicit password rejection,
 compact certificate EAP-TLS and WPS PBC/PIN now pass against an independent AP.
 SmartConfig provisioning and fresh DHCP after stop also pass. The dispatch repair
-and qualification results are included below. Earlier sections retain their
-campaign scope. Publication is separate.
+is committed as `f438323`. The current corrective batch passes retained-feature
+qualification for the tested configurations, including conventional certificate
+chains, recovery and provisioning. The original AP's intermittent transport
+failures remain unexplained and are an explicit interoperability limit. Earlier
+sections retain their campaign scope. Publication is separate.
 Updated: 2026-11-05.
 
 The decisions below were agreed during discussion. The user subsequently
 authorized autonomous planning, adversarial review to saturation, implementation
 and hardware validation. Implementation choices and progress are now tracked here
-without requiring further approval. The user authorized committing this reviewed
-batch. Publication remains separate.
+without requiring further approval. Earlier reviewed batches were committed at
+the user's request. Publication remains separate.
 
 ## Agreed scope
 
@@ -294,6 +297,9 @@ the implemented public interfaces.
 
 ## Further simplification review
 
+This section records the `9d95759` campaign. Its qualification gaps were followed
+up in [the current interoperability results](#remaining-interoperability-work).
+
 The user requested a new review after committing the packet optimizations.
 Independent assessments cover the current project before reconciliation with
 earlier findings. Aggregate candidates, challenge their assumptions and costs,
@@ -308,7 +314,7 @@ behavior and safety contracts; fewer lines alone do not establish improvement.
 | Architecture and whole-system interactions | Architecture reviewer | Accepted changes implemented; final integrated source review found no new material issue |
 | Aggregate findings, implementation, documentation and validation | Main | Full 27 host and 25 target checks pass. Native WPS fault validation and deterministic archive import pass. All four technical lanes and the document lane converge with no new material finding; remaining protocol qualification is explicit below |
 
-The current batch removes the private AP lwIP task/interface and redundant
+That batch removes the private AP lwIP task/interface and redundant
 ESP-NOW peer ownership, puts RX admission/rings/leases under one lock, narrows
 network dependencies, and shares example frame codecs. It also corrects short-frame
 native TX storage, scheduler slot reuse, stale RX across disconnect, WPS partial
@@ -317,8 +323,9 @@ The revised-source review additionally found WPS receive bounds/fragment ownersh
 defects and missing DHCP example packet validation; these are included in the
 correction batch. Target inspection confirms native queue headers shrink from
 168 to 56 bytes, and RX enqueue uses conditional wrap instead of division.
-These facts do not establish throughput or latency gains. The SmartConfig ETS
-worker is retained because removal lacks sufficient evidence. The normal
+These facts do not establish throughput or latency gains. This earlier batch
+retained the SmartConfig ETS worker pending ownership evidence; the follow-up
+below establishes the native owner and removes that duplicate. The normal
 FreeRTOS timer daemon has an actual PMKSA/SDK timer consumer and is retained.
 
 Compared with `51d8b41`, the AP, mixed, TCP and WPS examples remove 31,440–33,312
@@ -329,13 +336,13 @@ source/build/linker diff is 610 lines added and 1,411 deleted (801 fewer lines),
 including the native WPS repair. These measurements do not establish throughput
 or latency gains.
 
-WPS and enterprise authentication are not requalified by this campaign. The
+That campaign did not requalify WPS and enterprise authentication. The
 external AP reports unacknowledged association responses; both the revised and
 an earlier WPS image failed. The cause is not isolated. Actual-C fault tests cover
 WPS allocation failures, receive bounds, fragments, cleanup and stale work, but
 do not substitute for successful RF provisioning or enterprise authentication.
 
-Current hardware passes AP association before DHCP, mixed upstream/downstream
+Its hardware checks passed AP association before DHCP, mixed upstream/downstream
 DHCP, plain/encrypted ESP-NOW and wrong-key rejection, native peer-table lifecycle,
 packet pressure and peer rejoin, blocking/async lifecycle transitions, 32
 management-frame captures, 20 exact TCP echoes, separate-host DHCP/static-IP TCP,
@@ -348,7 +355,7 @@ recovery establish its pass. Earlier failed captures remain recorded.
 SmartConfig completed provisioning, DHCP and sender-validated acknowledgement on
 one board. Four other attempts, including post-stop fixtures on both boards,
 failed before credentials were decoded. Fresh DHCP after stopping provisioning
-therefore remains unqualified in this campaign. The earlier post-stop passes
+therefore remained unqualified at that point. The earlier post-stop passes
 remain historical evidence; neither campaign establishes first-attempt reliability.
 
 Router configuration, radio/interface state, global services and uplink match
@@ -357,10 +364,9 @@ host's services/routes are unchanged and its listener has exited. Both reserved
 16 KiB flash regions match their backups, and the final AP/client DHCP pair passes.
 Both boards are left running that pair.
 
-Before release, maintainers must complete WPS PBC/PIN, enterprise authentication
-(including password rejection and compact certificate TLS), and SmartConfig
-post-stop qualification against working fixtures. These follow-ups are tracked
-here; there is no external issue. Peak WPS stack usage, throughput and interrupt
+That campaign left WPS PBC/PIN, enterprise authentication and SmartConfig post-stop
+qualification outstanding. The follow-up below records their passing checks.
+Peak WPS stack usage, throughput and interrupt
 latency are not established by the resource measurements. Actual-C fault tests
 pass through the retained [optional native WPS runner](esp8266-wifi-sys/tests/native-wps/README.md).
 It uses the canonical sources with an external pinned SDK and newlib headers;
@@ -409,6 +415,187 @@ The disconnected board had booted its current AP image before removal; a fresh
 reserved-flash comparison could not be completed after it was disconnected.
 The remaining board boots the current AP example, its reserved 16 KiB matches
 the original backup, and its serial settings are restored.
+
+## Remaining interoperability work
+
+| Work | Owner | Acceptance and next evidence |
+| --- | --- | --- |
+| Intermittent transport with the original AP | Main | Investigated with independent captures, a stock SDK control and native TX tracing. Current production TCP passes on both APs; the cause of earlier intermittent failures remains unresolved |
+| SmartConfig sender differences and timer ownership | Main, protocol reviewer | Sender variations pass. Removed the duplicate ETS worker after verifying native ownership; three consecutive uninstrumented provisioning and post-stop DHCP runs pass across both boards |
+| Conventional enterprise certificate profiles | Main, TLS reviewer | Complete for the documented P-256 and RSA-2048 profiles, with certificate validation, malformed-input rejection, recovery, fragmentation and credential reuse checks passing |
+| Integrated qualification and cleanup | Main | Host 22/22, target 24/24, all four workspace packages, protocol/network/peripheral checks and independent review pass. Router/workstation restoration, reserved flash comparison and the functional board-pair handoff are verified |
+
+Eight controlled SmartConfig runs now pass with unchanged firmware across
+interface binding, both broadcast destinations, static glibc host/container and
+musl container senders. WPS PBC and PIN also pass against the nearby original AP.
+No captured sender or forwarding difference yet explains the historical failures.
+Independent radio capture shows correctly timed ACK candidates during the
+original AP's OFDM association failures. Mixed CCK/OFDM rates improve association
+without eliminating failures. An unmodified SDK control also transmits valid
+EAP Identity responses that the original AP does not acknowledge or admit.
+This establishes a transport problem independent of the HAL adaptation; its
+cause remains unresolved.
+
+A conventional P-256 server/client intermediate chain and an RSA-2048 client
+intermediate chain now pass certificate validation, EAP-TLS and the four-way
+handshake. The uninstrumented RSA example also passes. EAP
+reassembly now reserves its known size once, and the TLS reader releases consumed
+input while retaining only a smaller unread tail. Request processing borrows the
+worker-owned packet instead of copying it. This removes measured heap peaks and
+a broken final-fragment shortcut in phase-two decryption. Native C regressions
+cover that behavior, short-request bounds and cached-response failure cleanup;
+the latter two reproduce a crash and double free against the previous source.
+The batch also corrects certificate-packing subtraction underflow, ignored trailing
+DER certificates, accepted partial PEM parsing and missing rebuild dependencies
+for canonical native inputs. SDK logs already routed to a no-op are disabled at
+compile time. RSA verification was traced to an MPI allocation failure, not a
+certificate-trust mismatch. The current corrective batch defers client certificate
+and key parsing until after server verification, shares the pre-encryption TLS
+buffer ownership helpers, supports RSA-2048 signature scratch space, and uses
+2 KiB input/output record limits. It also reports fatal TLS errors to EAP rather
+than treating them as an unfinished handshake, preserves those errors for empty
+TLS output, and uses a zero-payload buffer for empty ACK output. The native EAP
+regressions cover both ordinary empty responses and fatal-error propagation.
+
+The dedicated WPA2 worker requests 4 KiB, with 176 additional runtime-context
+bytes. The EAP example reserves a measured 4 KiB application stack; the library
+default remains 8 KiB and is overrideable. Instrumented P-256/RSA chain runs
+retain at least 956/1,340 worker-stack bytes and 1,600/1,584 application-stack
+bytes respectively. These measurements apply to the tested examples.
+
+Untrusted CA, trailing DER CA bytes, partially invalid PEM bundles and malformed
+or oversized client material are rejected. Each recovery probe has completed
+two subsequent successful connections without rebooting. A malformed-client
+run also failed during its second valid connection; an unchanged repeat passed.
+These passes establish recovery capability, not first-attempt reliability.
+
+An unmodified SDK runtime repeatedly associates with the OFDM-only AP, and the
+HAL subsequently passes both compact and conventional P-256 PEAP against that AP.
+This does not establish the cause of earlier failures. Comparing native startup
+found a concrete PHY-table transcription error: a flag at SDK byte 114 was placed
+at byte 113. The table is corrected, but ordinary startup overrides the RF option
+and leaves frequency-offset correction disabled. Alternating corrected/original/
+corrected firmware passes in all three cases, so this error does not explain the
+intermittent association failures. Disabling the independent monitor also fails
+to eliminate them. Private trials of stock analog RTC/clock initialization and
+the SDK wake-up wait do not resolve the failures; no startup workaround is
+retained. The independent AP also loses acknowledgements during one TLS exchange,
+so the failures cannot all be attributed to the original AP.
+The full host/package campaign passes 22 checks, and the current target matrix
+passes 24 build/documentation checks, including four downstream feature
+combinations. Packaged native EAP and WPS regression harnesses pass. Current
+P-256 EAP-TLS and PEAP, including wrong-password rejection, pass with 64-byte
+EAP fragments. Independent AP tests also pass RSA client-chain EAP-TLS and PEAP,
+all malformed-material rejection/recovery cases, and WPS PBC/PIN. One client
+recovery run loses radio acknowledgements and times out before an unchanged
+repeat passes; successful recovery does not establish first-attempt reliability.
+
+Review of the failed exchange confirms that ordinary stop retained unfinished
+EAP state until reconfiguration or another association. The corrective batch
+checks partial initialization, stores worker commands by value, closes admission
+before teardown and joins worker and producer completion before freeing peer
+state. Stop releases handshake state while retaining configured credentials.
+Ten actual-C regressions pass, including allocation failure, active and suspended
+teardown, credential reuse and public-MAC failure rollback. Hardware stop/start
+passes three connections with one credential configuration and a stable heap
+after each stop. Three ordinary disconnect/reconnect connections also pass with
+one credential configuration. Native ABI review confirms the public getter and
+the other newly checked return-value contracts. These source fixes are not
+established causes of the radio losses.
+
+Final host checks pass 22/22; the target matrix passes 24/24. Cargo workspace
+packaging verifies the four interdependent crates offline, including the HAL's
+Wi-Fi feature, without publishing or replacing dependency versions. Packaged
+native EAP and WPS regressions and all 43 vendor checksums pass. The final hardware
+batch passes the P-256/RSA profiles, every rejection/recovery case, 64-byte EAP
+fragmentation, WPS PBC/PIN and stack probes, 100 scan cycles and peripheral/flash
+checks. Six two-board cases pass: AP DHCP, plain/encrypted ESP-NOW, wrong-key
+rejection, promiscuous management reception and lifecycle reuse.
+
+An earlier SmartConfig run passes with the workstation monitor enabled, including
+sender acknowledgement and fresh DHCP after stop. Subsequent runs fail with it
+either enabled or disabled, on both boards; disabling sender power saving alone
+does not resolve this. An independent ESP8266 captures complete guide broadcasts
+with the monitor disabled, but its sustained capture also ends without a terminal
+result. That does not establish a receiver hang or an RF-loss rate.
+
+A stock SDK SmartConfig control completes decoding, connection, DHCP and sender
+acknowledgement with the second board held in reset; the HAL fails under that
+sender/AP setup. Removing the native control's explicit channel selection and
+then matching the HAL's logging flag both preserve its success. Private HAL
+controls with the current 2,816-byte and SDK-sized 5,120-byte Wi-Fi task stacks
+both fail at the same stage; their last samples retain 1,748 and 4,052 unused
+bytes. No stack increase is justified. A periodic interrupt sampler allows one
+run to complete; its snapshots show ordinary CPU idle. They do not establish
+native light sleep or normal tick delivery, because a delayed tick can catch up
+elapsed time. A private plain-idle wrapper also completes provisioning and fresh
+DHCP after stop without the sampler, as does a wrapper retaining the time read.
+The second board decodes credentials with the plain wrapper but fails association.
+Native CPU light sleep is not reached in the inspected original image. A delayed
+sampler produces no sample in a failing run. Original-layout probes reproduce
+failures without entering stack-canary, assert, abort, panic or exception traps;
+a later inline-timer-trap probe passes without entering a trap. The failure is
+intermittent, and the idle experiments have not established its cause.
+
+The native ETS implementation has its own FRC2 interrupt handler. It posts event
+16 to the Wi-Fi task, which dispatches `ets_timer_proc`. The HAL's extra ETS task
+therefore duplicates a verified owner of the same timer list. That task, its
+2,224-byte stack allocation and both startup paths are removed; FreeRTOS software
+timers retain their separate daemon. The uninstrumented SmartConfig fixture
+passes three consecutive runs across both boards, including decoded credentials,
+association, DHCP, a validated sender acknowledgement and fresh DHCP 12 seconds
+after stop. The unused board stays in reset and the independent monitor stays
+disabled. The removal follows the native dispatch contract; these passes do not
+establish the cause of every earlier intermittent failure. In the same fixture,
+the removal also saves 56 bytes of IRAM, 776 bytes of mapped code, 16 bytes of
+read-only data and 8 bytes of BSS.
+
+After this removal, all 22 host checks and 24 target checks pass. All four
+workspace packages verify offline with Wi-Fi and SmartConfig enabled, and all
+43 vendor checksums pass. The fresh enterprise matrix passes P-256 and RSA-2048
+chains, PEAP, wrong-password rejection, all five malformed-material recovery
+cases, 64-byte EAP fragments, stop/start and reconnect credential reuse, and
+enterprise with SmartConfig compiled in. WPS PBC/PIN also pass. All seven paired
+cases pass: AP DHCP, plain/encrypted ESP-NOW, wrong-key rejection, management
+frame reception, lifecycle reuse and simultaneous upstream/downstream networking.
+The refreshed peripheral/flash checks, 100 scan cycles and all 20 byte-exact
+TCP-server exchanges pass. The TCP client first times out in
+DHCP after association retries; a clean-session retry fails earlier, with the AP
+capture showing repeated first key-handshake messages and no client response.
+The capture does not establish whether those frames reached the client over air.
+A later private idle-wrapper run associates and obtains DHCP, then fails neighbor
+resolution for the test server. The device answers the router's ARP during that
+wait. An unchanged repeat with captures on both sides passes the exact TCP
+request/response check; the successful capture does not explain the earlier loss.
+The current production TCP client passes the exact request/response check against
+the independent AP. It also fails DHCP once on the original AP; that capture's
+key-handshake frames alone do not establish authorization for data traffic.
+A later controlled comparison on the original AP passes the exact 42-byte
+request/response exchange with the stock SDK, a HAL transmit probe and the normal
+production HAL. The SDK and traced HAL obtain DHCP after about 26 seconds; the
+normal HAL obtains it after 4.4 seconds. All six logged HAL DHCP submissions
+return native success, while the AP capture contains only the first Discover
+and final Request. Native acceptance does not prove radio delivery. These runs
+exclude a deterministic HAL-only inability to use that AP; they do not establish
+the cause of earlier losses or exclude every intermittent HAL defect.
+
+A CCK-only rate trial advertises the intended rates, but both the stock SDK and
+HAL fail before association with reason 201. That trial is not retained and does
+not explain the earlier DHCP failures after the key handshake. No speculative
+idle, clock, stack or radio-rate workaround is added to production code.
+Independent review finds no new material source or ABI issue and accepts the
+retained-feature qualification for these tested configurations. First-attempt
+radio reliability and arbitrary certificate/application memory budgets are not
+implied. Router and workstation restoration checks pass, including unchanged
+configuration, boot identity, global services, uplink and default routes.
+Temporary APs, services, profiles, capture interfaces and the fixture container
+are removed. Both boards' final reserved 16 KiB match their respective backups;
+the scratch region and adjacent guards are restored. A final reset-only capture
+verifies the installed AP/DHCP-client pair, and the serial close policy is restored.
+
+The earlier single-run passes below retain their original scope. The outstanding
+transport uncertainty remains explicit despite the refreshed passing feature
+matrix and stock SDK comparison.
 
 ## Independent AP qualification and enterprise dispatch repair
 

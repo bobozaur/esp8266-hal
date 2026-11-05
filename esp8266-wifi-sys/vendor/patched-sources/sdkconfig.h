@@ -131,7 +131,7 @@
 #define CONFIG_TASK_WDT_PANIC 0
 
 /* ---------- Log ---------- */
-#define CONFIG_LOG_DEFAULT_LEVEL 3
+#define CONFIG_LOG_DEFAULT_LEVEL 0
 #define CONFIG_LOG_COLORS 1
 
 /* ---------- NVS ---------- */
@@ -146,11 +146,10 @@
 
 /* ---------- mbedTLS ---------- */
 #define CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN 1
-/* The WPA2 Enterprise fixtures use compact EAP-TLS certificates and keep the
- * largest observed server flight below this inbound record budget. The smaller
- * buffer leaves verifier-time heap for P-256 X.509 bignum work. */
-#define CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN 768
-#define CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN 512
+/* Bound records independently from EAP fragmentation. Two KiB accommodates
+ * ordinary P-256 and RSA-2048 leaf/intermediate certificate messages. */
+#define CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN 2048
+#define CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN 2048
 #define MBEDTLS_MPI_MAX_SIZE 256
 #define MBEDTLS_MPI_WINDOW_SIZE 2
 #define MBEDTLS_ECP_MAX_BITS 256

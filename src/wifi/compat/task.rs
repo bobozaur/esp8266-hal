@@ -21,8 +21,8 @@ use super::memory;
 // ---------------------------------------------------------------------------
 
 /// Maximum number of concurrent tasks. The supported worst case needs the
-/// application, idle, timer daemon, sys_evt and ppTask, plus optional ETS timer,
-/// WPA2 and WPS workers. Spare slots allow feature workers awaiting idle cleanup
+/// application, idle, timer daemon, sys_evt and ppTask, plus optional WPA2 and
+/// WPS workers. Spare slots allow feature workers awaiting idle cleanup
 /// to coexist with replacements during rapid stop/start cycles.
 pub(super) const MAX_TASKS: usize = 10;
 pub(crate) const PP_TASK_STACK_BYTES: u16 = 2816;

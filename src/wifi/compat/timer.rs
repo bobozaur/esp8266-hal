@@ -20,15 +20,6 @@ const PD_FALSE: i32 = 0;
 // The compatibility daemon has its own stack budget; create_task adds the
 // larger HAL exception-frame allowance. Callback depth also consumes this stack.
 const TIMER_DAEMON_STACK_BYTES: u16 = 768;
-// Match the generated `sdkconfig.h` on this branch:
-// `CONFIG_ESP_TIMER_TASK_STACK_SIZE = 2048`.
-// `components/esp_common/include/esp_task.h` defines
-// `ESP_TASK_TIMER_STACK = CONFIG_ESP_TIMER_TASK_STACK_SIZE + TASK_EXTRA_STACK_SIZE`.
-#[cfg(feature = "wifi-smartconfig")]
-const ETS_TIMER_TASK_STACK_BYTES: u16 = 2048;
-// Match SDK `ESP_TASK_TIMER_PRIO = ESP_TASK_PRIO_MAX - 3`.
-#[cfg(feature = "wifi-smartconfig")]
-const ETS_TIMER_TASK_PRIORITY: u32 = task::MAX_PRIORITIES - 3;
 // Match SDK `configTIMER_TASK_PRIORITY = tskIDLE_PRIORITY + 2`.
 const TIMER_DAEMON_PRIORITY: u32 = 2;
 
@@ -90,37 +81,12 @@ static mut TIMERS: [SoftwareTimer; MAX_TIMERS] = {
 /// Handle for the timer daemon task (NULL if not started).
 static mut TIMER_DAEMON_HANDLE: *mut c_void = core::ptr::null_mut();
 static mut TIMER_QUEUE_HANDLE: *mut c_void = core::ptr::null_mut();
-#[cfg(feature = "wifi-smartconfig")]
-static mut ETS_TIMER_TASK_HANDLE: *mut c_void = core::ptr::null_mut();
 
 unsafe extern "C" fn empty_callback(_: *mut c_void) {}
 
 // ---------------------------------------------------------------------------
 // Timer daemon task
 // ---------------------------------------------------------------------------
-
-#[cfg(feature = "wifi-smartconfig")]
-extern "C" {
-    /// ROM-based ETS timer processing.
-    fn ets_timer_proc();
-}
-
-/// Dedicated task for processing ROM ETS timers.
-/// Runs at priority 2 (above idle, below ppTask at 13) so timer callbacks
-/// can properly interact with higher-priority blob tasks via yielding.
-#[cfg(feature = "wifi-smartconfig")]
-unsafe extern "C" fn ets_timer_task(_param: *mut c_void) {
-    loop {
-        unsafe {
-            // SDK ets_sys.h documents os_timer callbacks with scheduling
-            // disabled. Mirror that around the task-dispatched timer pass.
-            task::vTaskSuspendAll();
-            ets_timer_proc();
-            task::xTaskResumeAll();
-            task::vTaskDelay(1); // 1 tick = 10ms at 100Hz
-        }
-    }
-}
 
 /// Timer daemon task — processes queued timer commands and expirations.
 ///
@@ -167,26 +133,6 @@ pub(crate) unsafe fn rollback_startup() {
             TIMER_QUEUE_HANDLE = core::ptr::null_mut();
         }
         TIMER_DAEMON_HANDLE = core::ptr::null_mut();
-    }
-}
-
-/// Create the ETS timer processing task. Must be called AFTER esp_wifi_init
-/// (which runs ets_timer_init to set up the ROM timer list).
-#[cfg(feature = "wifi-smartconfig")]
-pub(crate) unsafe fn start_ets_timer_task() -> i32 {
-    unsafe {
-        if !ETS_TIMER_TASK_HANDLE.is_null() {
-            return PD_PASS;
-        }
-
-        task::xTaskCreate(
-            ets_timer_task,
-            b"ETStmr\0".as_ptr() as *const _,
-            ETS_TIMER_TASK_STACK_BYTES,
-            core::ptr::null_mut(),
-            ETS_TIMER_TASK_PRIORITY,
-            &raw mut ETS_TIMER_TASK_HANDLE,
-        )
     }
 }
 

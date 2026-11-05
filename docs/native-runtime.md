@@ -83,9 +83,10 @@ Native queue headers use bounded byte-sized task IDs for their waiters: 56 bytes
 instead of 168 on Xtensa, preserving priority and equal-priority slot selection.
 Task deletion detaches the old stack and resets the complete slot under scheduler
 exclusion before making it reusable; freeing the detached stack touches no slot
-metadata. The ordinary FreeRTOS timer daemon remains necessary for WPA PMKSA
-expiration. SmartConfig's ETS worker also remains; removing it lacks sufficient
-timing and protocol evidence.
+metadata. The FreeRTOS timer daemon owns software timers used for WPA PMKSA
+expiration. The SDK's separate ETS timer list is driven by FRC2 interrupt 10,
+which posts event 16 to the Wi-Fi task. That task dispatches `ets_timer_proc`;
+the HAL does not add another worker or poll the same list from another context.
 
 WPS uses one cleanup path for partial initialization and normal teardown. Its
 worker queue stores events by value, credentials are applied once from checked
@@ -175,22 +176,80 @@ The canonical configuration has fixed TLS and cryptographic size limits:
 
 | Budget | Limit |
 | --- | ---: |
-| Incoming TLS record content | 768 bytes |
-| Outgoing TLS record content | 512 bytes |
-| MPI integer size / RSA modulus | 256 bytes / 2048 bits |
+| Incoming TLS record content | 2,048 bytes |
+| Outgoing TLS record content | 2,048 bytes |
+| MPI integer size / RSA modulus | 256 bytes / 2,048 bits |
 | Elliptic-curve group size | 256 bits |
 
 Record buffers also require protocol overhead. Certificates, parsed chains,
-cryptographic work and radio traffic share the remaining application heap.
-Compact certificates and compatible record sizes are therefore required; EAP
-fragmentation does not increase the TLS record-content limits. Arbitrary
-certificate chains or RSA profiles are not qualified, even when their key sizes
-fit these ceilings.
+cryptographic work and radio traffic share the remaining application heap. EAP
+fragmentation does not raise the 2 KiB TLS record-content cap. A small leaf alone
+does not establish compatibility: the server can send additional certificates
+in the same record. Arbitrary chains and applications with less available heap
+are not covered by the profiles below.
 
-A small leaf certificate alone does not establish compatibility: the server may
-include additional chain certificates in its TLS records. Enterprise receive
-processing uses the dedicated WPA2 task for every EAP packet; packet size and
-allocation failure must not move cryptographic work onto the smaller Wi-Fi stack.
+EAP reassembly reserves the declared flight size once. TLS consumes the
+worker-owned request without another packet copy and compacts an owned input
+tail after most of the flight has been consumed. Static client certificate,
+private-key and password bytes remain borrowed for the connection lifetime;
+parsing waits until `CLIENT_CERTIFICATE`, after server verification. Parsed CA,
+client certificate and client key allocations are freed after their respective
+last uses. Shared helpers release and restore idle input/output record buffers
+around pre-encryption cryptographic work. Output growth rounds capacity to
+256-byte increments, leaving at most 255 spare bytes.
+Certificate parsing consumes complete concatenated DER bundles and rejects
+malformed trailing bytes and partially invalid PEM bundles. Fatal TLS status is
+propagated to EAP even when output is empty; nonfatal empty output requests an ACK.
+
+Every EAP packet runs on the dedicated WPA2 worker; packet size and allocation
+failure must not move cryptographic work onto the smaller Wi-Fi task stack. The
+worker requests a 4,096-byte stack, with another 176 bytes allocated for the Rust
+runtime context. Commands are stored by value. Initialization publishes the peer
+only after all dependencies exist; each failure releases partial ownership.
+Teardown closes admission, then waits for the worker and returning producers
+before freeing method, configuration and TLS state. A native callback with the
+scheduler suspended may request exit but retains those owners until cleanup can
+complete. Ordinary stop releases handshake state and preserves credentials for
+restart; replacing the mode clears those credentials.
+
+The library reserves 8 KiB for the application stack by default.
+Applications may override the absolute `STACK_SIZE` linker symbol; the linker
+checks that it is positive, 16-byte aligned, within DRAM and clear of static data.
+The `wifi_eap` example defines that symbol with an assembler assignment to reserve
+4 KiB. That example budget does not qualify other applications' stack depths.
+
+The current interoperability profiles complete EAP-TLS authentication and the
+WPA four-way handshake:
+
+| Profile | Server Certificate message | Client Certificate message |
+| --- | ---: | ---: |
+| P-256 leaves with intermediate certificates | 1,095 bytes | 1,049 bytes |
+| RSA-2048 server leaf, client leaf and intermediate | 971 bytes | 1,867 bytes |
+
+Instrumented runs with 4 KiB application and WPA2 worker stacks measured these
+minimum unused stack amounts:
+
+| Profile | WPA2 worker | Application |
+| --- | ---: | ---: |
+| P-256 intermediate chains | 956 bytes | 1,600 bytes |
+| RSA-2048 client chain | 1,340 bytes | 1,584 bytes |
+
+The ordinary, uninstrumented RSA client-chain example also completed EAP success
+and the four-way handshake in 28.4 seconds. These measurements establish the
+listed profiles and stack budgets, without a throughput or latency improvement
+claim. P-256 EAP-TLS, PEAP and wrong-password rejection also pass with 64-byte
+EAP fragments, including fragmented encrypted PEAP phase-two messages. Wrong CA,
+trailing DER, partially invalid PEM and malformed or oversized client material
+are rejected; each recovery fixture then connects twice without rebooting.
+Stop/start and ordinary reconnect each pass three connections using one credential
+configuration. These checks establish recovery capability, without a guarantee
+of first-attempt radio success.
+
+Optional [native EAP](../esp8266-wifi-sys/tests/native-eap/README.md) and
+[native WPS](../esp8266-wifi-sys/tests/native-wps/README.md) regression harnesses
+exercise canonical C ownership, malformed input, allocation failure and fragment
+handling. They do not qualify target cryptography, scheduling, stacks or radio
+behavior.
 
 ## Provisioning and polled radio interrupts
 
@@ -263,9 +322,11 @@ Committed refactor release images (`f31504b`), built with the pinned Xtensa tool
 All values are bytes. Static DRAM includes read-only data, initialized data and
 BSS. Heap-region figures exclude the permanently reserved 8 KiB application
 stack, but precede SDK task, packet and queue allocations; they are not free heap
-while networking is active. Enterprise rows include the compact DER certificate
-fixtures used for authentication; different credentials change these figures. The all-feature TCP example fails initialization
-cleanly with `OutOfMemory`; it is an exhaustion check, not an operational memory
+while networking is active. These historical rows used the 8 KiB application
+stack reservation, before the current EAP example's 4 KiB override. Enterprise
+rows include the compact DER certificate fixtures used for authentication;
+different credentials change these figures. The all-feature TCP example fails
+initialization cleanly with `OutOfMemory`; it is an exhaustion check, not an operational memory
 configuration.
 
 The packet optimization commit (`51d8b41`) changed representative images as follows,
@@ -342,9 +403,11 @@ first-attempt association reliability, arbitrary callback/interrupt stack depth,
 or independently mapped flash-cache coherence. Those earlier campaigns passed
 WPS PBC/PIN, SmartConfig provisioning with DHCP and acknowledgement,
 PEAP/MSCHAPv2 with incorrect-password rejection, and compact P-256
-client-certificate EAP-TLS with the four-way handshake. These historical results
-do not qualify arbitrary certificate chains or RSA profiles. The latest
-simplification campaign has not requalified WPS or enterprise authentication:
-the external fixture failed association, including with an earlier WPS image.
-The [current review results](../plan.md#further-simplification-review) distinguish
-refreshed hardware coverage from these earlier results.
+client-certificate EAP-TLS with the four-way handshake. Those results predate
+the current TLS changes. The refreshed P-256/RSA, PEAP, negative and recovery
+checks pass as recorded under [TLS memory limits](#tls-memory-limits). WPS PBC/PIN
+and three uninstrumented SmartConfig runs also pass, including fresh DHCP after
+provisioning stops. Intermittent transport failures against one AP remain
+unexplained. The
+[current review results](../plan.md#remaining-interoperability-work) distinguish
+refreshed hardware coverage from earlier campaigns.

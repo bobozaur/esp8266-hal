@@ -699,7 +699,7 @@ extern "C" {
     fn esp_sleep_start();
 }
 
-/// `esp_internal_idle_hook` — SDK path: feed WDT, then enter light sleep.
+/// Feed the watchdog, then follow the SDK's idle policy (CPU wait by default).
 #[no_mangle]
 pub unsafe extern "C" fn esp_internal_idle_hook() {
     unsafe {

@@ -2330,131 +2330,11 @@ static int ssl_get_ecdh_params_from_cert( mbedtls_ssl_context *ssl )
 #endif /* MBEDTLS_KEY_EXCHANGE_ECDH_RSA_ENABLED) ||
           MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA_ENABLED */
 
-static int esp8266_hal_ssl_release_in_buf_for_ske_verify( mbedtls_ssl_context *ssl )
-{
-    if( ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT )
-        return( 0 );
-
-    if( ssl->in_buf == NULL || ssl->in_offt != NULL || ssl->in_left != 0 )
-        return( 0 );
-
-    if( ssl->in_hslen != 0 && ssl->in_hslen < ssl->in_msglen )
-        return( 0 );
-
-    mbedtls_platform_zeroize( ssl->in_buf, MBEDTLS_SSL_IN_BUFFER_LEN );
-    mbedtls_free( ssl->in_buf );
-    ssl->in_buf = NULL;
-    ssl->in_hdr = NULL;
-    ssl->in_ctr = NULL;
-    ssl->in_len = NULL;
-    ssl->in_iv = NULL;
-    ssl->in_msg = NULL;
-    ssl->in_msglen = 0;
-    ssl->in_hslen = 0;
-
-    return( 1 );
-}
-
-static int esp8266_hal_ssl_restore_in_buf_after_ske_verify( mbedtls_ssl_context *ssl,
-                                                            int released )
-{
-    if( ! released )
-        return( 0 );
-
-    ssl->in_buf = mbedtls_calloc( 1, MBEDTLS_SSL_IN_BUFFER_LEN );
-    if( ssl->in_buf == NULL )
-        return( MBEDTLS_ERR_SSL_ALLOC_FAILED );
-
-    ssl->in_left = 0;
-#if defined(MBEDTLS_SSL_PROTO_DTLS)
-    ssl->next_record_offset = 0;
-    if( ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM )
-    {
-        ssl->in_hdr = ssl->in_buf;
-        ssl->in_ctr = ssl->in_hdr + 3;
-        ssl->in_len = ssl->in_hdr + 11;
-        ssl->in_iv = ssl->in_hdr + 13;
-        ssl->in_msg = ssl->in_iv;
-    }
-    else
-#endif
-    {
-        ssl->in_hdr = ssl->in_buf + 8;
-        ssl->in_ctr = ssl->in_hdr - 8;
-        ssl->in_len = ssl->in_hdr + 3;
-        ssl->in_iv = ssl->in_hdr + 5;
-        ssl->in_msg = ssl->in_iv;
-    }
-    ssl->in_msglen = 0;
-    ssl->in_hslen = 0;
-
-    return( 0 );
-}
-
-static int esp8266_hal_ssl_release_out_buf_for_cert_verify( mbedtls_ssl_context *ssl )
-{
-    if( ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT )
-        return( 0 );
-
-    if( ssl->out_buf == NULL || ssl->out_left != 0 )
-        return( 0 );
-
-    mbedtls_platform_zeroize( ssl->out_buf, MBEDTLS_SSL_OUT_BUFFER_LEN );
-    mbedtls_free( ssl->out_buf );
-    ssl->out_buf = NULL;
-    ssl->out_hdr = NULL;
-    ssl->out_ctr = NULL;
-    ssl->out_len = NULL;
-    ssl->out_iv = NULL;
-    ssl->out_msg = NULL;
-    ssl->out_msglen = 0;
-    ssl->out_msgtype = 0;
-
-    return( 1 );
-}
-
-static int esp8266_hal_ssl_restore_out_buf_after_cert_verify( mbedtls_ssl_context *ssl,
-                                                             int released )
-{
-    if( ! released )
-        return( 0 );
-
-    ssl->out_buf = mbedtls_calloc( 1, MBEDTLS_SSL_OUT_BUFFER_LEN );
-    if( ssl->out_buf == NULL )
-        return( MBEDTLS_ERR_SSL_ALLOC_FAILED );
-
-    ssl->out_left = 0;
-#if defined(MBEDTLS_SSL_PROTO_DTLS)
-    if( ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM )
-    {
-        ssl->out_hdr = ssl->out_buf;
-        ssl->out_ctr = ssl->out_hdr + 3;
-        ssl->out_len = ssl->out_hdr + 11;
-        ssl->out_iv = ssl->out_hdr + 13;
-    }
-    else
-#endif
-    {
-        ssl->out_hdr = ssl->out_buf + 8;
-        ssl->out_ctr = ssl->out_hdr - 8;
-        ssl->out_len = ssl->out_hdr + 3;
-        ssl->out_iv = ssl->out_hdr + 5;
-    }
-
-    if( ssl->transform_out != NULL &&
-        ssl->minor_ver >= MBEDTLS_SSL_MINOR_VERSION_2 )
-    {
-        ssl->out_msg = ssl->out_iv + ssl->transform_out->ivlen -
-                       ssl->transform_out->fixed_ivlen;
-    }
-    else
-        ssl->out_msg = ssl->out_iv;
-
-    ssl->out_msglen = 0;
-    ssl->out_msgtype = 0;
-
-    return( 0 );
-}
+/* Shared pre-encryption buffer ownership, implemented in ssl_tls. */
+int esp8266_hal_ssl_release_input( mbedtls_ssl_context *ssl );
+int esp8266_hal_ssl_restore_input( mbedtls_ssl_context *ssl, int released );
+int esp8266_hal_ssl_release_output( mbedtls_ssl_context *ssl );
+int esp8266_hal_ssl_restore_output( mbedtls_ssl_context *ssl, int released );
 
 static int ssl_parse_server_key_exchange( mbedtls_ssl_context *ssl )
 {
@@ -2770,7 +2650,7 @@ start_processing:
 #endif
 
         {
-            unsigned char esp8266_hal_sig_copy[96];
+            unsigned char esp8266_hal_sig_copy[256];
             const unsigned char *esp8266_hal_sig = p;
             int esp8266_hal_in_buf_released = 0;
             int esp8266_hal_restore_ret;
@@ -2780,7 +2660,7 @@ start_processing:
                 memcpy( esp8266_hal_sig_copy, p, sig_len );
                 esp8266_hal_sig = esp8266_hal_sig_copy;
                 esp8266_hal_in_buf_released =
-                    esp8266_hal_ssl_release_in_buf_for_ske_verify( ssl );
+                    esp8266_hal_ssl_release_input( ssl );
             }
 
             ret = mbedtls_pk_verify_restartable(
@@ -2788,7 +2668,7 @@ start_processing:
                         md_alg, hash, hashlen, esp8266_hal_sig, sig_len, rs_ctx );
 
             esp8266_hal_restore_ret =
-                esp8266_hal_ssl_restore_in_buf_after_ske_verify(
+                esp8266_hal_ssl_restore_input(
                                                     ssl, esp8266_hal_in_buf_released );
             if( esp8266_hal_restore_ret != 0 && ret == 0 )
                 ret = esp8266_hal_restore_ret;
@@ -3535,7 +3415,7 @@ sign:
 #endif
 
     {
-        unsigned char esp8266_hal_sig[96];
+        unsigned char esp8266_hal_sig[256];
         unsigned char *esp8266_hal_sig_out = ssl->out_msg + 6 + offset;
         int esp8266_hal_in_buf_released = 0;
         int esp8266_hal_out_buf_released = 0;
@@ -3545,7 +3425,9 @@ sign:
         unsigned char esp8266_hal_hash_sig_alg = ssl->out_msg[4];
         unsigned char esp8266_hal_sig_alg = ssl->out_msg[5];
 
-        if( mbedtls_pk_can_do( mbedtls_ssl_own_key( ssl ), MBEDTLS_PK_ECDSA ) )
+        if( mbedtls_pk_can_do( mbedtls_ssl_own_key( ssl ), MBEDTLS_PK_ECDSA ) ||
+            ( mbedtls_pk_can_do( mbedtls_ssl_own_key( ssl ), MBEDTLS_PK_RSA ) &&
+              mbedtls_pk_get_len( mbedtls_ssl_own_key( ssl ) ) <= sizeof( esp8266_hal_sig ) ) )
         {
             esp8266_hal_use_stack_sig = 1;
 #if defined(MBEDTLS_SSL__ECP_RESTARTABLE)
@@ -3558,9 +3440,9 @@ sign:
         {
             esp8266_hal_sig_out = esp8266_hal_sig;
             esp8266_hal_in_buf_released =
-                esp8266_hal_ssl_release_in_buf_for_ske_verify( ssl );
+                esp8266_hal_ssl_release_input( ssl );
             esp8266_hal_out_buf_released =
-                esp8266_hal_ssl_release_out_buf_for_cert_verify( ssl );
+                esp8266_hal_ssl_release_output( ssl );
         }
 
         ret = mbedtls_pk_sign_restartable( mbedtls_ssl_own_key( ssl ),
@@ -3568,16 +3450,21 @@ sign:
                          esp8266_hal_sig_out, &n,
                          ssl->conf->f_rng, ssl->conf->p_rng, rs_ctx );
 
+        /* CertificateVerify is the client's last private-key operation.
+         * Release its MPI caches before restoring record buffers. */
+        if( ret == 0 )
+            mbedtls_pk_free( mbedtls_ssl_own_key( ssl ) );
+
         if( esp8266_hal_use_stack_sig )
         {
             esp8266_hal_in_restore_ret =
-                esp8266_hal_ssl_restore_in_buf_after_ske_verify(
+                esp8266_hal_ssl_restore_input(
                                             ssl, esp8266_hal_in_buf_released );
             if( esp8266_hal_in_restore_ret != 0 && ret == 0 )
                 ret = esp8266_hal_in_restore_ret;
 
             esp8266_hal_restore_ret =
-                esp8266_hal_ssl_restore_out_buf_after_cert_verify(
+                esp8266_hal_ssl_restore_output(
                                             ssl, esp8266_hal_out_buf_released );
             if( esp8266_hal_restore_ret != 0 && ret == 0 )
                 ret = esp8266_hal_restore_ret;

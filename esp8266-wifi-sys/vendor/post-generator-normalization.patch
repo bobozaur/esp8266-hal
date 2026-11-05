@@ -1,63 +1,94 @@
 --- a/sdkconfig.h
 +++ b/sdkconfig.h
-@@ -166,9 +166,8 @@
- #define CONFIG_MBEDTLS_AES_C 1
- #define CONFIG_MBEDTLS_CCM_C 1
- #define CONFIG_MBEDTLS_GCM_C 1
+@@ -134 +134 @@
+-#define CONFIG_LOG_DEFAULT_LEVEL 3
++#define CONFIG_LOG_DEFAULT_LEVEL 0
+@@ -149,5 +149,4 @@
+-/* The WPA2 Enterprise fixtures use compact EAP-TLS certificates and keep the
+- * largest observed server flight below this inbound record budget. The smaller
+- * buffer leaves verifier-time heap for P-256 X.509 bignum work. */
+-#define CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN 768
+-#define CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN 512
++/* Bound records independently from EAP fragmentation. Two KiB accommodates
++ * ordinary P-256 and RSA-2048 leaf/intermediate certificate messages. */
++#define CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN 2048
++#define CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN 2048
+@@ -169,3 +168,2 @@
 -#define CONFIG_MBEDTLS_DES_C 1
 -#define CONFIG_MBEDTLS_BLOWFISH_C 1
 -#define CONFIG_MBEDTLS_CAMELLIA_C 1
 +/* Keep the SDK-default optional legacy ciphers disabled. WPA's separate DES
 + * implementation remains available for MSCHAPv2. */
- /* Asymmetric / EC */
- #define CONFIG_MBEDTLS_ECDSA_C 1
- #define CONFIG_MBEDTLS_ECP_C 1
 --- a/eap_tls_common_patched.c
 +++ b/eap_tls_common_patched.c
-@@ -545,5 +545 @@
+@@ -347 +347 @@
+-	if (tls_in_len + in_len > 65536) {
++	if (data->tls_in_left > 65536 || tls_in_len + in_len > 65536) {
+@@ -366,10 +366,5 @@
+-	if (data->tls_in && in_len == data->tls_in_left) {
+-		extern void esp8266_hal_tls_set_extra_input(struct tls_connection *conn,
+-								  const u8 *data,
+-								  size_t len);
+-		if (in_data)
+-			esp8266_hal_tls_set_extra_input(data->conn, wpabuf_head_u8(in_data), in_len);
+-		data->tls_in_left = 0;
+-		return 0;
+-	}
+-	if (wpabuf_resize(&data->tls_in, in_len) < 0) {
++	/* The first fragment declares the whole flight. Reserve it once so
++	 * growth never needs both the old and new buffers on this small heap. */
++	if (data->tls_in == NULL)
++		data->tls_in = wpabuf_alloc(data->tls_in_left);
++	if (data->tls_in == NULL) {
+@@ -545,5 +540 @@
 -	{
 -		extern void esp8266_hal_alloc_context_set(unsigned int context);
 -		extern void esp8266_hal_alloc_context_clear(void);
 -		esp8266_hal_alloc_context_set(0x1001u);
 -		*out_data = eap_tls_msg_alloc(eap_type, 1 + length_included * 4 + len,
 +	*out_data = eap_tls_msg_alloc(eap_type, 1 + length_included * 4 + len,
-@@ -551,2 +546,0 @@
+@@ -551,2 +541,0 @@
 -		esp8266_hal_alloc_context_clear();
 -	}
-@@ -554,3 +548,2 @@
+@@ -554,3 +543,2 @@
 -	    printf("[Debug] out_data is null, return \n");
 -		return -1;
 -    } 
 +		return -1;
 +    }
-@@ -613 +605,0 @@
+@@ -613 +600,0 @@
 -	int esp8266_hal_eap_input_reserved = 0;
-@@ -620,4 +611,0 @@
+@@ -620,4 +606,0 @@
 -		if (esp8266_hal_eap_input_reserved) {
 -			extern void esp8266_hal_eap_rsa_release(void);
 -			esp8266_hal_eap_rsa_release();
 -		}
-@@ -629 +616,0 @@
+@@ -629 +611,0 @@
 -		extern void esp8266_hal_eap_rsa_reserve(void);
-@@ -633,2 +619,0 @@
+@@ -633,2 +614,0 @@
 -		esp8266_hal_eap_rsa_reserve();
 -		esp8266_hal_eap_input_reserved = 1;
-@@ -649,4 +633,0 @@
+@@ -649,4 +628,0 @@
 -			if (esp8266_hal_eap_input_reserved) {
 -				extern void esp8266_hal_eap_rsa_release(void);
 -				esp8266_hal_eap_rsa_release();
 -			}
-@@ -669,4 +649,0 @@
+@@ -669,4 +644,0 @@
 -		if (esp8266_hal_eap_input_reserved) {
 -			extern void esp8266_hal_eap_rsa_release(void);
 -			esp8266_hal_eap_rsa_release();
 -		}
-@@ -693,4 +669,0 @@
+@@ -684 +656 @@
+-	if (data->tls_out == NULL || wpabuf_len(data->tls_out) == 0) {
++	if (wpabuf_len(data->tls_out) == 0) {
+@@ -693,5 +665 @@
 -		if (esp8266_hal_eap_input_reserved) {
 -			extern void esp8266_hal_eap_rsa_release(void);
 -			esp8266_hal_eap_rsa_release();
 -		}
-@@ -703,8 +675,0 @@
+-		return 1;
++		return ret < 0 ? ret : 1;
+@@ -703,8 +670,0 @@
 -	if (ret >= 0 && in_len == 0 && *out_data != NULL) {
 -		extern void esp8266_hal_eap_rsa_boost(void);
 -		esp8266_hal_eap_rsa_boost();
@@ -75,17 +106,750 @@
 +// ../README.md for the pinned source and reproduction details.
 +
 +#line 15
-@@ -535,3 +538,0 @@
+@@ -22,0 +27 @@
++#include "esp_wifi.h"
+@@ -48,0 +54,5 @@
++/* The bounded crypto configuration fits 4 KiB; keep the unused SDK stack
++ * allowance available to certificate and MPI allocations instead. */
++#undef WPA2_TASK_STACK_SIZE
++#define WPA2_TASK_STACK_SIZE 4096
++
+@@ -51,4 +61,2 @@
+-#define DATA_MUTEX_TAKE() xSemaphoreTakeRecursive(s_wpa2_data_lock,portMAX_DELAY)
+-#define DATA_MUTEX_GIVE() xSemaphoreGiveRecursive(s_wpa2_data_lock)
+-
+-static void *s_wpa2_data_lock = NULL;
++#define WPA2_STATE_LOCK() taskENTER_CRITICAL()
++#define WPA2_STATE_UNLOCK() taskEXIT_CRITICAL()
+@@ -59,0 +68,2 @@
++static int eap_peer_sm_deinit_checked(void);
++esp_err_t esp_wifi_sta_wpa2_ent_disable_fn(void *param);
+@@ -72,2 +82,7 @@
+-
+-static void wpa2_api_lock(void)
++/* Admission and ownership are protected by short critical sections. Native
++ * timer/association callbacks can run with scheduling suspended. */
++static bool s_wpa2_closing;
++static bool s_wpa2_cleanup_active;
++static unsigned s_wpa2_inflight;
++
++static bool wpa2_api_lock(void)
+@@ -79,5 +94,5 @@
+-            return;
+-        }
+-    }
+-
+-    xSemaphoreTakeRecursive(s_wpa2_api_lock, portMAX_DELAY);
++            return false;
++        }
++    }
++
++    return xSemaphoreTakeRecursive(s_wpa2_api_lock, portMAX_DELAY) == pdPASS;
+@@ -118,16 +133,16 @@
+-static inline void wpa2_task_delete(void *arg)
+-{
+-    void *my_task_hdl = xTaskGetCurrentTaskHandle();
+-    int ret = ESP_OK;
+-
+-    if (my_task_hdl == s_wpa2_task_hdl) {
+-        wpa_printf(MSG_ERROR, "WPA2: should never call task delete api in wpa2 task context");
+-        return;
+-    }
+-
+-    ret = wpa2_post(SIG_WPA2_TASK_DEL, 0);
+-
+-    if (ESP_OK != ret) {
+-        wpa_printf(MSG_ERROR, "WPA2: failed to post task delete event, ret=%d", ret);
+-        return;
+-    }
++static bool wpa2_producer_enter(void)
++{
++    bool admitted;
++    WPA2_STATE_LOCK();
++    admitted = gEapSm && !s_wpa2_closing && !s_wpa2_cleanup_active;
++    if (admitted)
++        s_wpa2_inflight++;
++    WPA2_STATE_UNLOCK();
++    return admitted;
++}
++
++static void wpa2_producer_leave(void)
++{
++    WPA2_STATE_LOCK();
++    s_wpa2_inflight--;
++    WPA2_STATE_UNLOCK();
+@@ -148 +163 @@
+-    DATA_MUTEX_TAKE();
++    WPA2_STATE_LOCK();
+@@ -150 +165 @@
+-    DATA_MUTEX_GIVE();
++    WPA2_STATE_UNLOCK();
+@@ -155 +170 @@
+-    DATA_MUTEX_TAKE();
++    WPA2_STATE_LOCK();
+@@ -157 +172 @@
+-    DATA_MUTEX_GIVE();
++    WPA2_STATE_UNLOCK();
+@@ -163 +178 @@
+-    DATA_MUTEX_TAKE();
++    WPA2_STATE_LOCK();
+@@ -168 +183 @@
+-    DATA_MUTEX_GIVE();
++    WPA2_STATE_UNLOCK();
+@@ -172,7 +187,16 @@
+-static void wpa2_rxq_deinit(void)
+-{
+-    struct wpa2_rx_param *param = NULL;
+-    DATA_MUTEX_TAKE();
+-    while ((param = STAILQ_FIRST(&s_wpa2_rxq)) != NULL) {
+-        STAILQ_REMOVE_HEAD(&s_wpa2_rxq, bqentry);
+-        STAILQ_NEXT(param,bqentry) = NULL;
++static void wpa2_rxq_discard(struct wpa2_rx_param *param)
++{
++    struct wpa2_rx_param *entry;
++    bool found = false;
++
++    WPA2_STATE_LOCK();
++    STAILQ_FOREACH(entry, &s_wpa2_rxq, bqentry) {
++        if (entry == param) {
++            STAILQ_REMOVE(&s_wpa2_rxq, param, wpa2_rx_param, bqentry);
++            found = true;
++            break;
++        }
++    }
++    WPA2_STATE_UNLOCK();
++    /* A worker may already have taken it while the producer was posting. */
++    if (found) {
+@@ -182,12 +206,15 @@
+-    DATA_MUTEX_GIVE();
+-}
+-
+-void wpa2_task(void *pvParameters )
+-{
+-    ETSEvent *e;
+-    struct eap_sm *sm = gEapSm;
+-    bool task_del = false;
+-
+-    if (!sm) {
+-        return;
+-    }
++}
++
++static void wpa2_rxq_deinit(void)
++{
++    struct wpa2_rx_param *param;
++    while ((param = wpa2_rxq_dequeue()) != NULL) {
++        os_free(param->buf);
++        os_free(param);
++    }
++}
++
++void wpa2_task(void *pvParameters)
++{
++    ETSEvent event;
++    struct eap_sm *sm = pvParameters;
+@@ -196,9 +223,21 @@
+-        if ( pdPASS == xQueueReceive(s_wpa2_queue, &e, portMAX_DELAY) ) {
+-            if (e->sig < SIG_WPA2_MAX) {
+-                DATA_MUTEX_TAKE();
+-                if(sm->wpa2_sig_cnt[e->sig]) {
+-                    sm->wpa2_sig_cnt[e->sig]--;
+-                } else {
+-                    wpa_printf(MSG_ERROR, "wpa2_task: invalid sig cnt, sig=%d cnt=%d", e->sig, sm->wpa2_sig_cnt[e->sig]);
+-                }
+-                DATA_MUTEX_GIVE();
++        if (xQueueReceive(s_wpa2_queue, &event, portMAX_DELAY) != pdPASS)
++            continue;
++        if (event.sig == SIG_WPA2_TASK_DEL)
++            break;
++        if (event.sig >= SIG_WPA2_MAX)
++            continue;
++
++        WPA2_STATE_LOCK();
++        sm->wpa2_sig_cnt[event.sig]--;
++        WPA2_STATE_UNLOCK();
++        switch (event.sig) {
++        case SIG_WPA2_START:
++            wpa2_start_eapol_internal();
++            break;
++        case SIG_WPA2_RX: {
++            struct wpa2_rx_param *param;
++            while ((param = wpa2_rxq_dequeue()) != NULL) {
++                eap_sm_rx_eapol_internal(param->sa, param->buf,
++                                         param->len, param->bssid);
++                os_free(param->buf);
++                os_free(param);
+@@ -206,24 +244,0 @@
+-            switch (e->sig) {
+-            case SIG_WPA2_TASK_DEL:
+-                task_del = true;
+-                break;
+-            case SIG_WPA2_START:
+-                wpa2_start_eapol_internal();
+-                break;
+-            case SIG_WPA2_RX: {
+-                struct wpa2_rx_param *param = NULL;
+-
+-                while ((param = wpa2_rxq_dequeue()) != NULL){
+-                    eap_sm_rx_eapol_internal(param->sa, param->buf, param->len, param->bssid);
+-                    os_free(param->buf);
+-                    os_free(param);
+-                }
+-                break;
+-            }
+-            default:
+-                break;
+-            }
+-            os_free(e);
+-        }
+-
+-        if (task_del) {
+@@ -231,16 +246,6 @@
+-        } else {
+-            if (s_wifi_wpa2_sync_sem) {
+-                wpa_printf(MSG_DEBUG, "WPA2: wifi->wpa2 api completed sig(%d)", e->sig);
+-                xSemaphoreGive(s_wifi_wpa2_sync_sem);
+-            } else {
+-                wpa_printf(MSG_ERROR, "WPA2: null wifi->wpa2 sync sem");
+-            }
+-        }
+-    }
+-
+-    wpa_printf(MSG_DEBUG, "WPA2: queue deleted");
+-    vQueueDelete(s_wpa2_queue);
+-    wpa_printf(MSG_DEBUG, "WPA2: task deleted");
+-    s_wpa2_queue = NULL;
+-    if (s_wifi_wpa2_sync_sem) {
+-        wpa_printf(MSG_DEBUG, "WPA2: wifi->wpa2 api completed sig(%d)", e->sig);
++        }
++        default:
++            break;
++        }
++        /* Only ordinary posters consume this completion. DEL has no waiter
++         * here, so it cannot steal a still-returning RX caller's completion. */
+@@ -248,5 +253,7 @@
+-    } else {
+-        wpa_printf(MSG_ERROR, "WPA2: null wifi->wpa2 sync sem");
+-    }
+-
+-    /* At this point, we completed */
++    }
++
++    /* No queue, peer or semaphore access after publishing exit. A higher
++     * priority cleanup caller may now free them before this task deletes itself. */
++    WPA2_STATE_LOCK();
++    s_wpa2_task_hdl = NULL;
++    WPA2_STATE_UNLOCK();
+@@ -258,3 +265,5 @@
+-    struct eap_sm *sm = gEapSm;
+-
+-    if (!sm) {
++    ETSEvent event = { .sig = sig, .par = par };
++    struct eap_sm *sm;
++    int ret = ESP_FAIL;
++
++    if (sig >= SIG_WPA2_TASK_DEL || !wpa2_producer_enter())
+@@ -262,3 +271,6 @@
+-    }
+-
+-    DATA_MUTEX_TAKE();
++    WPA2_STATE_LOCK();
++    sm = gEapSm;
++    if (s_wpa2_closing) {
++        WPA2_STATE_UNLOCK();
++        goto out;
++    }
+@@ -266,26 +278,18 @@
+-        DATA_MUTEX_GIVE();
+-        return ESP_OK;
+-    } else {
+-        ETSEvent *evt = (ETSEvent *)os_malloc(sizeof(ETSEvent));
+-        if (evt == NULL) {
+-            wpa_printf(MSG_ERROR, "WPA2: E N M\n");
+-            DATA_MUTEX_GIVE();
+-            return ESP_FAIL;
+-        }
+-        sm->wpa2_sig_cnt[sig]++;
+-        DATA_MUTEX_GIVE();
+-        evt->sig = sig;
+-        evt->par = par;
+-        if ( xQueueSend(s_wpa2_queue, &evt, 10 / portTICK_PERIOD_MS ) != pdPASS) {
+-            wpa_printf(MSG_ERROR, "WPA2: Q S E");
+-            return ESP_FAIL;
+-        } else {
+-            if (s_wifi_wpa2_sync_sem) {
+-                xSemaphoreTake(s_wifi_wpa2_sync_sem, portMAX_DELAY);
+-                wpa_printf(MSG_DEBUG, "WPA2: wpa2 api return, sm->state(%d)", sm->finish_state);
+-            } else {
+-                wpa_printf(MSG_ERROR, "WPA2: null wifi->wpa2 sync sem");
+-            }
+-        }
+-    }
+-    return ESP_OK;
++        WPA2_STATE_UNLOCK();
++        ret = ESP_OK;
++        goto out;
++    }
++    sm->wpa2_sig_cnt[sig]++;
++    /* At most one pending START and RX, plus DEL, fit the three-entry queue.
++     * Admission and enqueue are atomic with respect to teardown. */
++    if (xQueueSend(s_wpa2_queue, &event, 0) != pdPASS) {
++        sm->wpa2_sig_cnt[sig]--;
++        WPA2_STATE_UNLOCK();
++        goto out;
++    }
++    WPA2_STATE_UNLOCK();
++    if (xSemaphoreTake(s_wifi_wpa2_sync_sem, portMAX_DELAY) == pdPASS)
++        ret = ESP_OK;
++out:
++    wpa2_producer_leave();
++    return ret;
+@@ -426 +430 @@
+-    if (plen > wpabuf_len(reqData)) {
++    if (plen < sizeof(*ehdr) + 1 || plen > wpabuf_len(reqData)) {
+@@ -512,0 +517,3 @@
++        if (resp != sm->lastRespData) {
++            wpabuf_free(resp);
++        }
+@@ -515,2 +521,0 @@
+-        wpabuf_free(resp);
+-        resp = NULL;
+@@ -529,3 +534,6 @@
+-    struct eap_sm *sm = gEapSm;
+-
+-    if (!sm) {
++#ifdef USE_WPA2_TASK
++    struct wpa2_rx_param *param;
++    int ret = ESP_ERR_NO_MEM;
++
++    /* Cover allocation/enqueue as well as the synchronous completion wait. */
++    if (!wpa2_producer_enter())
+@@ -533,25 +541,19 @@
+-    }
+-#ifdef USE_WPA2_TASK
 -    if (len > 384) {
 -        return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);
 -    }
-@@ -542 +543 @@
+-    {
+-        struct wpa2_rx_param *param = (struct wpa2_rx_param *)os_zalloc(sizeof(struct wpa2_rx_param));   /* free in task */
+-
+-        if (!param) {
 -            return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);
-+            return ESP_ERR_NO_MEM;
-@@ -548 +549 @@
+-        }
+-
+-        param->buf = (u8 *)os_zalloc(len);   /* free in task */
+-        if (!param->buf) {
+-            os_free(param);
 -            return eap_sm_rx_eapol_internal(src_addr, buf, len, bssid);
-+            return ESP_ERR_NO_MEM;
-@@ -1177 +1177,0 @@
+-        }
+-        param->bssid = bssid;
+-        memcpy(param->buf, buf, len);
+-        param->len = len;
+-        memcpy(param->sa, src_addr, WPA_ADDR_LEN);
+-
+-        wpa2_rxq_enqueue(param);
+-        return wpa2_post(SIG_WPA2_RX, 0);
+-    }
++    param = os_zalloc(sizeof(*param));
++    if (!param)
++        goto out;
++    param->buf = os_zalloc(len);
++    if (!param->buf) {
++        os_free(param);
++        goto out;
++    }
++    param->bssid = bssid;
++    memcpy(param->buf, buf, len);
++    param->len = len;
++    memcpy(param->sa, src_addr, WPA_ADDR_LEN);
++    wpa2_rxq_enqueue(param);
++    ret = wpa2_post(SIG_WPA2_RX, 0);
++    if (ret != ESP_OK)
++        wpa2_rxq_discard(param);
++out:
++    wpa2_producer_leave();
++    return ret;
+@@ -559 +560,0 @@
+-
+@@ -568,0 +570,2 @@
++    if (!buf || len < sizeof(*hdr))
++        return ESP_ERR_INVALID_ARG;
+@@ -594,3 +597 @@
+-    struct wpabuf *req = NULL;
+-    struct wpabuf stack_req;
+-    int stack_req_used = 0;
++    struct wpabuf req;
+@@ -664,7 +665,3 @@
+-        req = wpabuf_alloc_copy((u8 *)ehdr, len - sizeof(*hdr));
+-        if (!req) {
+-            wpabuf_set(&stack_req, (u8 *)ehdr, len - sizeof(*hdr));
+-            req = &stack_req;
+-            stack_req_used = 1;
+-        }
+-        ret = eap_sm_process_request(sm, req);
++        /* The WPA2 worker owns buf until this synchronous request returns. */
++        wpabuf_set(&req, ehdr, plen);
++        ret = eap_sm_process_request(sm, &req);
+@@ -695,0 +693 @@
++#endif
+@@ -697,4 +694,0 @@
+-    if (!stack_req_used) {
+-        wpabuf_free(req);
+-    }
+-#endif
+@@ -748,14 +742,67 @@
+-/**
+- * eap_peer_sm_init - Allocate and initialize EAP peer state machine
+- * @eapol_ctx: Context data to be used with eapol_cb calls
+- * @eapol_cb: Pointer to EAPOL callback functions
+- * @msg_ctx: Context data for wpa_msg() calls
+- * @conf: EAP configuration
+- * Returns: Pointer to the allocated EAP state machine or %NULL on failure
+- *
+- * This function allocates and initializes an EAP state machine. In addition,
+- * this initializes TLS library for the new EAP state machine. eapol_cb pointer
+- * will be in use until eap_peer_sm_deinit() is used to deinitialize this EAP
+- * state machine. Consequently, the caller must make sure that this data
+- * structure remains alive while the EAP state machine is active.
+- */
++/* Stop admission first. DEL owns no allocation and does not consume the normal
++ * poster's completion semaphore. Suspended native callbacks may request exit,
++ * but must leave the peer owned until the worker and its callers can run. */
++static int eap_peer_sm_deinit_checked(void)
++{
++    ETSEvent event = { .sig = SIG_WPA2_TASK_DEL, .par = 0 };
++    struct eap_sm *sm;
++    bool finished;
++
++    WPA2_STATE_LOCK();
++    if (s_wpa2_cleanup_active) {
++        WPA2_STATE_UNLOCK();
++        return ESP_ERR_INVALID_STATE;
++    }
++    sm = gEapSm;
++    if (!sm) {
++        WPA2_STATE_UNLOCK();
++        return ESP_OK;
++    }
++    if (xTaskGetCurrentTaskHandle() == s_wpa2_task_hdl) {
++        WPA2_STATE_UNLOCK();
++        return ESP_ERR_INVALID_STATE;
++    }
++    s_wpa2_closing = true;
++    if (s_wpa2_task_hdl && !sm->wpa2_sig_cnt[SIG_WPA2_TASK_DEL]) {
++        sm->wpa2_sig_cnt[SIG_WPA2_TASK_DEL] = 1;
++        if (xQueueSend(s_wpa2_queue, &event, 0) != pdPASS) {
++            sm->wpa2_sig_cnt[SIG_WPA2_TASK_DEL] = 0;
++            WPA2_STATE_UNLOCK();
++            return ESP_FAIL;
++        }
++    }
++    finished = !s_wpa2_task_hdl && s_wpa2_inflight == 0;
++    if (!finished && xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) {
++        WPA2_STATE_UNLOCK();
++        return ESP_ERR_INVALID_STATE;
++    }
++    s_wpa2_cleanup_active = true;
++    WPA2_STATE_UNLOCK();
++
++    while (!finished) {
++        vTaskDelay(1);
++        WPA2_STATE_LOCK();
++        finished = !s_wpa2_task_hdl && s_wpa2_inflight == 0;
++        WPA2_STATE_UNLOCK();
++    }
++
++    /* No worker or returning producer can observe these owners now. */
++    wpa2_rxq_deinit();
++    eap_deinit_prev_method(sm, "EAP deinit");
++    eap_sm_abort(sm);
++    eap_peer_config_deinit(sm);
++    eap_peer_blob_deinit(sm);
++    tls_deinit(sm->ssl_ctx);
++    vQueueDelete(s_wpa2_queue);
++    vSemaphoreDelete(s_wifi_wpa2_sync_sem);
++    WPA2_STATE_LOCK();
++    gEapSm = NULL;
++    s_wpa2_queue = NULL;
++    s_wifi_wpa2_sync_sem = NULL;
++    s_wpa2_cleanup_active = false;
++    s_wpa2_closing = wpa2_is_disabled();
++    WPA2_STATE_UNLOCK();
++    os_free(sm);
++    return ESP_OK;
++}
++
+@@ -764,20 +811,22 @@
+-    int ret = 0;
+-    struct eap_sm *sm;
+-
+-    if (gEapSm) {
+-        wpa_printf(MSG_ERROR, "WPA2: wpa2 sm not null, deinit it");
+-        eap_peer_sm_deinit();
+-    }
+-
+-    sm = (struct eap_sm *)os_zalloc(sizeof(*sm));
+-    if (sm == NULL) {
+-        return ESP_ERR_NO_MEM;
+-    }
+-
+-    s_wpa2_data_lock = xSemaphoreCreateRecursiveMutex();
+-    if (!s_wpa2_data_lock) {
+-        wpa_printf(MSG_ERROR, "wpa2 eap_peer_sm_init: failed to alloc data lock");  // NOLINT(clang-analyzer-unix.Malloc)
+-        return ESP_ERR_NO_MEM;
+-    }
+-
+-    wpa2_set_eap_state(WPA2_ENT_EAP_STATE_NOT_START);
++    struct eap_sm *sm = NULL;
++    void *queue = NULL;
++    void *completion = NULL;
++    int ret;
++
++    if (!wpa2_is_enabled())
++        return ESP_ERR_INVALID_STATE;
++    ret = eap_peer_sm_deinit_checked();
++    if (ret != ESP_OK)
++        return ret;
++    WPA2_STATE_LOCK();
++    if (!wpa2_is_enabled() || s_wpa2_cleanup_active || gEapSm) {
++        WPA2_STATE_UNLOCK();
++        return ESP_ERR_INVALID_STATE;
++    }
++    s_wpa2_cleanup_active = true;
++    s_wpa2_closing = true;
++    WPA2_STATE_UNLOCK();
++
++    sm = os_zalloc(sizeof(*sm));
++    if (!sm)
++        goto no_mem;
+@@ -785,12 +834,43 @@
+-    esp_wifi_get_macaddr_internal(WIFI_IF_STA, sm->ownaddr);
+-    ret = eap_peer_blob_init(sm);
+-    if (ret) {
+-        wpa_printf(MSG_ERROR, "eap_peer_blob_init failed\n");
+-        os_free(sm);
+-        vSemaphoreDelete(s_wpa2_data_lock);
+-        return ESP_FAIL;
+-    }
+-
+-    ret = eap_peer_config_init(sm, g_wpa_private_key_passwd, g_wpa_private_key_passwd_len);
+-    if (ret) {
+-        wpa_printf(MSG_ERROR, "eap_peer_config_init failed\n");
++    sm->finish_state = WPA2_ENT_EAP_STATE_NOT_START;
++    ret = esp_wifi_get_mac(WIFI_IF_STA, sm->ownaddr);
++    if (ret != ESP_OK)
++        goto fail;
++    if (eap_peer_blob_init(sm) != 0 ||
++        eap_peer_config_init(sm, g_wpa_private_key_passwd,
++                             g_wpa_private_key_passwd_len) != 0)
++        goto no_mem;
++    sm->ssl_ctx = tls_init();
++    if (!sm->ssl_ctx)
++        goto no_mem;
++    queue = xQueueCreate(SIG_WPA2_MAX, sizeof(ETSEvent));
++    if (!queue)
++        goto no_mem;
++    completion = xSemaphoreCreateCounting(1, 0);
++    if (!completion)
++        goto no_mem;
++
++    /* The worker can run before xTaskCreate returns. Its argument and every
++     * dependency are valid, while admission remains closed until publication. */
++    wpa2_rxq_init();
++    WPA2_STATE_LOCK();
++    s_wpa2_queue = queue;
++    s_wifi_wpa2_sync_sem = completion;
++    WPA2_STATE_UNLOCK();
++    if (xTaskCreate(wpa2_task, "wpa2T", WPA2_TASK_STACK_SIZE, sm, 2,
++                    &s_wpa2_task_hdl) != pdPASS)
++        goto no_mem;
++    WPA2_STATE_LOCK();
++    gEapSm = sm;
++    s_wpa2_closing = false;
++    s_wpa2_cleanup_active = false;
++    WPA2_STATE_UNLOCK();
++    esp_wifi_set_wpa2_ent_state_internal(WPA2_ENT_EAP_STATE_NOT_START);
++    return ESP_OK;
++
++no_mem:
++    ret = ESP_ERR_NO_MEM;
++fail:
++    if (sm) {
++        if (sm->ssl_ctx)
++            tls_deinit(sm->ssl_ctx);
++        eap_peer_config_deinit(sm);
+@@ -799,46 +879,15 @@
+-        vSemaphoreDelete(s_wpa2_data_lock);
+-        return ESP_FAIL;
+-    }
+-
+-    sm->ssl_ctx = tls_init();
+-    if (sm->ssl_ctx == NULL) {
+-        wpa_printf(MSG_WARNING, "SSL: Failed to initialize TLS "
+-                   "context.");
+-        eap_peer_blob_deinit(sm);
+-        eap_peer_config_deinit(sm);
+-        os_free(sm);
+-        vSemaphoreDelete(s_wpa2_data_lock);
+-        return ESP_FAIL;
+-    }
+-
+-    wpa2_rxq_init();
+-
+-    gEapSm = sm;
+-#ifdef USE_WPA2_TASK
+-    s_wpa2_queue = xQueueCreate(SIG_WPA2_MAX, sizeof( void * ) );
+-    xTaskCreate(wpa2_task, "wpa2T", WPA2_TASK_STACK_SIZE, NULL, 2, &s_wpa2_task_hdl);
+-    s_wifi_wpa2_sync_sem = xSemaphoreCreateCounting(1, 0);
+-    if (!s_wifi_wpa2_sync_sem) {
+-        vQueueDelete(s_wpa2_queue);
+-        s_wpa2_queue = NULL;
+-        eap_peer_blob_deinit(sm);
+-        eap_peer_config_deinit(sm);
+-        os_free(sm);
+-        vSemaphoreDelete(s_wpa2_data_lock);
+-        wpa_printf(MSG_ERROR, "WPA2: failed create wifi wpa2 task sync sem");
+-        return ESP_FAIL;
+-    }
+-
+-    wpa_printf(MSG_INFO, "wpa2_task prio:%d, stack:%d\n", 2, WPA2_TASK_STACK_SIZE);
+-
+-#endif
+-    return ESP_OK;
+-}
+-
+-/**
+- * eap_peer_sm_deinit - Deinitialize and free an EAP peer state machine
+- * @sm: Pointer to EAP state machine allocated with eap_peer_sm_init()
+- *
+- * This function deinitializes EAP state machine and frees all allocated
+- * resources.
+- */
++    }
++    if (completion)
++        vSemaphoreDelete(completion);
++    if (queue)
++        vQueueDelete(queue);
++    WPA2_STATE_LOCK();
++    s_wpa2_queue = NULL;
++    s_wifi_wpa2_sync_sem = NULL;
++    s_wpa2_task_hdl = NULL;
++    s_wpa2_cleanup_active = false;
++    s_wpa2_closing = false;
++    WPA2_STATE_UNLOCK();
++    return ret;
++}
++
+@@ -847,32 +896,2 @@
+-    struct eap_sm *sm = gEapSm;
+-
+-    if (sm == NULL) {
+-        return;
+-    }
+-
+-    eap_peer_config_deinit(sm);
+-    eap_peer_blob_deinit(sm);
+-    eap_deinit_prev_method(sm, "EAP deinit");
+-    eap_sm_abort(sm);
+-    tls_deinit(sm->ssl_ctx);
+-#ifdef USE_WPA2_TASK
+-    wpa2_task_delete(0);
+-#endif
+-
+-    if (STAILQ_FIRST((&s_wpa2_rxq)) != NULL) {
+-        wpa2_rxq_deinit();
+-    }
+-
+-    if (s_wifi_wpa2_sync_sem) {
+-        vSemaphoreDelete(s_wifi_wpa2_sync_sem);
+-    }
+-    s_wifi_wpa2_sync_sem = NULL;
+-
+-    if (s_wpa2_data_lock) {
+-        vSemaphoreDelete(s_wpa2_data_lock);
+-        s_wpa2_data_lock = NULL;
+-        wpa_printf(MSG_DEBUG, "wpa2 eap_peer_sm_deinit: free data lock");
+-    }
+-
+-    os_free(sm);
+-    gEapSm = NULL;
++    if (eap_peer_sm_deinit_checked() != ESP_OK)
++        wpa_printf(MSG_DEBUG, "WPA2: peer cleanup pending");
+@@ -899,4 +917,0 @@
+-    esp_wifi_register_wpa2_cb_internal(wpa2_cb);
+-
+-    wpa_printf(MSG_DEBUG, "WPA2 ENTERPRISE CRYPTO INIT.\r\n");
+-
+@@ -905 +920,3 @@
+-        wpa_printf(MSG_ERROR, "Register EAP Peer methods Failure\n");
++        eap_peer_unregister_methods();
++        os_free(wpa2_cb);
++        return ESP_ERR_NO_MEM;
+@@ -907,0 +925,2 @@
++    esp_wifi_register_wpa2_cb_internal(wpa2_cb);
++    wpa_printf(MSG_DEBUG, "WPA2 ENTERPRISE CRYPTO INIT.\r\n");
+@@ -916 +935,7 @@
+-    wpa2_api_lock();
++    if (!wpa2_api_lock())
++        return ESP_ERR_NO_MEM;
++
++    if (s_wpa2_closing) {
++        wpa2_api_unlock();
++        return ESP_ERR_INVALID_STATE;
++    }
+@@ -931,0 +957,5 @@
++        /* The native wrapper sets its enabled byte before invoking our
++         * callback. Roll it back even when callback allocation failed. */
++        param.fn = (wifi_wpa2_fn_t)esp_wifi_sta_wpa2_ent_disable_fn;
++        if (esp_wifi_sta_wpa2_ent_disable_internal(&param) != ESP_OK)
++            s_wpa2_closing = true;
+@@ -941,0 +972,2 @@
++    int ret;
++
+@@ -942,0 +975,3 @@
++    ret = eap_peer_sm_deinit_checked();
++    if (ret != ESP_OK)
++        return ret;
+@@ -944,7 +978,0 @@
+-
+-    if (gEapSm) {
+-        eap_peer_sm_deinit();
+-    }
+-
+-#ifdef USE_WPA2_TASK
+-#endif
+@@ -964,3 +992,4 @@
+-    wpa2_api_lock();
+-
+-    if (wpa2_is_disabled()) {
++    if (!wpa2_api_lock())
++        return ESP_ERR_NO_MEM;
++
++    if (wpa2_is_disabled() && !s_wpa2_closing) {
+@@ -972,8 +1001,14 @@
+-    param.fn = (wifi_wpa2_fn_t)esp_wifi_sta_wpa2_ent_disable_fn;
+-    param.param = 0;
+-    ret = esp_wifi_sta_wpa2_ent_disable_internal(&param);
+-
+-    if (ESP_OK == ret) {
+-        wpa2_set_state(WPA2_STATE_DISABLED);
+-    } else {
+-        wpa_printf(MSG_ERROR, "failed to disable wpa2 ret=%d", ret);
++    /* Stop before mutating the native enabled byte. A suspended native
++     * teardown can leave an owned peer pending; do not pretend it is enabled
++     * or allow a new association to overwrite it. */
++    WPA2_STATE_LOCK();
++    wpa2_set_state(WPA2_STATE_DISABLED);
++    s_wpa2_closing = true;
++    WPA2_STATE_UNLOCK();
++    ret = eap_peer_sm_deinit_checked();
++    if (ret == ESP_OK) {
++        param.fn = (wifi_wpa2_fn_t)esp_wifi_sta_wpa2_ent_disable_fn;
++        param.param = 0;
++        ret = esp_wifi_sta_wpa2_ent_disable_internal(&param);
++        if (ret == ESP_OK)
++            s_wpa2_closing = false;
+@@ -1177 +1211,0 @@
 -
 --- a/esp_wps_patched.c
 +++ b/esp_wps_patched.c
@@ -995,48 +1759,452 @@
 -        esp8266_hal_eap_rsa_release();
 @@ -2214 +2212,0 @@
 -    esp8266_hal_eap_rsa_release();
-@@ -2779,2 +2776,0 @@
+@@ -2335,125 +2333,5 @@
+-static int esp8266_hal_ssl_release_in_buf_for_ske_verify( mbedtls_ssl_context *ssl )
+-{
+-    if( ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT )
+-        return( 0 );
+-
+-    if( ssl->in_buf == NULL || ssl->in_offt != NULL || ssl->in_left != 0 )
+-        return( 0 );
+-
+-    if( ssl->in_hslen != 0 && ssl->in_hslen < ssl->in_msglen )
+-        return( 0 );
+-
+-    mbedtls_platform_zeroize( ssl->in_buf, MBEDTLS_SSL_IN_BUFFER_LEN );
+-    mbedtls_free( ssl->in_buf );
+-    ssl->in_buf = NULL;
+-    ssl->in_hdr = NULL;
+-    ssl->in_ctr = NULL;
+-    ssl->in_len = NULL;
+-    ssl->in_iv = NULL;
+-    ssl->in_msg = NULL;
+-    ssl->in_msglen = 0;
+-    ssl->in_hslen = 0;
+-
+-    return( 1 );
+-}
+-
+-static int esp8266_hal_ssl_restore_in_buf_after_ske_verify( mbedtls_ssl_context *ssl,
+-                                                            int released )
+-{
+-    if( ! released )
+-        return( 0 );
+-
+-    ssl->in_buf = mbedtls_calloc( 1, MBEDTLS_SSL_IN_BUFFER_LEN );
+-    if( ssl->in_buf == NULL )
+-        return( MBEDTLS_ERR_SSL_ALLOC_FAILED );
+-
+-    ssl->in_left = 0;
+-#if defined(MBEDTLS_SSL_PROTO_DTLS)
+-    ssl->next_record_offset = 0;
+-    if( ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM )
+-    {
+-        ssl->in_hdr = ssl->in_buf;
+-        ssl->in_ctr = ssl->in_hdr + 3;
+-        ssl->in_len = ssl->in_hdr + 11;
+-        ssl->in_iv = ssl->in_hdr + 13;
+-        ssl->in_msg = ssl->in_iv;
+-    }
+-    else
+-#endif
+-    {
+-        ssl->in_hdr = ssl->in_buf + 8;
+-        ssl->in_ctr = ssl->in_hdr - 8;
+-        ssl->in_len = ssl->in_hdr + 3;
+-        ssl->in_iv = ssl->in_hdr + 5;
+-        ssl->in_msg = ssl->in_iv;
+-    }
+-    ssl->in_msglen = 0;
+-    ssl->in_hslen = 0;
+-
+-    return( 0 );
+-}
+-
+-static int esp8266_hal_ssl_release_out_buf_for_cert_verify( mbedtls_ssl_context *ssl )
+-{
+-    if( ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT )
+-        return( 0 );
+-
+-    if( ssl->out_buf == NULL || ssl->out_left != 0 )
+-        return( 0 );
+-
+-    mbedtls_platform_zeroize( ssl->out_buf, MBEDTLS_SSL_OUT_BUFFER_LEN );
+-    mbedtls_free( ssl->out_buf );
+-    ssl->out_buf = NULL;
+-    ssl->out_hdr = NULL;
+-    ssl->out_ctr = NULL;
+-    ssl->out_len = NULL;
+-    ssl->out_iv = NULL;
+-    ssl->out_msg = NULL;
+-    ssl->out_msglen = 0;
+-    ssl->out_msgtype = 0;
+-
+-    return( 1 );
+-}
+-
+-static int esp8266_hal_ssl_restore_out_buf_after_cert_verify( mbedtls_ssl_context *ssl,
+-                                                             int released )
+-{
+-    if( ! released )
+-        return( 0 );
+-
+-    ssl->out_buf = mbedtls_calloc( 1, MBEDTLS_SSL_OUT_BUFFER_LEN );
+-    if( ssl->out_buf == NULL )
+-        return( MBEDTLS_ERR_SSL_ALLOC_FAILED );
+-
+-    ssl->out_left = 0;
+-#if defined(MBEDTLS_SSL_PROTO_DTLS)
+-    if( ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM )
+-    {
+-        ssl->out_hdr = ssl->out_buf;
+-        ssl->out_ctr = ssl->out_hdr + 3;
+-        ssl->out_len = ssl->out_hdr + 11;
+-        ssl->out_iv = ssl->out_hdr + 13;
+-    }
+-    else
+-#endif
+-    {
+-        ssl->out_hdr = ssl->out_buf + 8;
+-        ssl->out_ctr = ssl->out_hdr - 8;
+-        ssl->out_len = ssl->out_hdr + 3;
+-        ssl->out_iv = ssl->out_hdr + 5;
+-    }
+-
+-    if( ssl->transform_out != NULL &&
+-        ssl->minor_ver >= MBEDTLS_SSL_MINOR_VERSION_2 )
+-    {
+-        ssl->out_msg = ssl->out_iv + ssl->transform_out->ivlen -
+-                       ssl->transform_out->fixed_ivlen;
+-    }
+-    else
+-        ssl->out_msg = ssl->out_iv;
+-
+-    ssl->out_msglen = 0;
+-    ssl->out_msgtype = 0;
+-
+-    return( 0 );
+-}
++/* Shared pre-encryption buffer ownership, implemented in ssl_tls. */
++int esp8266_hal_ssl_release_input( mbedtls_ssl_context *ssl );
++int esp8266_hal_ssl_restore_input( mbedtls_ssl_context *ssl, int released );
++int esp8266_hal_ssl_release_output( mbedtls_ssl_context *ssl );
++int esp8266_hal_ssl_restore_output( mbedtls_ssl_context *ssl, int released );
+@@ -2775 +2653 @@
+-            unsigned char esp8266_hal_sig_copy[96];
++            unsigned char esp8266_hal_sig_copy[256];
+@@ -2779,2 +2656,0 @@
 -            extern void esp8266_hal_alloc_context_set(unsigned int context);
 -            extern void esp8266_hal_alloc_context_clear(void);
-@@ -2790 +2785,0 @@
+@@ -2787 +2663 @@
+-                    esp8266_hal_ssl_release_in_buf_for_ske_verify( ssl );
++                    esp8266_hal_ssl_release_input( ssl );
+@@ -2790 +2665,0 @@
 -            esp8266_hal_alloc_context_set(0x3002u);
-@@ -2794 +2788,0 @@
+@@ -2794 +2668,0 @@
 -            esp8266_hal_alloc_context_clear();
-@@ -3010,3 +3003,0 @@
+@@ -2797 +2671 @@
+-                esp8266_hal_ssl_restore_in_buf_after_ske_verify(
++                esp8266_hal_ssl_restore_input(
+@@ -3010,3 +2883,0 @@
 -extern void esp8266_hal_eap_rsa_reserve(void);
 -extern void esp8266_hal_eap_rsa_release(void);
 -
-@@ -3556,2 +3546,0 @@
+@@ -3547 +3418 @@
+-        unsigned char esp8266_hal_sig[96];
++        unsigned char esp8266_hal_sig[256];
+@@ -3556,4 +3427,4 @@
 -        extern void esp8266_hal_alloc_context_set(unsigned int context);
 -        extern void esp8266_hal_alloc_context_clear(void);
-@@ -3577,2 +3565,0 @@
+-
+-        if( mbedtls_pk_can_do( mbedtls_ssl_own_key( ssl ), MBEDTLS_PK_ECDSA ) )
++
++        if( mbedtls_pk_can_do( mbedtls_ssl_own_key( ssl ), MBEDTLS_PK_ECDSA ) ||
++            ( mbedtls_pk_can_do( mbedtls_ssl_own_key( ssl ), MBEDTLS_PK_RSA ) &&
++              mbedtls_pk_get_len( mbedtls_ssl_own_key( ssl ) ) <= sizeof( esp8266_hal_sig ) ) )
+@@ -3572 +3443 @@
+-                esp8266_hal_ssl_release_in_buf_for_ske_verify( ssl );
++                esp8266_hal_ssl_release_input( ssl );
+@@ -3574,5 +3445,3 @@
+-                esp8266_hal_ssl_release_out_buf_for_cert_verify( ssl );
+-        }
+-
 -        esp8266_hal_eap_rsa_reserve();
 -        esp8266_hal_alloc_context_set(0x4001u);
-@@ -3583 +3569,0 @@
++                esp8266_hal_ssl_release_output( ssl );
++        }
++
+@@ -3583 +3452,5 @@
 -        esp8266_hal_alloc_context_clear();
-@@ -3617 +3602,0 @@
++
++        /* CertificateVerify is the client's last private-key operation.
++         * Release its MPI caches before restoring record buffers. */
++        if( ret == 0 )
++            mbedtls_pk_free( mbedtls_ssl_own_key( ssl ) );
+@@ -3588 +3461 @@
+-                esp8266_hal_ssl_restore_in_buf_after_ske_verify(
++                esp8266_hal_ssl_restore_input(
+@@ -3594 +3467 @@
+-                esp8266_hal_ssl_restore_out_buf_after_cert_verify(
++                esp8266_hal_ssl_restore_output(
+@@ -3617 +3489,0 @@
 -        esp8266_hal_eap_rsa_release();
-@@ -3625 +3609,0 @@
+@@ -3625 +3496,0 @@
 -    esp8266_hal_eap_rsa_release();
 --- a/ssl_tls_patched.c
 +++ b/ssl_tls_patched.c
-@@ -16,8 +16,12 @@
-  *  See the License for the specific language governing permissions and
-  *  limitations under the License.
-  *
+@@ -18,0 +19,3 @@
 + *  Modified by esp8266-hal for its vendored Rust-first Wi-Fi runtime. See
 + *  ../README.md for the pinned source and reproduction details.
 + *
-  *  This file is part of mbed TLS (https://tls.mbed.org)
-  */
+@@ -20,0 +24 @@
 +#line 21
- /*
-  *  The SSL 3.0 specification was drafted by Netscape in 1996,
-  *  and became an IETF standard in 1999.
-@@ -5839,13 +5843,7 @@
-         return( ret );
-     }
- 
+@@ -5276,51 +5280,3 @@
+-#if !defined(MBEDTLS_KEY_EXCHANGE_RSA_ENABLED)         && \
+-    !defined(MBEDTLS_KEY_EXCHANGE_RSA_PSK_ENABLED)     && \
+-    !defined(MBEDTLS_KEY_EXCHANGE_DHE_RSA_ENABLED)     && \
+-    !defined(MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED)   && \
+-    !defined(MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED) && \
+-    !defined(MBEDTLS_KEY_EXCHANGE_ECDH_RSA_ENABLED)    && \
+-    !defined(MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA_ENABLED)
+-/* No certificate support -> dummy functions */
+-static void esp8266_hal_ssl_drop_sent_client_cert( mbedtls_ssl_context *ssl )
+-{
+-#if defined(MBEDTLS_SSL_CLI_C) && defined(MBEDTLS_X509_CRT_PARSE_C)
+-    mbedtls_ssl_key_cert *key_cert;
+-
+-    if( ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT )
+-        return;
+-
+-    if( ssl->handshake != NULL && ssl->handshake->key_cert != NULL )
+-        key_cert = ssl->handshake->key_cert;
+-    else
+-        key_cert = ssl->conf->key_cert;
+-
+-    if( key_cert == NULL || key_cert->cert == NULL )
+-        return;
+-
+-    mbedtls_x509_crt_free( key_cert->cert );
+-#else
+-    (void) ssl;
+-#endif
+-}
+-
+-int mbedtls_ssl_write_certificate( mbedtls_ssl_context *ssl )
+-{
+-    const mbedtls_ssl_ciphersuite_t *ciphersuite_info = ssl->transform_negotiate->ciphersuite_info;
+-
+-    MBEDTLS_SSL_DEBUG_MSG( 2, ( "=> write certificate" ) );
+-
+-    if( ciphersuite_info->key_exchange == MBEDTLS_KEY_EXCHANGE_PSK ||
+-        ciphersuite_info->key_exchange == MBEDTLS_KEY_EXCHANGE_DHE_PSK ||
+-        ciphersuite_info->key_exchange == MBEDTLS_KEY_EXCHANGE_ECDHE_PSK ||
+-        ciphersuite_info->key_exchange == MBEDTLS_KEY_EXCHANGE_ECJPAKE )
+-    {
+-        MBEDTLS_SSL_DEBUG_MSG( 2, ( "<= skip write certificate" ) );
+-        ssl->state++;
+-        return( 0 );
+-    }
+-
+-    MBEDTLS_SSL_DEBUG_MSG( 1, ( "should never happen" ) );
+-    return( MBEDTLS_ERR_SSL_INTERNAL_ERROR );
+-}
+-
+-static int esp8266_hal_ssl_release_in_buf_for_verify( mbedtls_ssl_context *ssl )
++/* Only before ChangeCipherSpec: no encrypted record counters or unread
++ * handshake bytes may be discarded. All EAP crypto paths share these owners. */
++int esp8266_hal_ssl_release_input( mbedtls_ssl_context *ssl )
+@@ -5351,2 +5307 @@
+-static int esp8266_hal_ssl_restore_in_buf_after_verify( mbedtls_ssl_context *ssl,
+-                                                        int released )
++int esp8266_hal_ssl_restore_input( mbedtls_ssl_context *ssl, int released )
+@@ -5364,2 +5319,19 @@
+-#endif
+-    ssl_reset_in_out_pointers( ssl );
++    if( ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM )
++    {
++        ssl->in_hdr = ssl->in_buf;
++        ssl->in_ctr = ssl->in_hdr + 3;
++        ssl->in_len = ssl->in_hdr + 11;
++        ssl->in_iv = ssl->in_hdr + 13;
++        ssl->in_msg = ssl->in_iv;
++    }
++    else
++#endif
++    {
++        ssl->in_hdr = ssl->in_buf + 8;
++        ssl->in_ctr = ssl->in_hdr - 8;
++        ssl->in_len = ssl->in_hdr + 3;
++        ssl->in_iv = ssl->in_hdr + 5;
++        ssl->in_msg = ssl->in_iv;
++    }
++    ssl->in_msglen = 0;
++    ssl->in_hslen = 0;
+@@ -5367,0 +5340,114 @@
++}
++
++int esp8266_hal_ssl_release_output( mbedtls_ssl_context *ssl )
++{
++    if( ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT )
++        return( 0 );
++
++    if( ssl->out_buf == NULL || ssl->out_left != 0 )
++        return( 0 );
++
++    mbedtls_platform_zeroize( ssl->out_buf, MBEDTLS_SSL_OUT_BUFFER_LEN );
++    mbedtls_free( ssl->out_buf );
++    ssl->out_buf = NULL;
++    ssl->out_hdr = NULL;
++    ssl->out_ctr = NULL;
++    ssl->out_len = NULL;
++    ssl->out_iv = NULL;
++    ssl->out_msg = NULL;
++    ssl->out_msglen = 0;
++    ssl->out_msgtype = 0;
++
++    return( 1 );
++}
++
++int esp8266_hal_ssl_restore_output( mbedtls_ssl_context *ssl, int released )
++{
++    if( ! released )
++        return( 0 );
++
++    ssl->out_buf = mbedtls_calloc( 1, MBEDTLS_SSL_OUT_BUFFER_LEN );
++    if( ssl->out_buf == NULL )
++        return( MBEDTLS_ERR_SSL_ALLOC_FAILED );
++
++    ssl->out_left = 0;
++#if defined(MBEDTLS_SSL_PROTO_DTLS)
++    if( ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM )
++    {
++        ssl->out_hdr = ssl->out_buf;
++        ssl->out_ctr = ssl->out_hdr + 3;
++        ssl->out_len = ssl->out_hdr + 11;
++        ssl->out_iv = ssl->out_hdr + 13;
++    }
++    else
++#endif
++    {
++        ssl->out_hdr = ssl->out_buf + 8;
++        ssl->out_ctr = ssl->out_hdr - 8;
++        ssl->out_len = ssl->out_hdr + 3;
++        ssl->out_iv = ssl->out_hdr + 5;
++    }
++
++    if( ssl->transform_out != NULL &&
++        ssl->minor_ver >= MBEDTLS_SSL_MINOR_VERSION_2 )
++    {
++        ssl->out_msg = ssl->out_iv + ssl->transform_out->ivlen -
++                       ssl->transform_out->fixed_ivlen;
++    }
++    else
++        ssl->out_msg = ssl->out_iv;
++
++    ssl->out_msglen = 0;
++    ssl->out_msgtype = 0;
++
++    return( 0 );
++}
++
++#if !defined(MBEDTLS_KEY_EXCHANGE_RSA_ENABLED)         && \
++    !defined(MBEDTLS_KEY_EXCHANGE_RSA_PSK_ENABLED)     && \
++    !defined(MBEDTLS_KEY_EXCHANGE_DHE_RSA_ENABLED)     && \
++    !defined(MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED)   && \
++    !defined(MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED) && \
++    !defined(MBEDTLS_KEY_EXCHANGE_ECDH_RSA_ENABLED)    && \
++    !defined(MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA_ENABLED)
++/* No certificate support -> dummy functions */
++static void esp8266_hal_ssl_drop_sent_client_cert( mbedtls_ssl_context *ssl )
++{
++#if defined(MBEDTLS_SSL_CLI_C) && defined(MBEDTLS_X509_CRT_PARSE_C)
++    mbedtls_ssl_key_cert *key_cert;
++
++    if( ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT )
++        return;
++
++    if( ssl->handshake != NULL && ssl->handshake->key_cert != NULL )
++        key_cert = ssl->handshake->key_cert;
++    else
++        key_cert = ssl->conf->key_cert;
++
++    if( key_cert == NULL || key_cert->cert == NULL )
++        return;
++
++    mbedtls_x509_crt_free( key_cert->cert );
++#else
++    (void) ssl;
++#endif
++}
++
++int mbedtls_ssl_write_certificate( mbedtls_ssl_context *ssl )
++{
++    const mbedtls_ssl_ciphersuite_t *ciphersuite_info = ssl->transform_negotiate->ciphersuite_info;
++
++    MBEDTLS_SSL_DEBUG_MSG( 2, ( "=> write certificate" ) );
++
++    if( ciphersuite_info->key_exchange == MBEDTLS_KEY_EXCHANGE_PSK ||
++        ciphersuite_info->key_exchange == MBEDTLS_KEY_EXCHANGE_DHE_PSK ||
++        ciphersuite_info->key_exchange == MBEDTLS_KEY_EXCHANGE_ECDHE_PSK ||
++        ciphersuite_info->key_exchange == MBEDTLS_KEY_EXCHANGE_ECJPAKE )
++    {
++        MBEDTLS_SSL_DEBUG_MSG( 2, ( "<= skip write certificate" ) );
++        ssl->state++;
++        return( 0 );
++    }
++
++    MBEDTLS_SSL_DEBUG_MSG( 1, ( "should never happen" ) );
++    return( MBEDTLS_ERR_SSL_INTERNAL_ERROR );
+@@ -5491 +5577,2 @@
+-        if( n > MBEDTLS_SSL_OUT_CONTENT_LEN - 3 - i )
++        if( i > MBEDTLS_SSL_OUT_CONTENT_LEN - 3 ||
++            n > MBEDTLS_SSL_OUT_CONTENT_LEN - 3 - i )
+@@ -5732,44 +5818,0 @@
+-
+-    return( 0 );
+-}
+-
+-static int esp8266_hal_ssl_release_in_buf_for_verify( mbedtls_ssl_context *ssl )
+-{
+-    if( ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT )
+-        return( 0 );
+-
+-    if( ssl->in_buf == NULL || ssl->in_offt != NULL || ssl->in_left != 0 )
+-        return( 0 );
+-
+-    if( ssl->in_hslen != 0 && ssl->in_hslen < ssl->in_msglen )
+-        return( 0 );
+-
+-    mbedtls_platform_zeroize( ssl->in_buf, MBEDTLS_SSL_IN_BUFFER_LEN );
+-    mbedtls_free( ssl->in_buf );
+-    ssl->in_buf = NULL;
+-    ssl->in_hdr = NULL;
+-    ssl->in_ctr = NULL;
+-    ssl->in_len = NULL;
+-    ssl->in_iv = NULL;
+-    ssl->in_msg = NULL;
+-    ssl->in_msglen = 0;
+-    ssl->in_hslen = 0;
+-
+-    return( 1 );
+-}
+-
+-static int esp8266_hal_ssl_restore_in_buf_after_verify( mbedtls_ssl_context *ssl,
+-                                                        int released )
+-{
+-    if( ! released )
+-        return( 0 );
+-
+-    ssl->in_buf = mbedtls_calloc( 1, MBEDTLS_SSL_IN_BUFFER_LEN );
+-    if( ssl->in_buf == NULL )
+-        return( MBEDTLS_ERR_SSL_ALLOC_FAILED );
+-
+-    ssl->in_left = 0;
+-#if defined(MBEDTLS_SSL_PROTO_DTLS)
+-    ssl->next_record_offset = 0;
+-#endif
+-    ssl_reset_in_out_pointers( ssl );
+@@ -5842,7 +5885 @@
 -    {
 -        extern void esp8266_hal_alloc_context_set(unsigned int context);
 -        extern void esp8266_hal_alloc_context_clear(void);
@@ -1045,31 +2213,28 @@
 -        esp8266_hal_alloc_context_clear();
 -    }
 +    ret = ssl_parse_certificate_chain( ssl );
-     if( ret != 0 )
-     {
- #if defined(MBEDTLS_SSL_SRV_C)
-@@ -5891,13 +5889,10 @@
-          * Main check: verify certificate
-          */
-         {
+@@ -5894,2 +5930,0 @@
 -            extern void esp8266_hal_alloc_context_set(unsigned int context);
 -            extern void esp8266_hal_alloc_context_clear(void);
-             int esp8266_hal_in_buf_released;
-             int esp8266_hal_restore_ret;
- 
-             esp8266_hal_in_buf_released = esp8266_hal_ssl_release_in_buf_for_verify( ssl );
+@@ -5896,0 +5932 @@
++            int esp8266_hal_out_buf_released;
+@@ -5899,2 +5935,2 @@
+-            esp8266_hal_in_buf_released = esp8266_hal_ssl_release_in_buf_for_verify( ssl );
 -            esp8266_hal_alloc_context_set(0x3001u);
-             ret = mbedtls_x509_crt_verify_restartable(
-                                     ssl->session_negotiate->peer_cert,
-                                     ca_chain, ca_crl,
-@@ -5905,7 +5900,6 @@
-                                     ssl->hostname,
-                                    &ssl->session_negotiate->verify_result,
-                                     ssl->conf->f_vrfy, ssl->conf->p_vrfy, rs_ctx );
++            esp8266_hal_in_buf_released = esp8266_hal_ssl_release_input( ssl );
++            esp8266_hal_out_buf_released = esp8266_hal_ssl_release_output( ssl );
+@@ -5908,3 +5944,8 @@
 -            esp8266_hal_alloc_context_clear();
- 
-             esp8266_hal_restore_ret = esp8266_hal_ssl_restore_in_buf_after_verify(
-                                                     ssl, esp8266_hal_in_buf_released );
+-
+-            esp8266_hal_restore_ret = esp8266_hal_ssl_restore_in_buf_after_verify(
++
++            esp8266_hal_restore_ret = esp8266_hal_ssl_restore_output(
++                                                    ssl, esp8266_hal_out_buf_released );
++            /* No output buffer means even an alert cannot be constructed. */
++            if( esp8266_hal_restore_ret != 0 )
++                return( esp8266_hal_restore_ret );
++
++            esp8266_hal_restore_ret = esp8266_hal_ssl_restore_input(
 --- a/tls_mbedtls_patched.c
 +++ b/tls_mbedtls_patched.c
 @@ -14,0 +15,3 @@
@@ -1078,29 +2243,395 @@
 + * ../README.md for the pinned source and reproduction details.
 @@ -16,0 +20 @@
 +#line 17
-@@ -133,2 +136,0 @@
+@@ -24,0 +29 @@
++#include "mbedtls/asn1.h"
+@@ -38 +42,0 @@
+-#define MAX_CIPHERSUITE 32
+@@ -61,3 +64,0 @@
+-	const u8 *in_ext_extra_data;
+-	size_t in_ext_extra_len;
+-	size_t in_ext_extra_pos;
+@@ -78 +79,7 @@
+-	int ciphersuite[MAX_CIPHERSUITE];
++	/* EAP configuration borrows static application material for this lifetime.
++	 * Parse it only after server verification has released its CA chain. */
++	const unsigned char *client_cert_blob;
++	size_t client_cert_blob_len;
++	const unsigned char *private_key_blob;
++	size_t private_key_blob_len;
++	const char *private_key_passwd;
+@@ -84,0 +92 @@
++	int failed;
+@@ -86,10 +93,0 @@
+-
+-void esp8266_hal_tls_set_extra_input(struct tls_connection *conn,
+-					     const u8 *data, size_t len)
+-{
+-	if (conn == NULL)
+-		return;
+-	conn->tls_io_data.in_ext_extra_data = data;
+-	conn->tls_io_data.in_ext_extra_len = len;
+-	conn->tls_io_data.in_ext_extra_pos = 0;
+-}
+@@ -121,25 +118,0 @@
+-static void tls_mbedtls_conn_delete(tls_context_t *tls)
+-{
+-	if (tls != NULL) {
+-		tls_mbedtls_cleanup(tls);
+-	}
+-}
+-
+-#define ESP8266_HAL_TLS_CLIENT_FLIGHT_OUT_PREALLOC_BYTES 704
+-
+-static int esp8266_hal_tls_prealloc_client_flight_out(struct tls_connection *conn)
+-{
+-	struct tls_data *data = &conn->tls_io_data;
 -	extern void esp8266_hal_alloc_context_set(unsigned int context);
 -	extern void esp8266_hal_alloc_context_clear(void);
-@@ -139 +140,0 @@
+-
+-	if (data->out_data != NULL)
+-		return 0;
+-
 -	esp8266_hal_alloc_context_set(0x2006u);
-@@ -141 +141,0 @@
+-	data->out_data = wpabuf_alloc(ESP8266_HAL_TLS_CLIENT_FLIGHT_OUT_PREALLOC_BYTES);
 -	esp8266_hal_alloc_context_clear();
-@@ -150,2 +149,0 @@
+-
+-	return data->out_data == NULL ? MBEDTLS_ERR_SSL_ALLOC_FAILED : 0;
+-}
+-
+@@ -150,2 +122,0 @@
 -	extern void esp8266_hal_alloc_context_set(unsigned int context);
 -	extern void esp8266_hal_alloc_context_clear(void);
-@@ -155 +152,0 @@
+@@ -154,5 +125,3 @@
+-		int resize_ret;
 -		esp8266_hal_alloc_context_set(0x2004u);
-@@ -157 +153,0 @@
+-		resize_ret = wpabuf_resize(&data->out_data, len);
 -		esp8266_hal_alloc_context_clear();
-@@ -162 +157,0 @@
+-		if (resize_ret < 0) {
++		size_t used = wpabuf_len(data->out_data);
++		size_t needed = used + len;
++		if (needed < used || needed > SIZE_MAX - 255)
+@@ -160 +129,6 @@
+-		}
++		/* Small record appends must not copy the whole certificate flight
++		 * repeatedly. Bound spare capacity to 255 bytes on this small heap. */
++		if (len > wpabuf_tailroom(data->out_data) &&
++		    wpabuf_resize(&data->out_data,
++				  ((needed + 255) & ~(size_t)255) - used) < 0)
++			return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+@@ -162 +135,0 @@
 -		esp8266_hal_alloc_context_set(0x2004u);
-@@ -164 +158,0 @@
+@@ -164 +136,0 @@
 -		esp8266_hal_alloc_context_clear();
-@@ -663,0 +658,3 @@
+@@ -201,20 +173,14 @@
+-			}
+-			continue;
+-		}
+-
+-		if (data->in_ext_extra_data) {
+-			available = data->in_ext_extra_len -
+-				    data->in_ext_extra_pos;
+-			chunk = len - copied;
+-			if (chunk > available)
+-				chunk = available;
+-			os_memcpy(buf + copied,
+-				  data->in_ext_extra_data +
+-				  data->in_ext_extra_pos,
+-				  chunk);
+-			copied += chunk;
+-			data->in_ext_extra_pos += chunk;
+-			if (data->in_ext_extra_pos >= data->in_ext_extra_len) {
+-				data->in_ext_extra_data = NULL;
+-				data->in_ext_extra_len = 0;
+-				data->in_ext_extra_pos = 0;
++			} else if (data->in_ext_owner &&
++				   data->in_ext_pos > data->in_ext_len - data->in_ext_pos) {
++				/* Release consumed flight bytes before certificate parsing.
++				 * Keeping the smaller tail avoids retaining two full copies. */
++				size_t remaining = data->in_ext_len - data->in_ext_pos;
++				struct wpabuf *tail = wpabuf_alloc_copy(
++					data->in_ext_data + data->in_ext_pos, remaining);
++				if (tail) {
++					wpabuf_free(data->in_ext_owner);
++					data->in_ext_owner = tail;
++					data->in_ext_data = wpabuf_head_u8(tail);
++					data->in_ext_len = remaining;
++					data->in_ext_pos = 0;
++				}
+@@ -277,4 +243,34 @@
+-	if (esp8266_hal_x509_blob_is_pem(blob, len))
+-		return mbedtls_x509_crt_parse(crt, blob, len);
+-
+-	return mbedtls_x509_crt_parse_der(crt, blob, len);
++	unsigned char *cursor;
++	const unsigned char *end;
++	int ret;
++
++	if (crt == NULL || blob == NULL || len == 0)
++		return MBEDTLS_ERR_X509_BAD_INPUT_DATA;
++
++	if (esp8266_hal_x509_blob_is_pem(blob, len)) {
++		ret = mbedtls_x509_crt_parse(crt, blob, len);
++		/* Positive means only part of the PEM bundle parsed successfully. */
++		return ret > 0 ? MBEDTLS_ERR_X509_INVALID_FORMAT : ret;
++	}
++
++	/* The SDK parser appends one owned certificate, ignoring trailing DER.
++	 * Bound each call to one complete SEQUENCE and account for every byte. */
++	cursor = (unsigned char *)blob;
++	end = blob + len;
++	while (cursor < end) {
++		const unsigned char *start = cursor;
++		size_t cert_len;
++
++		ret = mbedtls_asn1_get_tag(&cursor, end, &cert_len,
++					 MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE);
++		if (ret != 0)
++			return MBEDTLS_ERR_X509_INVALID_FORMAT + ret;
++
++		ret = mbedtls_x509_crt_parse_der(crt, start,
++					       (size_t)(cursor - start) + cert_len);
++		if (ret != 0)
++			return ret;
++		cursor += cert_len;
++	}
++
++	return 0;
+@@ -297 +293 @@
+-static int set_pki_context(tls_context_t *tls, const struct tls_connection_params *cfg)
++static int set_pki_context(tls_context_t *tls)
+@@ -301 +297 @@
+-	if (cfg->client_cert_blob == NULL || cfg->private_key_blob  == NULL) {
++	if (tls->client_cert_blob == NULL || tls->private_key_blob  == NULL) {
+@@ -310,2 +306,2 @@
+-						 cfg->client_cert_blob,
+-						 cfg->client_cert_blob_len);
++						 tls->client_cert_blob,
++						 tls->client_cert_blob_len);
+@@ -317,3 +313,3 @@
+-	ret = mbedtls_pk_parse_key(&tls->clientkey, cfg->private_key_blob, cfg->private_key_blob_len,
+-				   (const unsigned char *)cfg->private_key_passwd,
+-				   cfg->private_key_passwd ? os_strlen(cfg->private_key_passwd) : 0);
++	ret = mbedtls_pk_parse_key(&tls->clientkey, tls->private_key_blob, tls->private_key_blob_len,
++				   (const unsigned char *)tls->private_key_passwd,
++				   tls->private_key_passwd ? os_strlen(tls->private_key_passwd) : 0);
+@@ -389,156 +384,0 @@
+-}
+-
+-static const int eap_ciphersuite_preference[] =
+-{
+-#if defined(MBEDTLS_KEY_EXCHANGE_DHE_RSA_ENABLED)
+-#if defined(MBEDTLS_SHA512_C) && defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_DHE_RSA_WITH_AES_256_CCM,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+-	MBEDTLS_TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
+-#endif
+-#if defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_DHE_RSA_WITH_CAMELLIA_256_GCM_SHA384,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256,
+-	MBEDTLS_TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA,
+-#endif
+-
+-#if defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_CCM,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
+-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_DHE_RSA_WITH_AES_128_CCM_8,
+-#endif
+-#endif
+-#if defined(MBEDTLS_KEY_EXCHANGE_DHE_PSK_ENABLED)
+-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_GCM_SHA384,
+-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_CCM,
+-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_CBC_SHA384,
+-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_CBC_SHA,
+-	MBEDTLS_TLS_DHE_PSK_WITH_AES_256_CCM_8,
+-
+-	MBEDTLS_TLS_DHE_PSK_WITH_AES_128_GCM_SHA256,
+-	MBEDTLS_TLS_DHE_PSK_WITH_AES_128_CCM,
+-	MBEDTLS_TLS_DHE_PSK_WITH_AES_128_CBC_SHA256,
+-	MBEDTLS_TLS_DHE_PSK_WITH_AES_128_CCM_8,
+-#endif
+-#if defined(MBEDTLS_SHA512_C) && defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_RSA_WITH_AES_256_GCM_SHA384,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_RSA_WITH_AES_256_CCM,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_RSA_WITH_AES_256_CBC_SHA256,
+-	MBEDTLS_TLS_RSA_WITH_AES_256_CBC_SHA,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_RSA_WITH_AES_256_CCM_8,
+-#endif
+-
+-#if defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_RSA_WITH_AES_128_GCM_SHA256,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_RSA_WITH_AES_128_CCM,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_RSA_WITH_AES_128_CBC_SHA256,
+-	MBEDTLS_TLS_RSA_WITH_AES_128_CBC_SHA,
+-#endif
+-#if defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_ECDH_RSA_WITH_AES_128_GCM_SHA256,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_ECDH_RSA_WITH_AES_128_CBC_SHA256,
+-	MBEDTLS_TLS_ECDH_RSA_WITH_AES_128_CBC_SHA,
+-#endif
+-#if defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_ECDH_ECDSA_WITH_AES_128_GCM_SHA256,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA256,
+-	MBEDTLS_TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_RSA_WITH_AES_128_CCM_8,
+-#endif
+-
+-#if defined(MBEDTLS_KEY_EXCHANGE_PSK_ENABLED)
+-#if defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_RSA_PSK_WITH_AES_128_GCM_SHA256,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_RSA_PSK_WITH_AES_128_CBC_SHA256,
+-	MBEDTLS_TLS_RSA_PSK_WITH_AES_128_CBC_SHA,
+-#endif
+-	/* The PSK suites */
+-#if defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_PSK_WITH_AES_256_GCM_SHA384,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_PSK_WITH_AES_256_CCM,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_PSK_WITH_AES_256_CBC_SHA384,
+-	MBEDTLS_TLS_PSK_WITH_AES_256_CBC_SHA,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_PSK_WITH_AES_256_CCM_8,
+-#endif
+-
+-#if defined(MBEDTLS_GCM_C)
+-	MBEDTLS_TLS_PSK_WITH_AES_128_GCM_SHA256,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_PSK_WITH_AES_128_CCM,
+-#endif
+-#if defined(MBEDTLS_CIPHER_MODE_CBC)
+-	MBEDTLS_TLS_PSK_WITH_AES_128_CBC_SHA256,
+-	MBEDTLS_TLS_PSK_WITH_AES_128_CBC_SHA,
+-#endif
+-#if defined(MBEDTLS_CCM_C)
+-	MBEDTLS_TLS_PSK_WITH_AES_128_CCM_8,
+-#endif
+-#endif
+-
+-#if defined(MBEDTLS_DES_C)
+-	/* 3DES suites */
+-	MBEDTLS_TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA,
+-	MBEDTLS_TLS_DHE_PSK_WITH_3DES_EDE_CBC_SHA,
+-	MBEDTLS_TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+-	MBEDTLS_TLS_RSA_PSK_WITH_3DES_EDE_CBC_SHA,
+-	MBEDTLS_TLS_PSK_WITH_3DES_EDE_CBC_SHA,
+-#endif
+-#if defined(MBEDTLS_ARC4_C)
+-	/* RC4 suites */
+-	MBEDTLS_TLS_DHE_PSK_WITH_RC4_128_SHA,
+-	MBEDTLS_TLS_RSA_WITH_RC4_128_SHA,
+-	MBEDTLS_TLS_RSA_WITH_RC4_128_MD5,
+-	MBEDTLS_TLS_RSA_PSK_WITH_RC4_128_SHA,
+-	MBEDTLS_TLS_PSK_WITH_RC4_128_SHA,
+-#endif
+-};
+-
+-static void tls_set_ciphersuite(tls_context_t *tls)
+-{
+-	/* Only set ciphersuite if cert's key length is high or ciphersuites are set by user */
+-	if (tls->ciphersuite[0]) {
+-		mbedtls_ssl_conf_ciphersuites(&tls->conf, tls->ciphersuite);
+-	} else if (mbedtls_pk_get_bitlen(&tls->clientkey) > 2048 ||
+-		(tls->cacert_ptr && mbedtls_pk_get_bitlen(&tls->cacert_ptr->pk) > 2048)) {
+-		mbedtls_ssl_conf_ciphersuites(&tls->conf, eap_ciphersuite_preference);
+-	}
+@@ -578,0 +419,2 @@
++	/* The SDK blobs and password borrow the HAL's static credential bytes;
++	 * the caller's temporary tls_connection_params itself is not retained. */
+@@ -580,11 +422,6 @@
+-		ret = set_pki_context(tls, cfg);
+-		if (ret != 0) {
+-			wpa_printf(MSG_ERROR, "Failed to set client pki context");
+-			return ret;
+-		}
+-	}
+-
+-	/* Usages of default ciphersuites can take a lot of time on low end device
+-	 * and can cause watchdog. Enabling the ciphers which are secured enough
+-	 * but doesn't take that much processing power */
+-	tls_set_ciphersuite(tls);
++		tls->client_cert_blob = cfg->client_cert_blob;
++		tls->client_cert_blob_len = cfg->client_cert_blob_len;
++		tls->private_key_blob = cfg->private_key_blob;
++		tls->private_key_blob_len = cfg->private_key_blob_len;
++		tls->private_key_passwd = cfg->private_key_passwd;
++	}
+@@ -664,2 +501,7 @@
+-	/* Free ssl ctx and data */
+-	tls_mbedtls_conn_delete((tls_context_t *) conn->tls);
 +	if (conn == NULL)
 +		return;
 +
-@@ -726,10 +723,2 @@
++	/* A failed read may leave an owned input tail. Output belongs to EAP. */
++	wpabuf_free(conn->tls_io_data.in_data);
++	wpabuf_free(conn->tls_io_data.in_ext_owner);
++	tls_mbedtls_cleanup(conn->tls);
+@@ -667,2 +508,0 @@
+-	conn->tls = NULL;
+-	/* Data in in ssl ctx, free connection */
+@@ -701,62 +541,3 @@
+-static int esp8266_hal_tls_release_in_buf_for_client_flight(mbedtls_ssl_context *ssl)
+-{
+-	if (ssl->conf == NULL || ssl->conf->endpoint != MBEDTLS_SSL_IS_CLIENT)
+-		return 0;
+-
+-	if (ssl->in_buf == NULL || ssl->in_offt != NULL || ssl->in_left != 0)
+-		return 0;
+-
+-	if (ssl->in_hslen != 0 && ssl->in_hslen < ssl->in_msglen)
+-		return 0;
+-
+-	os_memset(ssl->in_buf, 0, MBEDTLS_SSL_IN_BUFFER_LEN);
+-	mbedtls_free(ssl->in_buf);
+-	ssl->in_buf = NULL;
+-	ssl->in_hdr = NULL;
+-	ssl->in_ctr = NULL;
+-	ssl->in_len = NULL;
+-	ssl->in_iv = NULL;
+-	ssl->in_msg = NULL;
+-	ssl->in_msglen = 0;
+-	ssl->in_hslen = 0;
+-
+-	return 1;
+-}
+-
 -static int esp8266_hal_tls_restore_in_buf_after_client_flight(mbedtls_ssl_context *ssl,
 -							      int released)
 -{
@@ -1111,18 +2642,79 @@
 -		extern void esp8266_hal_eap_rsa_release(void);
 -		esp8266_hal_eap_rsa_release();
 -	}
-+static int esp8266_hal_tls_restore_in_buf_after_client_flight(mbedtls_ssl_context *ssl)
-+{
-@@ -773 +762 @@
+-	ssl->in_buf = mbedtls_calloc(1, MBEDTLS_SSL_IN_BUFFER_LEN);
+-	if (ssl->in_buf == NULL)
+-		return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+-
+-	ssl->in_left = 0;
+-#if defined(MBEDTLS_SSL_PROTO_DTLS)
+-	ssl->next_record_offset = 0;
+-	if (ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM) {
+-		ssl->in_hdr = ssl->in_buf;
+-		ssl->in_ctr = ssl->in_hdr + 3;
+-		ssl->in_len = ssl->in_hdr + 11;
+-		ssl->in_iv = ssl->in_hdr + 13;
+-		ssl->in_msg = ssl->in_iv;
+-	} else
+-#endif
+-	{
+-		ssl->in_hdr = ssl->in_buf + 8;
+-		ssl->in_ctr = ssl->in_hdr - 8;
+-		ssl->in_len = ssl->in_hdr + 3;
+-		ssl->in_iv = ssl->in_hdr + 5;
+-		ssl->in_msg = ssl->in_iv;
+-	}
+-	ssl->in_msglen = 0;
+-	ssl->in_hslen = 0;
+-
+-	return 0;
+-}
++/* Shared pre-encryption buffer ownership, implemented in ssl_tls. */
++int esp8266_hal_ssl_release_input(mbedtls_ssl_context *ssl);
++int esp8266_hal_ssl_restore_input(mbedtls_ssl_context *ssl, int released);
+@@ -773 +554 @@
 -	ret = esp8266_hal_tls_restore_in_buf_after_client_flight(&conn->tls->ssl, 1);
-+	ret = esp8266_hal_tls_restore_in_buf_after_client_flight(&conn->tls->ssl);
-@@ -787 +775,0 @@
++	ret = esp8266_hal_ssl_restore_input(&conn->tls->ssl, 1);
+@@ -776,0 +558,32 @@
++	return ret;
++}
++
++/* All step entry points share preparation: a server flight may contain
++ * several records, so CLIENT_CERTIFICATE is not reached only by the final loop. */
++static int tls_handshake_step(struct tls_connection *conn)
++{
++	tls_context_t *tls = conn->tls;
++	int ret;
++
++	if (conn->failed)
++		return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
++
++	if (tls->ssl.state == MBEDTLS_SSL_CLIENT_CERTIFICATE) {
++		os_memcpy(conn->randbytes, tls->ssl.handshake->randbytes,
++			  sizeof(conn->randbytes));
++		if (esp8266_hal_ssl_release_input(&tls->ssl))
++			conn->tls_io_data.in_buf_restore_pending = 1;
++		if (tls->client_cert_blob != NULL) {
++			ret = set_pki_context(tls);
++			if (ret != 0) {
++				mbedtls_ssl_send_alert_message(&tls->ssl,
++					MBEDTLS_SSL_ALERT_LEVEL_FATAL,
++					MBEDTLS_SSL_ALERT_MSG_INTERNAL_ERROR);
++				return ret;
++			}
++		}
++	}
++
++	ret = mbedtls_ssl_handshake_step(&tls->ssl);
++	if (ret >= 0)
++		esp8266_hal_tls_drop_verified_ca(tls);
+@@ -787 +599,0 @@
 -	int esp8266_hal_eap_server_input_reserved = 0;
-@@ -797,3 +784,0 @@
+@@ -797,3 +608,0 @@
 -		extern void esp8266_hal_eap_rsa_reserve(void);
 -		esp8266_hal_eap_rsa_reserve();
 -		esp8266_hal_eap_server_input_reserved = 1;
-@@ -804,9 +789,3 @@
+@@ -804,9 +613 @@
 -	{
 -		extern void esp8266_hal_alloc_context_set(unsigned int context);
 -		extern void esp8266_hal_alloc_context_clear(void);
@@ -1132,36 +2724,119 @@
 -		if (ret >= 0)
 -			esp8266_hal_tls_drop_verified_ca(tls);
 -	}
-+	ret = mbedtls_ssl_handshake_step(&tls->ssl);
-+	if (ret >= 0)
-+		esp8266_hal_tls_drop_verified_ca(tls);
-@@ -821,3 +799,0 @@
++	ret = tls_handshake_step(conn);
+@@ -819,7 +620,2 @@
+-	while (conn->tls_io_data.in_data || conn->tls_io_data.in_ext_data ||
+-	       conn->tls_io_data.in_ext_extra_data) {
 -		extern void esp8266_hal_alloc_context_set(unsigned int context);
 -		extern void esp8266_hal_alloc_context_clear(void);
 -		esp8266_hal_alloc_context_set(0x2002u);
-@@ -825 +800,0 @@
+-		ret = mbedtls_ssl_handshake_step(&tls->ssl);
 -		esp8266_hal_alloc_context_clear();
-@@ -858,4 +832,0 @@
++	while (conn->tls_io_data.in_data || conn->tls_io_data.in_ext_data) {
++		ret = tls_handshake_step(conn);
+@@ -828 +623,0 @@
+-		esp8266_hal_tls_drop_verified_ca(tls);
+@@ -833 +628 @@
+-		ret = mbedtls_ssl_handshake_step(&tls->ssl);
++		ret = tls_handshake_step(conn);
+@@ -843,3 +638 @@
+-		ret = mbedtls_ssl_handshake_step(&tls->ssl);
+-		if (ret >= 0)
+-			esp8266_hal_tls_drop_verified_ca(tls);
++		ret = tls_handshake_step(conn);
+@@ -851,4 +644,4 @@
+-		/* Read random data before session completes, not present after handshake */
+-		if (tls->ssl.handshake) {
+-			os_memcpy(conn->randbytes, tls->ssl.handshake->randbytes,
+-				  TLS_RANDOM_LEN * 2);
++		while (tls->ssl.state <= MBEDTLS_SSL_CLIENT_FINISHED) {
++			ret = tls_handshake_step(conn);
++			if (ret < 0)
++				break;
+@@ -856,21 +649,6 @@
+-
+-		/* trigger state machine multiple times to reach till finish */
 -		extern void esp8266_hal_eap_rsa_reserve(void);
 -		extern void esp8266_hal_eap_rsa_release(void);
 -		extern void esp8266_hal_alloc_context_set(unsigned int context);
 -		extern void esp8266_hal_alloc_context_clear(void);
-@@ -872 +842,0 @@
+-		int esp8266_hal_client_flight_in_buf_released;
+-		esp8266_hal_client_flight_in_buf_released =
+-			esp8266_hal_tls_release_in_buf_for_client_flight(&tls->ssl);
+-		if (esp8266_hal_client_flight_in_buf_released)
+-			conn->tls_io_data.in_buf_restore_pending = 1;
+-		if (tls->clientcert.raw.p != NULL) {
+-			ret = esp8266_hal_tls_prealloc_client_flight_out(conn);
+-			if (ret != 0)
+-				goto esp8266_hal_client_flight_done;
+-		}
 -		esp8266_hal_eap_rsa_reserve();
-@@ -874 +843,0 @@
+-		while (tls->ssl.state <= MBEDTLS_SSL_CLIENT_FINISHED) {
 -			esp8266_hal_alloc_context_set(0x2003u);
-@@ -876 +844,0 @@
+-			ret = mbedtls_ssl_handshake_step(&tls->ssl);
 -			esp8266_hal_alloc_context_clear();
-@@ -881 +848,0 @@
++	}
++
++	/* Trigger state machine till handshake is complete or error occures */
++	if (tls->ssl.state == MBEDTLS_SSL_FLUSH_BUFFERS) {
++		while (tls->ssl.state < MBEDTLS_SSL_HANDSHAKE_OVER) {
++			ret = tls_handshake_step(conn);
+@@ -881,17 +658,0 @@
 -		esp8266_hal_eap_rsa_release();
-@@ -889,3 +855,0 @@
+-	esp8266_hal_client_flight_done:
+-		(void)esp8266_hal_client_flight_in_buf_released;
+-	}
+-
+-	/* Trigger state machine till handshake is complete or error occures */
+-	if (tls->ssl.state == MBEDTLS_SSL_FLUSH_BUFFERS) {
+-		while (tls->ssl.state < MBEDTLS_SSL_HANDSHAKE_OVER) {
 -			extern void esp8266_hal_alloc_context_set(unsigned int context);
 -			extern void esp8266_hal_alloc_context_clear(void);
 -			esp8266_hal_alloc_context_set(0x2005u);
-@@ -893 +856,0 @@
+-			ret = mbedtls_ssl_handshake_step(&tls->ssl);
 -			esp8266_hal_alloc_context_clear();
-@@ -907,4 +869,0 @@
+-			if (ret < 0) {
+-				break;
+-			}
+-		}
+@@ -901,3 +662 @@
+-		wpa_printf(MSG_INFO, "application data is null, adding one byte for ack");
+-		u8 *dummy = os_zalloc(1);
+-		conn->tls_io_data.out_data = wpabuf_alloc_ext_data(dummy, 0);
++		conn->tls_io_data.out_data = wpabuf_alloc(0);
+@@ -907,4 +666,4 @@
 -	if (esp8266_hal_eap_server_input_reserved) {
 -		extern void esp8266_hal_eap_rsa_release(void);
 -		esp8266_hal_eap_rsa_release();
 -	}
++	if (ret < 0 && ret != MBEDTLS_ERR_SSL_WANT_READ &&
++	    ret != MBEDTLS_ERR_SSL_WANT_WRITE &&
++	    ret != MBEDTLS_ERR_SSL_CRYPTO_IN_PROGRESS)
++		conn->failed = 1;
+@@ -916,3 +674,0 @@
+-	conn->tls_io_data.in_ext_extra_data = NULL;
+-	conn->tls_io_data.in_ext_extra_len = 0;
+-	conn->tls_io_data.in_ext_extra_pos = 0;
+@@ -963,3 +718,0 @@
+-	conn->tls_io_data.in_ext_extra_data = NULL;
+-	conn->tls_io_data.in_ext_extra_len = 0;
+-	conn->tls_io_data.in_ext_extra_pos = 0;
+@@ -991,2 +743,0 @@
+-/* cipher array should contain cipher number in mbedtls num as per IANA
+- * Please see cipherlist is u8, therefore only initial ones are supported */
+@@ -996,7 +747,2 @@
+-	int i = 0;
+-
+-	while (*ciphers != 0 && i < MAX_CIPHERSUITE) {
+-		conn->tls->ciphersuite[i] = ciphers[i];
+-		i++;
+-	}
+-	return 0;
++	/* This backend uses the configured mbedTLS defaults. */
++	return -1;
+@@ -1052 +798 @@
+-	return 0;
++	return conn->failed;
+@@ -1175,0 +922 @@
++	conn->failed = 0;
