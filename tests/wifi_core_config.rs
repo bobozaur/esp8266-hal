@@ -111,18 +111,16 @@ fn enterprise_credentials_validate_username_and_password_limits() {
 
 #[test]
 #[cfg(feature = "wifi-enterprise")]
-fn enterprise_credentials_preserve_username_password_and_defaults() {
+fn enterprise_credentials_preserve_identity_username_and_password() {
     let credentials = Wpa2EnterpriseCredentials::new(
         EnterpriseIdentity::new("anonymous").unwrap(),
         EnterpriseUsername::new("esp8266-user").unwrap(),
         EnterprisePassword::new("esp8266-password").unwrap(),
-    )
-    .with_disable_time_check(false);
+    );
 
     assert_eq!(credentials.identity().as_bytes(), b"anonymous");
     assert_eq!(credentials.username().as_bytes(), b"esp8266-user");
     assert_eq!(credentials.password().as_bytes(), b"esp8266-password");
-    assert!(!credentials.disable_time_check());
 
     let config = ClientConfig::new(
         Ssid::try_from("enterprise-net").unwrap(),

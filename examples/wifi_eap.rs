@@ -4,6 +4,7 @@
 //! include_bytes!("client.der"), include_bytes!("key.der"))). The client key
 //! may be RSA or P256. Set CA_CERTIFICATE_DER to Some(include_bytes!("ca.der"))
 //! to validate the server's certificate chain. Paths are relative to this file.
+//! The bundled TLS backend does not verify certificate validity dates.
 //!
 //! The PEM constructor is also available: Wpa2EnterpriseClientCertificate::new
 //! takes PEM certificate/key buffers with a trailing NUL, and
@@ -49,9 +50,7 @@ fn main() -> ! {
         EnterpriseIdentity::new(IDENTITY).expect("identity"),
         EnterpriseUsername::new(USERNAME).expect("username"),
         EnterprisePassword::new(PASSWORD).expect("password"),
-    )
-    // This example has no wall clock; certificate-chain validation is separate.
-    .with_disable_time_check(true);
+    );
     if let Some(ca) = CA_CERTIFICATE_DER {
         credentials = credentials.with_ca_cert_der(ca);
     }

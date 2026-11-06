@@ -1,495 +1,338 @@
-//! FreeRTOS-compatible software timer implementation.
+//! One-shot timers used by the native PMKSA cache.
 //!
-//! Timers are stored in a bounded array. A command queue wakes the timer
-//! daemon, which dispatches expired callbacks in task context. Runtime startup
-//! creates the daemon and queue before any native timer API can run; both remain
-//! alive across Wi-Fi stop and recreation.
+//! Timer state belongs to this runtime; a coalescing wake queue only notifies
+//! its daemon that a deadline changed. Stop/delete take effect before returning,
+//! and an expired timer is disarmed before its callback can rearm or delete it.
 //!
-//! The SDK's separate ETS timer list is driven by FRC2 interrupt 10, which posts
-//! event 16 to the Wi-Fi task. That task runs `ets_timer_proc`; this daemon does
-//! not poll or dispatch the ETS list.
+//! The retained native caller is `pmksa_cache.c`. Its callback may free cache
+//! entries, post a nonblocking deauthentication event, and rearm this timer. It
+//! must not block. Dispatch suspends task switching until the callback returns:
+//! native Wi-Fi stop frees PMKSA entries before deleting their timer, sometimes
+//! with interrupts already masked, so waiting during delete cannot protect that
+//! lifetime. Hardware interrupts and NMI remain enabled during dispatch.
+//!
+//! The SDK's separate ETS timers still run through FRC2 and the Wi-Fi task.
+//! The station's global `gWpaSm` owns the only PMKSA cache; AP clients use ETS
+//! timers, so simultaneous station/AP operation does not require another slot.
 
 use core::ffi::c_void;
 
-use super::critical;
-use super::queue;
-use super::task;
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const MAX_TIMERS: usize = 12;
-const TIMER_QUEUE_LENGTH: u32 = 10;
-const PD_PASS: i32 = 1;
-const PD_FALSE: i32 = 0;
-// The compatibility daemon has its own stack budget; create_task adds the
-// larger HAL exception-frame allowance. Callback depth also consumes this stack.
-const TIMER_DAEMON_STACK_BYTES: u16 = 768;
-// Match SDK `configTIMER_TASK_PRIORITY = tskIDLE_PRIORITY + 2`.
-const TIMER_DAEMON_PRIORITY: u32 = 2;
-
-/// Timer command IDs (matching FreeRTOS tmrCOMMAND_*).
-const TMR_COMMAND_START_DONT_TRACE: i32 = 0;
-const TMR_COMMAND_START: i32 = 1;
-const TMR_COMMAND_RESET: i32 = 2;
-const TMR_COMMAND_STOP: i32 = 3;
-const TMR_COMMAND_CHANGE_PERIOD: i32 = 4;
-const TMR_COMMAND_DELETE: i32 = 5;
-const TMR_COMMAND_START_FROM_ISR: i32 = 6;
-const TMR_COMMAND_RESET_FROM_ISR: i32 = 7;
-const TMR_COMMAND_STOP_FROM_ISR: i32 = 8;
-const TMR_COMMAND_CHANGE_PERIOD_FROM_ISR: i32 = 9;
-
-// ---------------------------------------------------------------------------
-// Timer data structure
-// ---------------------------------------------------------------------------
-
+const TICK_MICROS: u64 = 10_000;
 type TimerCallback = unsafe extern "C" fn(*mut c_void);
 
-struct SoftwareTimer {
-    period_ticks: u32,
-    auto_reload: bool,
-    callback: TimerCallback,
-    /// Callback argument (`pvTimerGetTimerID` returns this).
+struct OneShotTimer {
+    callback: Option<TimerCallback>,
     arg: *mut c_void,
-    /// Absolute tick when the timer expires.
-    expiry_tick: u64,
-    active: bool,
-    in_use: bool,
+    expiry: Option<u64>,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DaemonTaskMessage {
-    command_id: i32,
-    command_value: u32,
-    timer: *mut c_void,
+impl OneShotTimer {
+    const fn new() -> Self {
+        Self {
+            callback: None,
+            arg: core::ptr::null_mut(),
+            expiry: None,
+        }
+    }
+
+    fn create(&mut self, callback: TimerCallback, arg: *mut c_void) -> bool {
+        if self.callback.is_some() {
+            return false;
+        }
+        *self = Self {
+            callback: Some(callback),
+            arg,
+            expiry: None,
+        };
+        true
+    }
+
+    fn start(&mut self, now: u64, ticks: u32) -> bool {
+        if self.callback.is_none() {
+            return false;
+        }
+        self.expiry = Some(now.saturating_add(u64::from(ticks)));
+        true
+    }
+
+    fn stop(&mut self) -> bool {
+        if self.callback.is_none() {
+            return false;
+        }
+        self.expiry = None;
+        true
+    }
+
+    fn delete(&mut self) -> bool {
+        if self.callback.is_none() {
+            return false;
+        }
+        *self = Self::new();
+        true
+    }
+
+    fn take_expired(&mut self, now: u64) -> Option<(TimerCallback, *mut c_void)> {
+        if self.expiry? > now {
+            return None;
+        }
+        self.expiry = None;
+        // Copy the callback and argument: no timer borrow survives dispatch.
+        self.callback.map(|callback| (callback, self.arg))
+    }
+
+    fn wait_ticks(&self, now: u64) -> u32 {
+        self.expiry
+            // u32::MAX means an indefinite queue wait, not a finite deadline.
+            .map(|expiry| expiry.saturating_sub(now).min(u64::from(u32::MAX - 1)) as u32)
+            .unwrap_or(u32::MAX)
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Global state
-// ---------------------------------------------------------------------------
+fn timeout_ticks(micros: u64) -> Option<u32> {
+    if micros % TICK_MICROS != 0 {
+        return None;
+    }
+    u32::try_from(micros / TICK_MICROS)
+        .ok()
+        .filter(|ticks| *ticks != 0)
+}
 
-static mut TIMERS: [SoftwareTimer; MAX_TIMERS] = {
-    const EMPTY: SoftwareTimer = SoftwareTimer {
-        period_ticks: 0,
-        auto_reload: false,
-        callback: empty_callback,
-        arg: core::ptr::null_mut(),
-        expiry_tick: 0,
-        active: false,
-        in_use: false,
+#[cfg(target_arch = "xtensa")]
+mod target {
+    use core::ffi::c_char;
+
+    use super::*;
+    use crate::wifi::compat::{critical, queue, task};
+    use esp8266_wifi_sys::{ESP_ERR_INVALID_ARG, ESP_ERR_NO_MEM, ESP_OK};
+
+    // Preserve the qualified daemon stack and SDK timer-task priority.
+    const DAEMON_STACK_BYTES: u16 = 768;
+    const DAEMON_PRIORITY: u32 = 2;
+
+    static mut TIMER: OneShotTimer = OneShotTimer::new();
+    static mut WAKE_QUEUE: *mut c_void = core::ptr::null_mut();
+
+    #[repr(C)]
+    pub struct CreateArgs {
+        callback: Option<TimerCallback>,
+        arg: *mut c_void,
+        dispatch_method: u32,
+        name: *const c_char,
+    }
+
+    const _: () = {
+        assert!(core::mem::size_of::<CreateArgs>() == 16);
+        assert!(core::mem::align_of::<CreateArgs>() == 4);
+        assert!(core::mem::offset_of!(CreateArgs, callback) == 0);
+        assert!(core::mem::offset_of!(CreateArgs, arg) == 4);
+        assert!(core::mem::offset_of!(CreateArgs, dispatch_method) == 8);
+        assert!(core::mem::offset_of!(CreateArgs, name) == 12);
     };
-    [EMPTY; MAX_TIMERS]
-};
 
-/// Handle for the timer daemon task (NULL if not started).
-static mut TIMER_DAEMON_HANDLE: *mut c_void = core::ptr::null_mut();
-static mut TIMER_QUEUE_HANDLE: *mut c_void = core::ptr::null_mut();
-
-unsafe extern "C" fn empty_callback(_: *mut c_void) {}
-
-// ---------------------------------------------------------------------------
-// Timer daemon task
-// ---------------------------------------------------------------------------
-
-/// Timer daemon task — processes queued timer commands and expirations.
-///
-/// Runs in task context like SDK `prvTimerTask(...)`, so timer callbacks can
-/// safely call blocking APIs.
-unsafe extern "C" fn timer_daemon_task(_param: *mut c_void) {
-    loop {
+    /// The closure must not invoke callbacks, block, or retain timer references.
+    unsafe fn with_timer<R>(operation: impl FnOnce(&mut OneShotTimer) -> R) -> R {
         unsafe {
-            let now = task::get_tick_count();
-            if process_expired_timers(now) {
-                continue;
-            }
-
-            let wait_ticks = next_timer_wait(now);
-            let mut message = DaemonTaskMessage {
-                command_id: 0,
-                command_value: 0,
-                timer: core::ptr::null_mut(),
-            };
-
-            let recv = queue::xQueueReceive(
-                TIMER_QUEUE_HANDLE,
-                &mut message as *mut DaemonTaskMessage as *mut c_void,
-                wait_ticks,
-            );
-            if recv == PD_PASS {
-                process_timer_command(message);
-                drain_timer_commands();
-            }
-        }
-    }
-}
-
-/// Create the timer daemon and its command queue before scheduler activation.
-/// Called once by runtime preparation; a failure is followed by rollback.
-pub(crate) unsafe fn create_timer_daemon() -> i32 {
-    unsafe {
-        TIMER_QUEUE_HANDLE = queue::xQueueCreate(
-            TIMER_QUEUE_LENGTH,
-            core::mem::size_of::<DaemonTaskMessage>() as u32,
-        );
-        if TIMER_QUEUE_HANDLE.is_null() {
-            return PD_FALSE;
-        }
-
-        task::xTaskCreate(
-            timer_daemon_task,
-            b"Tmr Svc\0".as_ptr() as *const _,
-            TIMER_DAEMON_STACK_BYTES,
-            core::ptr::null_mut(),
-            TIMER_DAEMON_PRIORITY,
-            &raw mut TIMER_DAEMON_HANDLE,
-        )
-    }
-}
-
-/// Release the command queue after failed preparation, before tasks can run.
-pub(crate) unsafe fn rollback_startup() {
-    unsafe {
-        if !TIMER_QUEUE_HANDLE.is_null() {
-            queue::vQueueDelete(TIMER_QUEUE_HANDLE);
-            TIMER_QUEUE_HANDLE = core::ptr::null_mut();
-        }
-        TIMER_DAEMON_HANDLE = core::ptr::null_mut();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FreeRTOS API
-// ---------------------------------------------------------------------------
-
-/// `xTimerCreate` — create a software timer.
-#[no_mangle]
-pub unsafe extern "C" fn xTimerCreate(
-    _name: *const u8,
-    period_ticks: u32,
-    auto_reload: i32,
-    arg: *mut c_void,
-    callback: TimerCallback,
-) -> *mut c_void {
-    unsafe {
-        critical::vPortEnterCritical();
-
-        let Some(idx) = find_free_slot() else {
-            critical::vPortExitCritical();
-            return core::ptr::null_mut();
-        };
-
-        let t = &mut TIMERS[idx];
-        t.period_ticks = period_ticks;
-        t.auto_reload = auto_reload != 0;
-        t.callback = callback;
-        t.arg = arg;
-        t.expiry_tick = 0;
-        t.active = false;
-        t.in_use = true;
-
-        critical::vPortExitCritical();
-
-        &mut TIMERS[idx] as *mut SoftwareTimer as *mut c_void
-    }
-}
-
-/// `xTimerGenericCommand` — the real timer API that FreeRTOS macros expand to.
-///
-/// `xTimerStart`, `xTimerStop`, `xTimerReset`, `xTimerChangePeriod`,
-/// `xTimerDelete` all go through this function.
-#[no_mangle]
-pub unsafe extern "C" fn xTimerGenericCommand(
-    timer: *mut c_void,
-    command: i32,
-    command_value: u32, // new period for CHANGE_PERIOD, or unused
-    _higher_priority_task_woken: *mut i32,
-    _ticks_to_wait: u32,
-) -> i32 {
-    unsafe {
-        if timer.is_null() {
-            return PD_FALSE;
-        }
-        if TIMER_QUEUE_HANDLE.is_null() {
-            return PD_FALSE;
-        }
-
-        let message = DaemonTaskMessage {
-            command_id: command,
-            command_value,
-            timer,
-        };
-
-        if command < TMR_COMMAND_START_FROM_ISR {
-            let ticks_to_wait = if task::xTaskGetSchedulerState() == 2 {
-                _ticks_to_wait
-            } else {
-                0
-            };
-
-            queue::xQueueGenericSend(
-                TIMER_QUEUE_HANDLE,
-                &message as *const DaemonTaskMessage as *const c_void,
-                ticks_to_wait,
-                0,
-            )
-        } else {
-            queue::xQueueSendFromISR(
-                TIMER_QUEUE_HANDLE,
-                &message as *const DaemonTaskMessage as *const c_void,
-                _higher_priority_task_woken,
-            )
-        }
-    }
-}
-
-/// `xTimerStart` — start a timer.
-#[no_mangle]
-pub unsafe extern "C" fn xTimerStart(timer: *mut c_void, ticks_to_wait: u32) -> i32 {
-    unsafe {
-        xTimerGenericCommand(
-            timer,
-            TMR_COMMAND_START,
-            task::xTaskGetTickCount(),
-            core::ptr::null_mut(),
-            ticks_to_wait,
-        )
-    }
-}
-
-/// `xTimerReset` — (re)start a timer.
-#[no_mangle]
-pub unsafe extern "C" fn xTimerReset(timer: *mut c_void, ticks_to_wait: u32) -> i32 {
-    unsafe {
-        xTimerGenericCommand(
-            timer,
-            TMR_COMMAND_RESET,
-            task::xTaskGetTickCount(),
-            core::ptr::null_mut(),
-            ticks_to_wait,
-        )
-    }
-}
-
-/// `xTimerStop` — stop a timer.
-#[no_mangle]
-pub unsafe extern "C" fn xTimerStop(timer: *mut c_void, ticks_to_wait: u32) -> i32 {
-    unsafe {
-        xTimerGenericCommand(
-            timer,
-            TMR_COMMAND_STOP,
-            0,
-            core::ptr::null_mut(),
-            ticks_to_wait,
-        )
-    }
-}
-
-/// `xTimerDelete` — delete a timer.
-#[no_mangle]
-pub unsafe extern "C" fn xTimerDelete(timer: *mut c_void, ticks_to_wait: u32) -> i32 {
-    unsafe {
-        xTimerGenericCommand(
-            timer,
-            TMR_COMMAND_DELETE,
-            0,
-            core::ptr::null_mut(),
-            ticks_to_wait,
-        )
-    }
-}
-
-/// `pvTimerGetTimerID` — return the timer's user argument.
-#[no_mangle]
-pub unsafe extern "C" fn pvTimerGetTimerID(timer: *mut c_void) -> *mut c_void {
-    unsafe {
-        if timer.is_null() {
-            return core::ptr::null_mut();
-        }
-        let t = &*(timer as *const SoftwareTimer);
-        t.arg
-    }
-}
-
-/// `xTimerGetTimerDaemonTaskHandle` — return the daemon task handle.
-#[no_mangle]
-pub unsafe extern "C" fn xTimerGetTimerDaemonTaskHandle() -> *mut c_void {
-    unsafe { TIMER_DAEMON_HANDLE }
-}
-
-// ---------------------------------------------------------------------------
-// Internal
-// ---------------------------------------------------------------------------
-
-unsafe fn find_free_slot() -> Option<usize> {
-    unsafe {
-        for i in 0..MAX_TIMERS {
-            if !TIMERS[i].in_use {
-                return Some(i);
-            }
-        }
-        None
-    }
-}
-
-unsafe fn next_timer_wait(now: u64) -> u32 {
-    unsafe {
-        let mut next_expiry: Option<u64> = None;
-
-        critical::vPortEnterCritical();
-        for i in 0..MAX_TIMERS {
-            let t = &TIMERS[i];
-            if !t.in_use || !t.active {
-                continue;
-            }
-            next_expiry = Some(match next_expiry {
-                Some(current) => current.min(t.expiry_tick),
-                None => t.expiry_tick,
-            });
-        }
-        critical::vPortExitCritical();
-
-        match next_expiry {
-            Some(expiry) if expiry <= now => 0,
-            Some(expiry) => (expiry - now).min(u32::MAX as u64) as u32,
-            None => 0xFFFF_FFFF,
-        }
-    }
-}
-
-unsafe fn process_expired_timers(now: u64) -> bool {
-    unsafe {
-        let mut processed = false;
-
-        loop {
-            let mut callback: Option<TimerCallback> = None;
-            let mut handle = core::ptr::null_mut();
-
             critical::vPortEnterCritical();
-            for i in 0..MAX_TIMERS {
-                let t = &mut TIMERS[i];
-                if !t.in_use || !t.active || t.expiry_tick > now {
+            let result = operation(&mut *core::ptr::addr_of_mut!(TIMER));
+            critical::vPortExitCritical();
+            result
+        }
+    }
+
+    unsafe fn notify_daemon() {
+        // A full queue already carries the required wakeup. No state or timer
+        // pointers are queued, so delete/recreate cannot leave stale commands.
+        let _ = unsafe { queue::xQueueGenericSend(WAKE_QUEUE, core::ptr::null(), 0, 0) };
+    }
+
+    unsafe extern "C" fn timer_daemon_task(_: *mut c_void) {
+        loop {
+            unsafe {
+                task::vTaskSuspendAll();
+                let now = task::get_tick_count();
+                let callback = with_timer(|timer| timer.take_expired(now));
+                if let Some((callback, arg)) = callback {
+                    callback(arg);
+                    let _ = task::xTaskResumeAll();
                     continue;
                 }
+                let wait = with_timer(|timer| timer.wait_ticks(now));
+                let _ = task::xTaskResumeAll();
+                let _ = queue::xQueueReceive(WAKE_QUEUE, core::ptr::null_mut(), wait);
+            }
+        }
+    }
 
-                if t.auto_reload {
-                    t.expiry_tick = t.expiry_tick.saturating_add(t.period_ticks as u64);
+    /// Allocate mandatory runtime infrastructure before scheduler activation.
+    pub(crate) unsafe fn create_timer_daemon() -> i32 {
+        unsafe {
+            WAKE_QUEUE = queue::xQueueCreate(1, 0);
+            if WAKE_QUEUE.is_null() {
+                return task::PD_FALSE;
+            }
+            task::xTaskCreate(
+                timer_daemon_task,
+                core::ptr::null(),
+                DAEMON_STACK_BYTES,
+                core::ptr::null_mut(),
+                DAEMON_PRIORITY,
+                core::ptr::null_mut(),
+            )
+        }
+    }
+
+    /// Task startup rollback releases the daemon stack; release its wake queue.
+    pub(crate) unsafe fn rollback_startup() {
+        unsafe {
+            if !WAKE_QUEUE.is_null() {
+                queue::vQueueDelete(WAKE_QUEUE);
+                WAKE_QUEUE = core::ptr::null_mut();
+            }
+        }
+    }
+
+    /// Native PMKSA ABI; task context and a nonblocking callback are required.
+    #[no_mangle]
+    pub unsafe extern "C" fn esp_timer_create(
+        args: *const CreateArgs,
+        out_handle: *mut *mut c_void,
+    ) -> i32 {
+        if args.is_null() || out_handle.is_null() {
+            return ESP_ERR_INVALID_ARG;
+        }
+        let args = unsafe { &*args };
+        let Some(callback) = args.callback else {
+            return ESP_ERR_INVALID_ARG;
+        };
+        if args.dispatch_method != 0 {
+            return ESP_ERR_INVALID_ARG;
+        }
+        unsafe {
+            with_timer(|timer| {
+                if timer.create(callback, args.arg) {
+                    out_handle.write((timer as *mut OneShotTimer).cast());
+                    ESP_OK
                 } else {
-                    t.active = false;
+                    ESP_ERR_NO_MEM
                 }
-
-                callback = Some(t.callback);
-                handle = t as *mut SoftwareTimer as *mut c_void;
-                processed = true;
-                break;
-            }
-            critical::vPortExitCritical();
-
-            let Some(callback) = callback else {
-                break;
-            };
-
-            callback(handle);
-        }
-
-        processed
-    }
-}
-
-unsafe fn drain_timer_commands() {
-    unsafe {
-        loop {
-            let mut message = DaemonTaskMessage {
-                command_id: 0,
-                command_value: 0,
-                timer: core::ptr::null_mut(),
-            };
-            let recv = queue::xQueueReceive(
-                TIMER_QUEUE_HANDLE,
-                &mut message as *mut DaemonTaskMessage as *mut c_void,
-                0,
-            );
-            if recv != PD_PASS {
-                break;
-            }
-            process_timer_command(message);
+            })
         }
     }
-}
 
-unsafe fn process_timer_command(message: DaemonTaskMessage) {
-    unsafe {
-        if message.timer.is_null() {
-            return;
+    /// Start or replace the deadline, including from the timer's own callback.
+    #[no_mangle]
+    pub unsafe extern "C" fn esp_timer_start_once(handle: *mut c_void, micros: u64) -> i32 {
+        let Some(ticks) = timeout_ticks(micros) else {
+            return ESP_ERR_INVALID_ARG;
+        };
+        unsafe {
+            let valid = with_timer(|timer| {
+                handle == (timer as *mut OneShotTimer).cast()
+                    && timer.start(task::get_tick_count(), ticks)
+            });
+            if !valid {
+                return ESP_ERR_INVALID_ARG;
+            }
+            notify_daemon();
         }
-
-        let timer = message.timer as *mut SoftwareTimer;
-        if !(*timer).in_use && message.command_id != TMR_COMMAND_DELETE {
-            return;
-        }
-
-        match message.command_id {
-            TMR_COMMAND_START_DONT_TRACE
-            | TMR_COMMAND_START
-            | TMR_COMMAND_START_FROM_ISR
-            | TMR_COMMAND_RESET
-            | TMR_COMMAND_RESET_FROM_ISR => {
-                start_or_reset_timer(timer, message.command_value as u64)
-            }
-            TMR_COMMAND_STOP | TMR_COMMAND_STOP_FROM_ISR => {
-                critical::vPortEnterCritical();
-                (*timer).active = false;
-                critical::vPortExitCritical();
-            }
-            TMR_COMMAND_CHANGE_PERIOD | TMR_COMMAND_CHANGE_PERIOD_FROM_ISR => {
-                let now = task::get_tick_count();
-                critical::vPortEnterCritical();
-                (*timer).period_ticks = message.command_value;
-                (*timer).expiry_tick = now + message.command_value as u64;
-                (*timer).active = true;
-                critical::vPortExitCritical();
-            }
-            TMR_COMMAND_DELETE => {
-                critical::vPortEnterCritical();
-                (*timer).active = false;
-                (*timer).in_use = false;
-                critical::vPortExitCritical();
-            }
-            _ => {}
-        }
+        ESP_OK
     }
-}
 
-unsafe fn start_or_reset_timer(timer: *mut SoftwareTimer, command_time: u64) {
-    unsafe {
-        let mut callback: Option<TimerCallback> = None;
-        let mut handle = core::ptr::null_mut();
-
-        critical::vPortEnterCritical();
-        let t = &mut *timer;
-        let period = t.period_ticks as u64;
-        let next_expiry = command_time.saturating_add(period);
-        let now = task::get_tick_count();
-
-        if period != 0 && next_expiry <= now && now.saturating_sub(command_time) >= period {
-            if t.auto_reload {
-                t.expiry_tick = next_expiry.saturating_add(period);
-                t.active = true;
-            } else {
-                t.active = false;
-            }
-            callback = Some(t.callback);
-            handle = timer as *mut c_void;
+    #[no_mangle]
+    pub unsafe extern "C" fn esp_timer_stop(handle: *mut c_void) -> i32 {
+        let valid = unsafe {
+            with_timer(|timer| handle == (timer as *mut OneShotTimer).cast() && timer.stop())
+        };
+        if valid {
+            ESP_OK
         } else {
-            t.expiry_tick = next_expiry;
-            t.active = true;
+            ESP_ERR_INVALID_ARG
         }
-        critical::vPortExitCritical();
+    }
 
-        if let Some(callback) = callback {
-            callback(handle);
+    #[no_mangle]
+    pub unsafe extern "C" fn esp_timer_delete(handle: *mut c_void) -> i32 {
+        let valid = unsafe {
+            with_timer(|timer| handle == (timer as *mut OneShotTimer).cast() && timer.delete())
+        };
+        if valid {
+            ESP_OK
+        } else {
+            ESP_ERR_INVALID_ARG
         }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) use target::{create_timer_daemon, rollback_startup};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" fn callback(_: *mut c_void) {}
+
+    #[test]
+    fn expiration_allows_rearm_without_a_trailing_stop() {
+        let mut timer = OneShotTimer::new();
+        assert!(timer.create(callback, core::ptr::null_mut()));
+        assert!(timer.start(0, 2));
+        assert!(timer.take_expired(1).is_none());
+        assert!(timer.take_expired(2).is_some());
+        assert!(timer.take_expired(2).is_none());
+        // The callback's rearm survives returning from the previous dispatch.
+        assert!(timer.start(2, 3));
+        assert_eq!(timer.wait_ticks(2), 3);
+        assert!(timer.take_expired(4).is_none());
+        assert!(timer.take_expired(5).is_some());
+    }
+
+    #[test]
+    fn coalesced_wakeup_observes_latest_start_stop_and_delete() {
+        let mut timer = OneShotTimer::new();
+        assert!(timer.create(callback, core::ptr::null_mut()));
+        assert!(timer.start(0, 1));
+        assert!(timer.stop());
+        assert!(timer.start(0, 3));
+        assert!(timer.take_expired(1).is_none());
+        assert!(timer.start(1, 5));
+        assert!(timer.take_expired(3).is_none());
+        assert!(timer.delete());
+        assert!(!timer.delete());
+        assert!(timer.create(callback, core::ptr::null_mut()));
+        // A wake already queued for the old timer cannot act on this new slot.
+        assert!(timer.take_expired(6).is_none());
+        assert_eq!(timer.wait_ticks(6), u32::MAX);
+        assert!(timer.stop());
+    }
+
+    #[test]
+    fn single_owner_can_release_and_reuse_timer_during_callback() {
+        let mut timer = OneShotTimer::new();
+        assert!(timer.create(callback, core::ptr::null_mut()));
+        assert!(!timer.create(callback, core::ptr::null_mut()));
+        assert!(timer.start(0, 1));
+        assert!(timer.take_expired(1).is_some());
+        assert!(timer.delete());
+        assert!(timer.create(callback, core::ptr::null_mut()));
+        assert!(timer.take_expired(1).is_none());
+    }
+
+    #[test]
+    fn finite_timeouts_never_become_indefinite_queue_waits() {
+        assert_eq!(timeout_ticks(0), None);
+        assert_eq!(timeout_ticks(9_999), None);
+        assert_eq!(timeout_ticks(10_001), None);
+        assert_eq!(timeout_ticks(10_000), Some(1));
+        assert_eq!(
+            timeout_ticks(u64::from(u32::MAX) * TICK_MICROS),
+            Some(u32::MAX)
+        );
+        assert_eq!(timeout_ticks((u64::from(u32::MAX) + 1) * TICK_MICROS), None);
+        let mut timer = OneShotTimer::new();
+        assert!(timer.create(callback, core::ptr::null_mut()));
+        assert!(timer.start(0, u32::MAX));
+        assert_eq!(timer.wait_ticks(0), u32::MAX - 1);
+        assert_eq!(timer.wait_ticks(u64::from(u32::MAX)), 0);
     }
 }

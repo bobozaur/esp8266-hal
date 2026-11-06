@@ -13,7 +13,7 @@ use void::Void;
 /// Wait one maximum-length frame after FIFO empty. The peripheral bus is
 /// 80 MHz and the supported CPU frequencies are at most 160 MHz, so 24 CPU
 /// clocks per baud divider cover 12 wire bits at either supported CPU speed.
-fn finish_frame(_divider: u32) {
+pub(crate) fn finish_frame(_divider: u32) {
     #[cfg(target_arch = "xtensa")]
     xtensa_lx::timer::delay(_divider * 24);
 }

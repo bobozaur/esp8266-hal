@@ -156,6 +156,18 @@ required-features = ["wifi-smartconfig", "wifi-smoltcp"]
 name = "wifi_eap"
 required-features = ["wifi-enterprise"]
 
+[[test]]
+name = "wifi_core_config"
+required-features = ["wifi"]
+
+[[test]]
+name = "wifi_core_scan"
+required-features = ["wifi"]
+
+[[test]]
+name = "wifi_core_provisioning"
+required-features = ["wifi-smartconfig"]
+
 [features]
 default = ["interrupt", "rt"]
 interrupt = []

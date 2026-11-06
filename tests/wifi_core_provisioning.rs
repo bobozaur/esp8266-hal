@@ -1,7 +1,5 @@
-#![cfg(feature = "wifi-smartconfig")]
 use esp8266_hal::wifi::{Ipv4Addr, SmartConfigCredentials, SmartConfigType};
 #[test]
-#[cfg(feature = "wifi-smartconfig")]
 fn smartconfig_credentials_convert_to_client_config() {
     let credentials = SmartConfigCredentials::new(
         b"network",
@@ -32,7 +30,6 @@ fn smartconfig_credentials_convert_to_client_config() {
 }
 
 #[test]
-#[cfg(feature = "wifi-smartconfig")]
 fn smartconfig_credentials_reject_invalid_network_configuration() {
     assert!(SmartConfigCredentials::new(
         b"",

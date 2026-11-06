@@ -29,7 +29,7 @@ jobs:
           (cd esp8266-wifi-sys/vendor && sha256sum --check --strict SHA256SUMS)
       - name: Test library contracts
         run: |
-          cargo test --target x86_64-unknown-linux-gnu --no-default-features --lib
+          cargo test --target x86_64-unknown-linux-gnu --no-default-features --lib --tests
           cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi --lib --tests
           cargo test --target x86_64-unknown-linux-gnu --no-default-features --features "$WIFI_FEATURES" --lib --tests
           cargo test --target x86_64-unknown-linux-gnu -p esp8266-wifi-sys -p esp8266-hal-proc-macros

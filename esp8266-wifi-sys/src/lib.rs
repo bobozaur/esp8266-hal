@@ -1,10 +1,9 @@
-//! Raw FFI bindings to the ESP8266 RTOS SDK WiFi ABI.
+//! Narrow ABI declarations and pinned native inputs for the ESP8266 driver.
 //!
-//! The generated bindings and native libraries are checked in so normal builds
+//! The declarations and native libraries are checked in so normal builds
 //! are deterministic and offline. See `vendor/README.md` for their exact SDK
-//! revision, provenance, licenses, and checksums. A small number of types and
-//! constants that bindgen cannot handle cleanly (bitfield structs and
-//! `#define` constants) are defined manually below the generated module.
+//! revision, provenance, licenses, and checksums. Declarations follow only the
+//! driver's required interfaces; this crate does not expose the whole SDK.
 //!
 //! # Safety
 //!
@@ -19,12 +18,10 @@
     non_snake_case,
     dead_code,
     clippy::upper_case_acronyms,
-    clippy::missing_safety_doc,
-    clippy::useless_transmute
+    clippy::missing_safety_doc
 )]
 
-// Generated once from the pinned headers; never regenerated as a side effect
-// of compiling an application.
+// Initially generated from the pinned headers and narrowed to driver use.
 mod bindings;
 pub use bindings::*;
 
@@ -40,46 +37,18 @@ pub const WIFI_INIT_CONFIG_MAGIC: u32 = 0x1F2F_3F4F;
 pub const WIFI_IF_STA: esp_interface_t = ESP_IF_WIFI_STA;
 pub const WIFI_IF_AP: esp_interface_t = ESP_IF_WIFI_AP;
 
-// Bindgen emits ESP_OK as u32 and ESP_ERR_* as u32, but esp_err_t is i32.
-// Re-export them with the correct type for ergonomic use.
-// The original bindgen constants are still available with their generated names.
-#[allow(dead_code)]
-mod _esp_err_typed {
-    use super::esp_err_t;
-    pub const ESP_OK: esp_err_t = 0;
-    pub const ESP_FAIL: esp_err_t = -1;
-    pub const ESP_ERR_NO_MEM: esp_err_t = 0x101;
-    pub const ESP_ERR_INVALID_ARG: esp_err_t = 0x102;
-    pub const ESP_ERR_INVALID_STATE: esp_err_t = 0x103;
-    pub const ESP_ERR_INVALID_SIZE: esp_err_t = 0x104;
-    pub const ESP_ERR_NOT_FOUND: esp_err_t = 0x105;
-    pub const ESP_ERR_NOT_SUPPORTED: esp_err_t = 0x106;
-    pub const ESP_ERR_TIMEOUT: esp_err_t = 0x107;
-    pub const ESP_ERR_WIFI_BASE: esp_err_t = 0x3000;
-    pub const ESP_ERR_WIFI_NOT_INIT: esp_err_t = 0x3001;
-    pub const ESP_ERR_WIFI_NOT_STARTED: esp_err_t = 0x3002;
-    pub const ESP_ERR_WIFI_NOT_STOPPED: esp_err_t = 0x3003;
-    pub const ESP_ERR_WIFI_IF: esp_err_t = 0x3004;
-    pub const ESP_ERR_WIFI_MODE: esp_err_t = 0x3005;
-    pub const ESP_ERR_WIFI_STATE: esp_err_t = 0x3006;
-    pub const ESP_ERR_WIFI_CONN: esp_err_t = 0x3007;
-    pub const ESP_ERR_WIFI_NVS: esp_err_t = 0x3008;
-    pub const ESP_ERR_WIFI_MAC: esp_err_t = 0x3009;
-    pub const ESP_ERR_WIFI_SSID: esp_err_t = 0x300A;
-    pub const ESP_ERR_WIFI_PASSWORD: esp_err_t = 0x300B;
-    pub const ESP_ERR_WIFI_TIMEOUT: esp_err_t = 0x300C;
-    pub const ESP_ERR_WIFI_WAKE_FAIL: esp_err_t = 0x300D;
-    pub const ESP_ERR_WIFI_WOULD_BLOCK: esp_err_t = 0x300E;
-    pub const ESP_ERR_WIFI_NOT_CONNECT: esp_err_t = 0x300F;
-}
-pub use _esp_err_typed::*;
-
-/// Wildcard event ID for `esp_event_handler_register` (matches all events
-/// under a given base).
-pub const ESP_EVENT_ANY_ID: i32 = -1;
-
-/// FreeRTOS maximum delay (`portMAX_DELAY`).
-pub const PORT_MAX_DELAY: u32 = 0xFFFF_FFFF;
+// Native return codes are signed, matching esp_err_t.
+pub const ESP_OK: esp_err_t = 0;
+pub const ESP_ERR_NO_MEM: esp_err_t = 0x101;
+pub const ESP_ERR_INVALID_ARG: esp_err_t = 0x102;
+pub const ESP_ERR_INVALID_STATE: esp_err_t = 0x103;
+pub const ESP_ERR_INVALID_SIZE: esp_err_t = 0x104;
+pub const ESP_ERR_NOT_SUPPORTED: esp_err_t = 0x106;
+pub const ESP_ERR_TIMEOUT: esp_err_t = 0x107;
+pub const ESP_ERR_WIFI_NOT_INIT: esp_err_t = 0x3001;
+pub const ESP_ERR_WIFI_NOT_STARTED: esp_err_t = 0x3002;
+pub const ESP_ERR_WIFI_TIMEOUT: esp_err_t = 0x300C;
+pub const ESP_ERR_WIFI_WOULD_BLOCK: esp_err_t = 0x300E;
 
 // ---------------------------------------------------------------------------
 // Manual type definitions — bitfield structs that bindgen cannot
@@ -225,6 +194,92 @@ pub const ESP_WIFI_MAX_CONN_NUM: usize = 10;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrowed_native_views_preserve_target_layouts() {
+        use core::mem::{align_of, offset_of, size_of};
+
+        // tests/abi_layout.c independently checks these values against the
+        // pinned target headers. These types contain no host-sized pointers.
+        assert_eq!(
+            (
+                size_of::<wifi_ap_record_t>(),
+                align_of::<wifi_ap_record_t>()
+            ),
+            (80, 4)
+        );
+        assert_eq!(offset_of!(wifi_ap_record_t, flags), 64);
+        assert_eq!(offset_of!(wifi_ap_record_t, country), 68);
+        assert_eq!(
+            (
+                size_of::<wifi_sta_config_t>(),
+                align_of::<wifi_sta_config_t>()
+            ),
+            (132, 4)
+        );
+        assert_eq!(offset_of!(wifi_sta_config_t, flags), 126);
+        assert_eq!(
+            (size_of::<wifi_sta_info_t>(), align_of::<wifi_sta_info_t>()),
+            (12, 4)
+        );
+        // The station-info header omits a byte present in the retained driver.
+        // vendor/README.md records the independent disassembly evidence.
+        assert_eq!(offset_of!(wifi_sta_info_t, _driver_data), 6);
+        assert_eq!(offset_of!(wifi_sta_info_t, flags), 7);
+        assert_eq!(size_of::<wifi_sta_list_t>(), 124);
+        assert_eq!(offset_of!(wifi_sta_list_t, num), 120);
+        assert_eq!(
+            (
+                size_of::<system_event_info_t>(),
+                align_of::<system_event_info_t>()
+            ),
+            (44, 4)
+        );
+        assert_eq!(size_of::<system_event_t>(), 48);
+        assert_eq!(offset_of!(system_event_t, event_info), 4);
+    }
+
+    #[test]
+    fn scan_and_config_flags_match_target_c_images() {
+        // Images emitted by tests/abi_layout.c using the pinned Xtensa GCC.
+        let mut ap_image = [0_u8; 80];
+        ap_image[64] = 0x10;
+        // SAFETY: the complete image contains only valid integer/enum storage.
+        let mut record =
+            unsafe { core::ptr::read_unaligned(ap_image.as_ptr().cast::<wifi_ap_record_t>()) };
+        assert_eq!(record.wps(), 1);
+        record.flags = !0x10;
+        assert_eq!(record.wps(), 0);
+
+        let mut config_image = [0_u8; 132];
+        config_image[126] = 3;
+        // SAFETY: all bool fields are zero and every other field is an integer.
+        let config =
+            unsafe { core::ptr::read_unaligned(config_image.as_ptr().cast::<wifi_sta_config_t>()) };
+        assert_eq!(config.flags, [3, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn station_phy_flags_decode_retained_driver_output() {
+        // libnet80211.a:ieee80211_api.o:esp_wifi_ap_get_sta_list writes the
+        // extra byte at instruction 0xa5 and PHY flags at 0xd9. Its 12-byte
+        // record differs from the SDK header's byte-6 bitfields.
+        for flags in 0..8_u8 {
+            let image = [2, 3, 4, 5, 6, 7, !flags, flags, !flags, 0, 0, 0];
+            // SAFETY: all twelve bytes initialize plain integer fields.
+            let station =
+                unsafe { core::ptr::read_unaligned(image.as_ptr().cast::<wifi_sta_info_t>()) };
+            assert_eq!(station.mac, [2, 3, 4, 5, 6, 7]);
+            assert_eq!(
+                (station.phy_11b(), station.phy_11g(), station.phy_11n()),
+                (
+                    u32::from(flags & 1),
+                    u32::from((flags >> 1) & 1),
+                    u32::from((flags >> 2) & 1)
+                )
+            );
+        }
+    }
 
     #[test]
     fn promiscuous_rx_control_layout_matches_sdk() {

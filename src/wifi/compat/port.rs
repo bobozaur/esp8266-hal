@@ -439,7 +439,7 @@ pub(crate) unsafe fn program_compare(requested: u32) {
 
 /// Monotonic microseconds for SDK callers. The native helper assumed CCOUNT was
 /// reset every tick; this runtime keeps it free-running so ISR work is counted.
-#[export_name = "__esp8266_hal_esp_timer_get_time"]
+#[no_mangle]
 pub extern "C" fn esp_timer_get_time() -> i64 {
     critical_section::with(|_| unsafe {
         (&*core::ptr::addr_of!(CLOCK)).micros(get_ccount(), g_esp_ticks_per_us) as i64
@@ -648,13 +648,6 @@ unsafe fn activate_prepared_scheduler() {
         program_compare(counter.wrapping_add(_xt_tick_divisor));
         _xt_isr_unmask(1 << ETS_MAX_INUM);
 
-        // Retain the proven SDK software-WDT setup. This runtime uses its
-        // own scheduler/idle policy rather than the SDK's startup task.
-        extern "C" {
-            fn pp_soft_wdt_stop();
-        }
-        pp_soft_wdt_stop();
-
         task::mark_scheduler_started();
         _xt_isr_unmask(1 << ETS_SOFT_INUM);
     }
@@ -697,22 +690,18 @@ pub unsafe extern "C" fn vApplicationIdleHook() {}
 #[no_mangle]
 pub unsafe extern "C" fn vApplicationTickHook() {}
 
-extern "C" {
-    fn esp_task_wdt_reset();
-    fn esp_sleep_start();
-}
-
-/// Feed the watchdog, then follow the SDK's idle policy (CPU wait by default).
+/// Feed the watchdog and wait for an interrupt from the idle task.
+///
+/// The runtime owns CCOUNT and its tick compare, so SDK CPU light sleep is not
+/// supported. Modem sleep remains owned by the radio's PM and RTC routines.
 #[no_mangle]
 pub unsafe extern "C" fn esp_internal_idle_hook() {
     unsafe {
         if crate::wifi::sdk::wifi_init::is_initialized() {
-            esp_task_wdt_reset();
-            esp_sleep_start();
-        } else {
-            // The explicit runtime also supports executor/timers before Wi-Fi.
-            // Only the idle task sleeps directly; application tasks block.
-            asm!("waiti 0", options(nomem, nostack));
+            // SDK eagle_soc.h: WDT_FEED(), with CONFIG_ESP8266_NMI_WDT off.
+            (0x6000_0914 as *mut u32).write_volatile(0x73);
         }
+        // The runtime also supports executor/timers before Wi-Fi starts.
+        asm!("waiti 0", options(nomem, nostack));
     }
 }

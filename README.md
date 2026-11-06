@@ -116,17 +116,23 @@ protocols on their own dependency.
 
 ## Native SDK and maintenance
 
-Espressif's ESP8266 radio archives require task, timer, allocation, event and
-packet ABIs supplied by the Rust runtime. Native WPA/WPS/mbedTLS sources contain
-necessary ESP8266 ownership, error-handling and memory adaptations. The
-[vendor manifest](esp8266-wifi-sys/vendor/README.md) records exact inputs,
-licenses, retained adaptations and out-of-band reproduction.
+Rust owns initialization, tasks, queues, timers, event delivery, allocation and
+packet ownership around unchanged Espressif radio binaries. The sys crate keeps
+open C WPA/WPS/EAP and mbedTLS snapshots because a qualified Rust replacement
+preserving TLS 1.2 key export, certificate profiles and recoverable allocation
+failure has not been established. Newlib supplies native formatting and strings;
+the driver supplies its allocator and syscall boundary. There is no SDK support
+archive, native IP stack, VFS or maintained SDK rebuild workflow. The
+[vendor manifest](esp8266-wifi-sys/vendor/README.md) identifies every remaining
+binary, its provenance, licenses and security adaptations.
 
 TLS record content is limited to 2,048 bytes in each direction, RSA moduli to
 2,048 bits, and elliptic-curve groups to 256 bits. EAP fragmentation does not
 raise the TLS record limit. Certificate chains and cryptographic work must fit
 the application's shared heap; arbitrary chains are not supported by these
 limits alone. See the enterprise credential API and native configuration.
+Supplying a CA enables certificate-chain verification; the bundled backend does
+not verify certificate validity dates.
 
 CI checks host contracts, independent Cargo features, ESP8266 links and external
 consumer packaging boundaries. Native ownership regression tests live beside

@@ -19,7 +19,7 @@ device access is involved. Normal Cargo builds do not run this fixture.
 
 The runner compiles current canonical `esp_wpa2_patched.c` and
 `eap_tls_common_patched.c`, plus the pinned SDK's real `eap.c`, EAP message builder and `wpabuf.c`.
-The EAP and WPS runners reuse the direct native reproduction manifest's
+The EAP and WPS runners share the WPS fixture's pinned
 header and feature lists. Host `-fcommon` matches GCC 8's default for the tentative globals in
 the pinned SDK's `eap.h`. Other SDK/newlib host warnings remain visible.
 

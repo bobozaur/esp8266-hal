@@ -9,6 +9,8 @@ mod feature;
 #[cfg(all(test, not(target_arch = "xtensa")))]
 mod host_critical;
 #[cfg(any(target_arch = "xtensa", test))]
+mod ingress;
+#[cfg(any(target_arch = "xtensa", test))]
 mod interface;
 mod link;
 #[cfg(any(target_arch = "xtensa", test))]

@@ -214,7 +214,7 @@ impl Resources {
             #[cfg(any(feature = "wifi-smartconfig", feature = "wifi-wps"))]
             _ => {}
         });
-        // SDK lifecycle events are serialized by its event-loop mutex. Close
+        // Native lifecycle events are serialized by the Rust ingress task. Close
         // admission first, release queued records without borrowing state, then
         // publish/wake. Checked-out leases and the other interface stay live.
         match event {

@@ -159,8 +159,15 @@ fn acknowledge(
             }
             esp8266_hal::wifi::delay_ticks(1);
         }
-        while sockets.get::<udp::Socket>(udp).send_queue() != 0 {
+        loop {
             iface.poll(now(), &mut device, &mut sockets);
+            // A dequeued UDP packet can still be waiting for native TX capacity.
+            let pending = device
+                .poll_transmit()
+                .map_err(|_| "Wi-Fi transmit failed")?;
+            if sockets.get::<udp::Socket>(udp).send_queue() == 0 && !pending {
+                break;
+            }
             if now() >= deadline {
                 return Err("UDP flush timed out");
             }

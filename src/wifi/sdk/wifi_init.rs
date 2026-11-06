@@ -131,25 +131,6 @@ unsafe extern "C" fn wifi_internal_fallback_send_cb(_aio: *mut EspAio) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// WiFi event base
-// ---------------------------------------------------------------------------
-
-/// The WIFI_EVENT event base. In C, `ESP_EVENT_DEFINE_BASE(WIFI_EVENT)`
-/// expands to `const char* WIFI_EVENT = "WIFI_EVENT"`. The blob reads this
-/// as a `const char*` pointer. We provide the same: a static pointer to a
-/// NUL-terminated string.
-///
-/// `*const u8` doesn't implement `Sync`, so we wrap in a `#[repr(transparent)]`
-/// newtype that does.
-#[repr(transparent)]
-pub(crate) struct EventBase(*const u8);
-// SAFETY: the pointer is to a static string literal — immutable and valid for 'static.
-unsafe impl Sync for EventBase {}
-
-#[no_mangle]
-pub static WIFI_EVENT: EventBase = EventBase(b"WIFI_EVENT\0".as_ptr());
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 

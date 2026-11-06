@@ -699,6 +699,9 @@ impl Wpa2EnterpriseClientCertificate {
 /// slices must include a trailing NUL byte for the ESP8266 RTOS SDK; DER slices
 /// should be provided through the DER-specific constructors.
 ///
+/// A supplied CA enables certificate-chain verification. The bundled TLS
+/// backend does not verify certificate validity dates.
+///
 /// The bundled TLS configuration limits incoming and outgoing record contents
 /// to 2,048 bytes, RSA moduli to 2,048 bits, and EC groups to 256 bits. Certificate
 /// chains and handshake allocations must also fit the application's shared heap;
@@ -712,7 +715,6 @@ pub struct Wpa2EnterpriseCredentials<'a> {
     ca_cert: Option<&'static [u8]>,
     ca_cert_format: Wpa2EnterpriseMaterialFormat,
     client_certificate: Option<Wpa2EnterpriseClientCertificate>,
-    disable_time_check: bool,
 }
 
 #[cfg(feature = "wifi-enterprise")]
@@ -729,7 +731,6 @@ impl<'a> Wpa2EnterpriseCredentials<'a> {
             ca_cert: None,
             ca_cert_format: Wpa2EnterpriseMaterialFormat::Pem,
             client_certificate: None,
-            disable_time_check: true,
         }
     }
 
@@ -752,11 +753,6 @@ impl<'a> Wpa2EnterpriseCredentials<'a> {
         certificate: Wpa2EnterpriseClientCertificate,
     ) -> Self {
         self.client_certificate = Some(certificate);
-        self
-    }
-
-    pub const fn with_disable_time_check(mut self, disable: bool) -> Self {
-        self.disable_time_check = disable;
         self
     }
 
@@ -785,10 +781,6 @@ impl<'a> Wpa2EnterpriseCredentials<'a> {
 
     pub const fn client_certificate(&self) -> Option<Wpa2EnterpriseClientCertificate> {
         self.client_certificate
-    }
-
-    pub const fn disable_time_check(&self) -> bool {
-        self.disable_time_check
     }
 }
 

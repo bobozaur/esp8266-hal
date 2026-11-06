@@ -9,7 +9,7 @@ does not relicense those components. Complete notices are shipped in
 `vendor/licenses/`:
 
 - ESP8266 RTOS SDK and mbedTLS: Apache-2.0
-- lwIP: BSD-3-Clause
+- lwIP: retained SDK header notice, BSD-3-Clause; no native lwIP stack
 - wpa_supplicant: BSD-3-Clause
 - newlib: the per-file terms collected in `newlib-COPYING`
 

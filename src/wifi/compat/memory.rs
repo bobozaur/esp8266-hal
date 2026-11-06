@@ -278,17 +278,25 @@ fn c_realloc(ptr: *mut c_void, new_size: usize) -> *mut c_void {
 }
 
 // ---------------------------------------------------------------------------
-// Public API (used by compat layer internals)
+// Native allocation ABI and compat-layer callers share one allocation owner.
 // ---------------------------------------------------------------------------
 
-pub unsafe fn malloc(size: usize) -> *mut c_void {
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
+pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
     c_malloc(size)
 }
-pub unsafe fn free(ptr: *mut c_void) {
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
+pub unsafe extern "C" fn free(ptr: *mut c_void) {
     c_free(ptr)
 }
 
-pub unsafe fn calloc(count: usize, size: usize) -> *mut c_void {
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
+pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+    c_realloc(ptr, size)
+}
+
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
+pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut c_void {
     let Some(total) = count.checked_mul(size) else {
         return ptr::null_mut();
     };
@@ -299,12 +307,39 @@ pub unsafe fn calloc(count: usize, size: usize) -> *mut c_void {
     p
 }
 
-pub unsafe fn zalloc(size: usize) -> *mut c_void {
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
+pub unsafe extern "C" fn zalloc(size: usize) -> *mut c_void {
     let p = c_malloc(size);
     if !p.is_null() {
         unsafe { ptr::write_bytes(p as *mut u8, 0, size) };
     }
     p
+}
+
+// Newlib's reentrant entrypoints must use the same header and provider as
+// radio allocations. The retained formatting code cannot select its own heap.
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
+pub unsafe extern "C" fn _malloc_r(_reent: *mut c_void, size: usize) -> *mut c_void {
+    c_malloc(size)
+}
+
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
+pub unsafe extern "C" fn _calloc_r(_reent: *mut c_void, count: usize, size: usize) -> *mut c_void {
+    unsafe { calloc(count, size) }
+}
+
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
+pub unsafe extern "C" fn _realloc_r(
+    _reent: *mut c_void,
+    pointer: *mut c_void,
+    size: usize,
+) -> *mut c_void {
+    c_realloc(pointer, size)
+}
+
+#[cfg_attr(target_arch = "xtensa", no_mangle)]
+pub unsafe extern "C" fn _free_r(_reent: *mut c_void, pointer: *mut c_void) {
+    c_free(pointer)
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +551,21 @@ mod tests {
         assert!(c_realloc(grown.cast(), 0).is_null());
         assert_eq!(PROVIDER.live.load(Ordering::Relaxed), 0);
         c_free(ptr::null_mut());
+
+        // Native and reentrant entrypoints can exchange ownership; neither
+        // introduces another heap or a different allocation header.
+        let pointer = unsafe { malloc(4) }.cast::<u32>();
+        assert!(!pointer.is_null());
+        unsafe { pointer.write(0x1234_5678) };
+        let pointer = unsafe { _realloc_r(ptr::null_mut(), pointer.cast(), 64) }.cast::<u32>();
+        assert!(!pointer.is_null());
+        assert_eq!(unsafe { pointer.read() }, 0x1234_5678);
+        unsafe { _free_r(ptr::null_mut(), pointer.cast()) };
+        let pointer = unsafe { _calloc_r(ptr::null_mut(), 4, 4) }.cast::<u32>();
+        assert!(!pointer.is_null());
+        assert_eq!(unsafe { pointer.read() }, 0);
+        unsafe { free(pointer.cast()) };
+        assert_eq!(PROVIDER.live.load(Ordering::Relaxed), 0);
 
         // A failed reservation at every allocation boundary returns every
         // earlier allocation, before native code can observe any pointer.

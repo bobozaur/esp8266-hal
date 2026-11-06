@@ -6,7 +6,7 @@
 
 use core::ffi::c_void;
 
-use super::{port, queue, semphr, task, timer};
+use super::{port, queue, semphr, task};
 
 const OSI_TIME_BLOCKING: u32 = u32::MAX;
 const OSI_SEND_FRONT: u32 = 0;
@@ -239,35 +239,6 @@ pub unsafe extern "C" fn __wifi_queue_recv(
 #[no_mangle]
 pub unsafe extern "C" fn __wifi_queue_msg_num(handle: *mut c_void) -> u32 {
     unsafe { queue::uxQueueMessagesWaiting(handle.cast_const()) }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn __wifi_timer_create(
-    name: *const u8,
-    period_ticks: u32,
-    auto_reload: bool,
-    argument: *mut c_void,
-    callback: unsafe extern "C" fn(*mut c_void),
-) -> *mut c_void {
-    unsafe {
-        timer::xTimerCreate(
-            name,
-            period_ticks,
-            i32::from(auto_reload),
-            argument,
-            callback,
-        )
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn __wifi_timer_reset(handle: *mut c_void, wait_ticks: u32) -> i32 {
-    unsafe { timer::xTimerReset(handle, wait_ticks) }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn __wifi_timer_stop(handle: *mut c_void, wait_ticks: u32) -> i32 {
-    unsafe { timer::xTimerStop(handle, wait_ticks) }
 }
 
 #[no_mangle]

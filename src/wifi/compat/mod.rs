@@ -17,7 +17,8 @@
 
 #[cfg(target_arch = "xtensa")]
 pub mod critical;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 pub mod entry;
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code, unused_imports))]
 pub mod memory;
@@ -31,7 +32,7 @@ pub mod rx_bridge;
 pub mod semphr;
 #[cfg(target_arch = "xtensa")]
 pub mod task;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 pub mod timer;
 #[cfg(any(target_arch = "xtensa", test))]
 mod wait_list;

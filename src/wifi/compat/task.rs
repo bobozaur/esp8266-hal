@@ -40,8 +40,6 @@ pub(crate) const PD_FALSE: i32 = 0;
 /// FreeRTOS errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY.
 const ERR_NO_MEM: i32 = -1;
 
-/// Thread-local storage slot count (matches `configNUM_THREAD_LOCAL_STORAGE_POINTERS`).
-const TLS_SLOTS: usize = 3;
 const STACK_CANARY_WORD: u32 = 0xA5A5_A5A5;
 const STACK_CANARY_WORDS: usize = 4;
 
@@ -93,15 +91,13 @@ struct TaskControlBlock {
     base_priority: u32,
     /// Tick count at which a timeout-based block expires (0 = no timeout).
     delay_until: u64,
-    /// Thread-local storage pointers.
-    tls: [*mut c_void; TLS_SLOTS],
-    /// Current state. Kept last to avoid padding before the deadline and TLS.
+    /// Current state. Kept last to avoid padding before the deadline.
     state: TaskState,
 }
 
 const _: () = {
     assert!(core::mem::offset_of!(TaskControlBlock, stack_top) == 0);
-    assert!(core::mem::size_of::<TaskControlBlock>() == 40);
+    assert!(core::mem::size_of::<TaskControlBlock>() == 32);
 };
 
 // ---------------------------------------------------------------------------
@@ -114,7 +110,6 @@ const EMPTY: TaskControlBlock = TaskControlBlock {
     priority: 0,
     base_priority: 0,
     delay_until: 0,
-    tls: [core::ptr::null_mut(); TLS_SLOTS],
     state: TaskState::Free,
 };
 
@@ -238,25 +233,6 @@ fn ready_or_running_count_at_priority(priority: u32) -> usize {
         }
 
         count
-    }
-}
-
-#[inline(never)]
-fn top_ready_or_running_priority() -> u32 {
-    unsafe {
-        let mut top = 0u32;
-        let mut idx = 0usize;
-        while idx < MAX_TASKS {
-            if TASKS[idx].state == TaskState::Ready
-                || (idx == CURRENT_TASK && TASKS[idx].state == TaskState::Running)
-            {
-                top = top.max(TASKS[idx].priority);
-            }
-
-            idx += 1;
-        }
-
-        top
     }
 }
 
@@ -442,7 +418,6 @@ pub(crate) unsafe fn allocate_main_task() {
         tcb.base_priority = 1;
         tcb.state = TaskState::Running; // we ARE running right now
         tcb.delay_until = 0;
-        tcb.tls = [core::ptr::null_mut(); TLS_SLOTS];
         TASK_WAIT_KIND[0] = WaitObjectKind::None;
         TASK_WAIT_OBJECT[0] = core::ptr::null_mut();
 
@@ -458,9 +433,8 @@ pub(crate) unsafe fn create_idle_task() -> i32 {
         let mut handle = core::ptr::null_mut();
         let result = create_task(
             idle_task,
-            // Match CONFIG_FREERTOS_IDLE_TASK_STACKSIZE in the pinned SDK.
-            // Native idle sleep/time calls need this budget in addition to
-            // the HAL interrupt-frame delta added by create_task.
+            // Retain the qualified idle budget, plus the HAL interrupt-frame
+            // allowance added by create_task.
             1024,
             core::ptr::null_mut(),
             0, // lowest priority
@@ -570,7 +544,6 @@ pub(crate) unsafe fn create_task(
         PENDING_READY[slot] = false;
         TASK_WAIT_KIND[slot] = WaitObjectKind::None;
         TASK_WAIT_OBJECT[slot] = core::ptr::null_mut();
-        tcb.tls = [core::ptr::null_mut(); TLS_SLOTS];
 
         if !created_task.is_null() {
             *created_task = tcb as *mut TaskControlBlock as *mut c_void;
@@ -864,99 +837,6 @@ pub unsafe extern "C" fn xTaskGetSchedulerState() -> i32 {
             TASK_SUSPENDED
         } else {
             TASK_RUNNING
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FreeRTOS API: thread-local storage
-// ---------------------------------------------------------------------------
-
-/// `pvTaskGetThreadLocalStorageBufferPointer` — get TLS pointer.
-#[no_mangle]
-pub unsafe extern "C" fn pvTaskGetThreadLocalStorageBufferPointer(
-    handle: *mut c_void,
-    index: i32,
-) -> *mut c_void {
-    unsafe {
-        let idx = if handle.is_null() {
-            CURRENT_TASK
-        } else {
-            handle_to_index(handle)
-        };
-        if idx < MAX_TASKS && (index as usize) < TLS_SLOTS {
-            TASKS[idx].tls[index as usize]
-        } else {
-            core::ptr::null_mut()
-        }
-    }
-}
-
-/// `vTaskSetThreadLocalStoragePointer` — set TLS pointer.
-#[no_mangle]
-pub unsafe extern "C" fn vTaskSetThreadLocalStoragePointer(
-    handle: *mut c_void,
-    index: i32,
-    value: *mut c_void,
-) {
-    unsafe {
-        let idx = if handle.is_null() {
-            CURRENT_TASK
-        } else {
-            handle_to_index(handle)
-        };
-        if idx < MAX_TASKS && (index as usize) < TLS_SLOTS {
-            TASKS[idx].tls[index as usize] = value;
-        }
-    }
-}
-
-/// Reads the current task's TLS slot while the caller holds the scheduler
-/// critical section.
-///
-/// # Safety
-///
-/// The caller must hold the scheduler critical section.
-pub(crate) unsafe fn current_task_tls(index: usize) -> *mut c_void {
-    unsafe {
-        if CURRENT_TASK < MAX_TASKS && index < TLS_SLOTS {
-            TASKS[CURRENT_TASK].tls[index]
-        } else {
-            core::ptr::null_mut()
-        }
-    }
-}
-
-/// Writes the current task's TLS slot while the caller holds the scheduler
-/// critical section.
-///
-/// # Safety
-///
-/// The caller must hold the scheduler critical section.
-pub(crate) unsafe fn set_current_task_tls(index: usize, value: *mut c_void) {
-    unsafe {
-        if CURRENT_TASK < MAX_TASKS && index < TLS_SLOTS {
-            TASKS[CURRENT_TASK].tls[index] = value;
-        }
-    }
-}
-
-/// Clears one TLS slot in every task while the caller holds the scheduler
-/// critical section.
-///
-/// # Safety
-///
-/// The caller must hold the scheduler critical section.
-pub(crate) unsafe fn clear_task_tls_slot(index: usize) {
-    if index >= TLS_SLOTS {
-        return;
-    }
-
-    unsafe {
-        let mut task = 0;
-        while task < MAX_TASKS {
-            TASKS[task].tls[index] = core::ptr::null_mut();
-            task += 1;
         }
     }
 }
@@ -1372,60 +1252,6 @@ pub(crate) unsafe fn get_tick_count() -> u64 {
         let ticks = TICK_COUNT;
         critical::vPortExitCritical();
         ticks
-    }
-}
-
-unsafe fn next_task_unblock_time() -> u64 {
-    unsafe {
-        let mut next = u64::MAX;
-
-        for i in 0..MAX_TASKS {
-            if TASKS[i].state == TaskState::Blocked {
-                let deadline = TASKS[i].delay_until;
-                if deadline != 0 && deadline < next {
-                    next = deadline;
-                }
-            }
-        }
-
-        next
-    }
-}
-
-/// SDK-compatible `prvGetExpectedIdleTime()` backing function.
-///
-/// Mirrors the decompiled SDK `tasks.c` logic used by `esp_sleep.c` through
-/// `esp_internal_idle_hook()`:
-/// - return 0 if the current task is above idle priority
-/// - return 0 if the idle ready list has more than one item
-/// - return 0 if the top ready priority is above idle
-/// - otherwise return ticks until the next timed unblock
-///
-/// When no timed unblock is pending, FreeRTOS keeps `xNextTaskUnblockTime` at
-/// `portMAX_DELAY`, so return `u32::MAX` here as the compat analogue.
-#[no_mangle]
-pub unsafe extern "C" fn compat_prvGetExpectedIdleTime() -> u32 {
-    unsafe {
-        const IDLE_PRIORITY: u32 = 0;
-
-        if CURRENT_TASK >= MAX_TASKS || TASKS[CURRENT_TASK].priority > IDLE_PRIORITY {
-            return 0;
-        }
-
-        if ready_or_running_count_at_priority(IDLE_PRIORITY) > 1 {
-            return 0;
-        }
-
-        if top_ready_or_running_priority() != IDLE_PRIORITY {
-            return 0;
-        }
-
-        let next = next_task_unblock_time();
-        if next == u64::MAX {
-            u32::MAX
-        } else {
-            next.saturating_sub(TICK_COUNT).min(u32::MAX as u64) as u32
-        }
     }
 }
 

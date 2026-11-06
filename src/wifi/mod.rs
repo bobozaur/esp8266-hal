@@ -13,7 +13,7 @@ pub(crate) mod compat;
 pub(crate) mod error;
 #[cfg(target_arch = "xtensa")]
 pub mod runtime;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) mod sdk;
 #[cfg(any(test, target_arch = "xtensa"))]
 pub(crate) mod tx_buffer;
