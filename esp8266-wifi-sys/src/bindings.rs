@@ -423,6 +423,9 @@ extern "C" {
     pub fn esp_wifi_get_mac(ifx: wifi_interface_t, mac: *mut u8) -> esp_err_t;
     pub fn esp_wifi_set_promiscuous_rx_cb(cb: wifi_promiscuous_cb_t) -> esp_err_t;
     pub fn esp_wifi_set_promiscuous(en: bool) -> esp_err_t;
+    // Pinned native setters assign capture settings without an error result.
+    pub fn esp_wifi_set_promiscuous_data_len(length: u32);
+    pub fn esp_wifi_set_promiscuous_len_filter(minimum: u32, maximum: u32);
     pub fn esp_wifi_set_promiscuous_filter(filter: *const wifi_promiscuous_filter_t) -> esp_err_t;
     pub fn esp_wifi_set_config(interface: wifi_interface_t, conf: *mut wifi_config_t) -> esp_err_t;
     pub fn esp_wifi_set_promiscuous_ctrl_filter(

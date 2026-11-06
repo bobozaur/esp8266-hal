@@ -10,7 +10,7 @@ use core::fmt::Write;
 use esp8266_hal::timer::TimerExt;
 use esp8266_hal::uart::UART0Serial;
 use esp8266_hal::wifi::{
-    InitConfig, Interface as WifiInterface, SmartConfigCredentials, SmartConfigEvent,
+    InitConfig, Interface as WifiInterface, Runtime, SmartConfigCredentials, SmartConfigEvent,
     SmartConfigStartConfig, SmartConfigTimeout, SmartConfigType, Wifi,
 };
 use panic_halt as _;
@@ -81,7 +81,7 @@ fn main() -> ! {
         session.stop().expect("stop SmartConfig");
         idle();
     }
-    match acknowledge(interfaces.station, &credentials, &mut serial) {
+    match acknowledge(runtime, interfaces.station, &credentials, &mut serial) {
         Ok(()) => writeln!(serial, "ESP-Touch acknowledgement sent\r").unwrap(),
         Err(error) => writeln!(serial, "Acknowledgement failed: {error}\r").unwrap(),
     }
@@ -95,12 +95,12 @@ fn idle() -> ! {
     }
 }
 
-fn now() -> Instant {
-    // SAFETY: callers run after the application's Wi-Fi runtime is initialized.
-    Instant::from_millis(unsafe { esp8266_wifi_sys::esp_timer_get_time() } / 1_000)
+fn now(runtime: &Runtime) -> Instant {
+    Instant::from_micros(runtime.now().as_micros() as i64)
 }
 
 fn acknowledge(
+    runtime: &Runtime,
     link: WifiInterface<'static>,
     credentials: &SmartConfigCredentials,
     serial: &mut UART0Serial,
@@ -111,13 +111,13 @@ fn acknowledge(
     let mut iface = Interface::new(
         Config::new(HardwareAddress::Ethernet(EthernetAddress(mac))),
         &mut device,
-        now(),
+        now(runtime),
     );
     let mut sockets = SocketSet::new(&mut SOCKET_STORAGE.init([SocketStorage::EMPTY; 2])[..]);
     let dhcp = sockets.add(dhcpv4::Socket::new());
     writeln!(serial, "Waiting for DHCP\r").unwrap();
-    let local_ip =
-        wait_for_dhcp(&mut iface, &mut device, &mut sockets, dhcp).ok_or("DHCP timed out")?;
+    let local_ip = wait_for_dhcp(runtime, &mut iface, &mut device, &mut sockets, dhcp)
+        .ok_or("DHCP timed out")?;
     writeln!(serial, "IPv4 address: {local_ip}\r").unwrap();
 
     let mut payload = [0; 11];
@@ -143,7 +143,7 @@ fn acknowledge(
 
     // Repeat the UDP acknowledgement because its transport has no delivery ACK.
     for _ in 0..5 {
-        let deadline = now() + Duration::from_secs(5);
+        let deadline = now(runtime) + Duration::from_secs(5);
         loop {
             match sockets
                 .get_mut::<udp::Socket>(udp)
@@ -153,14 +153,14 @@ fn acknowledge(
                 Err(udp::SendError::Unaddressable) => return Err("sender is unreachable"),
                 Err(udp::SendError::BufferFull) => {}
             }
-            iface.poll(now(), &mut device, &mut sockets);
-            if now() >= deadline {
+            iface.poll(now(runtime), &mut device, &mut sockets);
+            if now(runtime) >= deadline {
                 return Err("UDP send timed out");
             }
             esp8266_hal::wifi::delay_ticks(1);
         }
         loop {
-            iface.poll(now(), &mut device, &mut sockets);
+            iface.poll(now(runtime), &mut device, &mut sockets);
             // A dequeued UDP packet can still be waiting for native TX capacity.
             let pending = device
                 .poll_transmit()
@@ -168,7 +168,7 @@ fn acknowledge(
             if sockets.get::<udp::Socket>(udp).send_queue() == 0 && !pending {
                 break;
             }
-            if now() >= deadline {
+            if now(runtime) >= deadline {
                 return Err("UDP flush timed out");
             }
             esp8266_hal::wifi::delay_ticks(1);
@@ -179,14 +179,15 @@ fn acknowledge(
 }
 
 fn wait_for_dhcp(
+    runtime: &Runtime,
     iface: &mut Interface,
     device: &mut WifiDevice<'_>,
     sockets: &mut SocketSet<'static>,
     dhcp: SocketHandle,
 ) -> Option<smoltcp::wire::Ipv4Address> {
-    let deadline = now() + Duration::from_secs(30);
-    while now() < deadline {
-        iface.poll(now(), device, sockets);
+    let deadline = now(runtime) + Duration::from_secs(30);
+    while now(runtime) < deadline {
+        iface.poll(now(runtime), device, sockets);
         if let Some(dhcpv4::Event::Configured(config)) =
             sockets.get_mut::<dhcpv4::Socket>(dhcp).poll()
         {

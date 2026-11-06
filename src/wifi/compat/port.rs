@@ -269,9 +269,6 @@ static mut ISR_TABLE: [IsrEntry; ISR_COUNT] = {
     [EMPTY; ISR_COUNT]
 };
 
-/// Whether we are currently inside an ISR.
-static mut ISR_NESTING: u8 = 0;
-
 // ---------------------------------------------------------------------------
 // Inline asm helpers for Xtensa special registers
 // ---------------------------------------------------------------------------
@@ -315,11 +312,8 @@ unsafe fn set_intset(mask: u32) {
 
 extern "C" {
     fn MacIsrSigPostDefHdl() -> i32;
-    /// Ticks per microsecond (defined in system_api.c, still compiled).
+    /// Ticks per microsecond owned by the Rust CPU-frequency adapter.
     static mut g_esp_ticks_per_us: u32;
-    /// CPU clock frequency in Hz (defined in system_api.c).
-    /// Returns the actual runtime frequency (80MHz or 160MHz).
-    fn xtbsp_clock_freq_hz() -> u32;
 }
 
 // ---------------------------------------------------------------------------
@@ -441,8 +435,13 @@ pub(crate) unsafe fn program_compare(requested: u32) {
 /// reset every tick; this runtime keeps it free-running so ISR work is counted.
 #[no_mangle]
 pub extern "C" fn esp_timer_get_time() -> i64 {
+    monotonic_micros() as i64
+}
+
+/// The runtime clock shared by native deadlines and the safe runtime token.
+pub(crate) fn monotonic_micros() -> u64 {
     critical_section::with(|_| unsafe {
-        (&*core::ptr::addr_of!(CLOCK)).micros(get_ccount(), g_esp_ticks_per_us) as i64
+        (&*core::ptr::addr_of!(CLOCK)).micros(get_ccount(), g_esp_ticks_per_us)
     })
 }
 
@@ -458,7 +457,7 @@ pub(crate) unsafe fn update_cpu_frequency(ticks_per_us: u32) {
             g_esp_ticks_per_us = ticks_per_us;
             _xt_tick_divisor = ticks_per_us * 1_000_000 / TICK_RATE_HZ;
             program_compare(deadline);
-            #[cfg(feature = "embassy")]
+            #[cfg(any(feature = "embassy", feature = "wifi-embassy-net"))]
             crate::wifi::timer_driver::reschedule();
         } else {
             g_esp_ticks_per_us = ticks_per_us;
@@ -492,22 +491,14 @@ pub unsafe fn isr_dispatch() {
                 // infinite re-dispatch of unhandled interrupts.
                 clear_interrupt(bit);
 
-                ISR_NESTING = 1;
                 if let Some(handler) = ISR_TABLE[i].handler {
                     handler(ISR_TABLE[i].arg);
                 } else {
                     crate::interrupt::dispatch_app_interrupts(bit);
                 }
-                ISR_NESTING = 0;
             }
         }
     }
-}
-
-/// `xPortInIsrContext` — returns non-zero if currently in an ISR.
-#[no_mangle]
-pub unsafe extern "C" fn xPortInIsrContext() -> i32 {
-    unsafe { ISR_NESTING as i32 }
 }
 
 /// Enable polling of the WiFi FIQ processor from the tick ISR.
@@ -587,7 +578,7 @@ pub unsafe extern "C" fn xPortSysTickHandle(_p: *mut c_void) {
                 portYIELD_FROM_ISR();
             }
         }
-        #[cfg(feature = "embassy")]
+        #[cfg(any(feature = "embassy", feature = "wifi-embassy-net"))]
         crate::wifi::timer_driver::poll_alarms();
 
         if POLL_WDEV_ON_TICK.load(Ordering::Acquire) {
@@ -602,18 +593,6 @@ pub unsafe extern "C" fn xPortSysTickHandle(_p: *mut c_void) {
 // ---------------------------------------------------------------------------
 // Tick counter helpers
 // ---------------------------------------------------------------------------
-
-/// `esp_clk_cpu_freq` — return current CPU clock frequency.
-#[no_mangle]
-pub unsafe extern "C" fn esp_clk_cpu_freq() -> i32 {
-    unsafe { (_xt_tick_divisor * TICK_RATE_HZ) as i32 }
-}
-
-/// `xPortGetTickRateHz` — return the tick rate.
-#[no_mangle]
-pub unsafe extern "C" fn xPortGetTickRateHz() -> u32 {
-    TICK_RATE_HZ
-}
 
 // ---------------------------------------------------------------------------
 // Scheduler start
@@ -634,7 +613,7 @@ unsafe fn prepare_compat_scheduler() -> Result<(), ()> {
 
         _xt_isr_attach(ETS_SOFT_INUM, SoftIsrHdl, core::ptr::null_mut());
         _xt_isr_attach(ETS_MAX_INUM, xPortSysTickHandle, core::ptr::null_mut());
-        _xt_tick_divisor = xtbsp_clock_freq_hz() / TICK_RATE_HZ;
+        _xt_tick_divisor = g_esp_ticks_per_us * 1_000_000 / TICK_RATE_HZ;
         Ok(())
     }
 }
@@ -681,14 +660,6 @@ pub unsafe extern "C" fn vApplicationStackOverflowHook(
         core::hint::spin_loop();
     }
 }
-
-/// `vApplicationIdleHook` — called from the idle task (placeholder).
-#[no_mangle]
-pub unsafe extern "C" fn vApplicationIdleHook() {}
-
-/// `vApplicationTickHook` — called on each tick (placeholder).
-#[no_mangle]
-pub unsafe extern "C" fn vApplicationTickHook() {}
 
 /// Feed the watchdog and wait for an interrupt from the idle task.
 ///

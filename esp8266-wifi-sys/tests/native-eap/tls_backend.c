@@ -4,7 +4,10 @@
 #include "utils/common.h"
 #include "utils/wpabuf.h"
 #include "tls/tls.h"
+#include "crypto/sha256.h"
+#include "crypto/sha384.h"
 #include "mbedtls/ssl.h"
+#include "mbedtls/ssl_internal.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/asn1.h"
@@ -17,6 +20,7 @@ extern void esp8266_hal_tls_set_input_owner(struct tls_connection *, struct wpab
 static union { long long align; unsigned char data[8192]; } blocks[8];
 static size_t sizes[8];
 static unsigned live[8], live_count, calls, fail_at;
+static int export_handshake;
 static void *allocate(size_t size)
 {
     unsigned i;
@@ -110,7 +114,8 @@ int mbedtls_ssl_conf_own_cert(mbedtls_ssl_config *p, mbedtls_x509_crt *cert, mbe
 { CHECK(0); return -1; }
 int mbedtls_ssl_send_alert_message(mbedtls_ssl_context *p, unsigned char level, unsigned char message)
 { CHECK(0); return -1; }
-int esp8266_hal_ssl_release_input(mbedtls_ssl_context *p) { CHECK(0); return 0; }
+int esp8266_hal_ssl_release_input(mbedtls_ssl_context *p)
+{ CHECK(export_handshake && p->state == MBEDTLS_SSL_CLIENT_CERTIFICATE); return 0; }
 
 static mbedtls_ssl_context *connection_ssl;
 int mbedtls_ssl_setup(mbedtls_ssl_context *ssl, const mbedtls_ssl_config *conf)
@@ -147,7 +152,14 @@ int mbedtls_ssl_read(mbedtls_ssl_context *ssl, unsigned char *out, size_t n)
 int mbedtls_ssl_handshake_step(mbedtls_ssl_context *ssl)
 {
     unsigned char data[64];
-    int n = ssl->f_recv(ssl->p_bio, data, chunk);
+    int n;
+    if (export_handshake) {
+        CHECK(ssl->state == MBEDTLS_SSL_CLIENT_CERTIFICATE);
+        ssl->state = MBEDTLS_SSL_HANDSHAKE_OVER;
+        ssl->handshake = NULL; /* Export must use the adapter's saved randoms. */
+        return 0;
+    }
+    n = ssl->f_recv(ssl->p_bio, data, chunk);
     CHECK(n > 0 && offset + n <= sizeof(bytes));
     CHECK(memcmp(data, bytes + offset, n) == 0);
     offset += n;
@@ -169,8 +181,106 @@ static void check_no_input(void)
     CHECK(connection_ssl->f_recv(connection_ssl->p_bio, &byte, 1) == MBEDTLS_ERR_SSL_WANT_READ);
 }
 
+static u8 export_master[48], export_randoms[64], export_output[64];
+static const char *export_label;
+static unsigned prf_calls, expected_prf;
+static int prf_result;
+static int check_prf(unsigned algorithm, const u8 *secret, size_t secret_len,
+                     const char *label, const u8 *seed, size_t seed_len,
+                     u8 *out, size_t out_len)
+{
+    CHECK(algorithm == expected_prf);
+    CHECK(secret_len == sizeof(export_master));
+    CHECK(memcmp(secret, export_master, sizeof(export_master)) == 0);
+    CHECK(strcmp(label, export_label) == 0);
+    CHECK(seed_len == sizeof(export_randoms));
+    CHECK(memcmp(seed, export_randoms, sizeof(export_randoms)) == 0);
+    CHECK(out == export_output && out_len == sizeof(export_output));
+    prf_calls++;
+    if (prf_result == 0) memset(out, algorithm, out_len);
+    return prf_result;
+}
+int tls_prf_sha1_md5(const u8 *secret, size_t secret_len, const char *label,
+                    const u8 *seed, size_t seed_len, u8 *out, size_t out_len)
+{ return check_prf(1, secret, secret_len, label, seed, seed_len, out, out_len); }
+int tls_prf_sha256(const u8 *secret, size_t secret_len, const char *label,
+                  const u8 *seed, size_t seed_len, u8 *out, size_t out_len)
+{ return check_prf(2, secret, secret_len, label, seed, seed_len, out, out_len); }
+int tls_prf_sha384(const u8 *secret, size_t secret_len, const char *label,
+                  const u8 *seed, size_t seed_len, u8 *out, size_t out_len)
+{ return check_prf(3, secret, secret_len, label, seed, seed_len, out, out_len); }
+
+static void exporter(void)
+{
+    const struct { int version; mbedtls_md_type_t mac; unsigned prf; } profiles[] = {
+        { MBEDTLS_SSL_MINOR_VERSION_1, MBEDTLS_MD_SHA1, 1 },
+        { MBEDTLS_SSL_MINOR_VERSION_2, MBEDTLS_MD_SHA1, 1 },
+        { MBEDTLS_SSL_MINOR_VERSION_3, MBEDTLS_MD_SHA1, 2 },
+        { MBEDTLS_SSL_MINOR_VERSION_3, MBEDTLS_MD_SHA256, 2 },
+        { MBEDTLS_SSL_MINOR_VERSION_3, MBEDTLS_MD_SHA384, 3 },
+    };
+    const char *labels[] = { "client EAP encryption", "ttls keying material" };
+    mbedtls_ssl_handshake_params handshake;
+    mbedtls_ssl_session session;
+    mbedtls_ssl_transform transform;
+    mbedtls_ssl_ciphersuite_t suite;
+    struct tls_connection *conn = new_connection();
+    struct wpabuf empty, *out;
+    unsigned i, label, error, before;
+    memset(&handshake, 0, sizeof(handshake));
+    memset(&session, 0, sizeof(session));
+    memset(&transform, 0, sizeof(transform));
+    memset(&suite, 0, sizeof(suite));
+    for (i = 0; i < sizeof(export_master); i++) export_master[i] = 0x90 + i;
+    for (i = 0; i < sizeof(export_randoms); i++) export_randoms[i] = i;
+    memcpy(handshake.randbytes, export_randoms, sizeof(export_randoms));
+    memcpy(session.master, export_master, sizeof(export_master));
+    connection_ssl->session = &session;
+    transform.ciphersuite_info = &suite;
+    export_label = labels[0];
+    CHECK(tls_connection_export_key(NULL, conn, export_label,
+          export_output, sizeof(export_output)) < 0);
+    connection_ssl->transform = &transform;
+    CHECK(tls_connection_export_key(NULL, conn, export_label,
+          export_output, sizeof(export_output)) < 0);
+    CHECK(prf_calls == 0);
+
+    connection_ssl->handshake = &handshake;
+    connection_ssl->state = MBEDTLS_SSL_CLIENT_CERTIFICATE;
+    export_handshake = 1;
+    wpabuf_set(&empty, NULL, 0);
+    out = tls_connection_handshake(NULL, conn, &empty, NULL);
+    CHECK(out && wpabuf_len(out) == 0 && tls_connection_established(NULL, conn));
+    wpabuf_free(out);
+    export_handshake = 0;
+    memset(&handshake, 0, sizeof(handshake));
+    before = calls;
+    for (i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++) {
+        connection_ssl->minor_ver = profiles[i].version;
+        suite.mac = profiles[i].mac;
+        expected_prf = profiles[i].prf;
+        for (label = 0; label < sizeof(labels) / sizeof(labels[0]); label++) {
+            export_label = labels[label];
+            for (error = 0; error < 2; error++) {
+                prf_result = error ? -17 : 0;
+                memset(export_output, 0xa5, sizeof(export_output));
+                CHECK(tls_connection_export_key(NULL, conn, export_label,
+                      export_output, sizeof(export_output)) == prf_result);
+                CHECK(export_output[0] == (error ? 0xa5 : expected_prf));
+            }
+        }
+    }
+    CHECK(prf_calls == 20 && calls == before);
+    tls_connection_deinit(NULL, conn);
+    CHECK(live_count == 0);
+}
+
 void fixture_tests(const char *name)
 {
+    if (strcmp(name, "tls-exporter") == 0) {
+        exporter();
+        return;
+    }
     struct tls_connection *conn = new_connection();
     struct wpabuf view, *out, *owned;
     unsigned baseline = live_count, before, mode;

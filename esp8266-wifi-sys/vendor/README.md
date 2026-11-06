@@ -38,17 +38,25 @@ separate from the radio boundary.
 - SDK: <https://github.com/espressif/ESP8266_RTOS_SDK>
 - SDK commit: `da7ce37be424d71874241ca9f17cf8da0e3cdb70`
 - Original driver derivation: `2624d1c959f71b98ff93c4f611f987a9c3d9fc71`
-- Security snapshot checkpoint: `ec403f845a375a2c0771ee6a1790934a797ed34b`
+- Security snapshot base: `ec403f845a375a2c0771ee6a1790934a797ed34b`
 - C toolchain: Xtensa GCC 8.4.0, crosstool-NG `esp-2020r3-49-gd5524c1`
 - Initial ABI declaration generator: rust-bindgen 0.70.1
 
 The SDK binaries and linker scripts are byte-for-byte copies from
 `components/esp8266/{lib,ld}` of that SDK. `libc.a` is the toolchain's unchanged
-newlib archive. `VERSION` records the radio component revisions. The two retained
-security archives are unchanged from the checkpoint above. Their ordered source
-lists, flags and deterministic archive recipe remain available in repository
-history as that commit's `esp8266-wifi-sys/vendor/rebuild.py`; there is no maintained
-SDK rebuild or binding-generation workflow in this crate.
+newlib archive. `VERSION` records the radio component revisions. The mbedTLS
+archive is unchanged from the security base above. The WPA archive preserves
+that base's ordered members, with only `048-tls_mbedtls.o` and `060-esp_wpa2.o`
+recompiled from the current canonical sources to correct TLS 1.2 EAP key export
+and response-cache validity. Every other member remains byte-identical.
+
+The base's ordered source lists, flags and deterministic archive recipe remain
+available in repository history as that commit's
+`esp8266-wifi-sys/vendor/rebuild.py`. The two replacements use its pinned compiler,
+`SDK_INCLUDES`, `WPA_DEFINES`, canonical-first includes, path-prefix mappings and
+`-Os -ffunction-sections -fdata-sections -mlongcalls -w` flags. Deterministic
+`ar rDs` replaces just those members in place. There is no maintained SDK rebuild
+or binding-generation workflow in this crate.
 
 `patched-sources/` preserves the canonical modified security translation units,
 their original notices and the configuration used for these exact snapshots.
@@ -105,6 +113,13 @@ certificate and key allocations are released after their last uses. Parsing
 consumes every DER certificate and rejects trailing malformed bytes and partially
 invalid PEM bundles. Fatal TLS errors remain failures even without output; a
 nonfatal empty response still requests an ACK.
+
+EAP key export uses the negotiated TLS PRF: MD5/SHA1 for TLS1.0/1.1, SHA384 for
+TLS1.2 SHA384 suites, and SHA256 for other TLS1.2 suites, including CBC-SHA.
+It borrows the saved client/server randoms in that order without another copy.
+An EAP identifier denotes a retransmission only while its response remains
+cached. New requests release the old response before processing, so ignored
+requests and allocation failures cannot replay an earlier response.
 
 Enterprise receive processing uses its dedicated worker with a 4,096-byte stack
 request plus the Rust runtime's context storage. Packet size or memory pressure

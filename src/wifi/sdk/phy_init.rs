@@ -1,9 +1,9 @@
 //! PHY initialization and RF calibration.
 //!
-//! Replaces `sdk_overrides/phy_init.c`. Manages the PHY/RF init sequence,
-//! calibration data persistence via NVS. The HAL reset path owns PLL setup.
+//! The pinned native radio attaches once per boot. Calibration uses temporary
+//! workspace; only its live DC table survives. The HAL reset path owns PLL setup.
 
-use core::{ffi::c_void, ptr};
+use core::ptr;
 use esp8266_wifi_sys as sys;
 use portable_atomic::{AtomicI32, Ordering};
 
@@ -82,19 +82,9 @@ extern "C" {
     fn write_data_to_rtc(data: *const u8);
     fn uart_tx_wait_idle(uart_no: u8);
 
-    fn nvs_open(name: *const u8, mode: u32, handle: *mut u32) -> i32;
-    fn nvs_close(handle: u32);
-    fn nvs_get_blob(handle: u32, key: *const u8, out: *mut c_void, len: *mut usize) -> i32;
-    fn nvs_set_blob(handle: u32, key: *const u8, data: *const c_void, len: usize) -> i32;
-    fn nvs_commit(handle: u32) -> i32;
-
     // Blob-internal pointer to the RX gain DC table
     static mut phy_rx_gain_dc_table: *mut u32;
 }
-
-// NVS constants
-const NVS_READONLY: u32 = 0;
-const NVS_READWRITE: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // Calibration data
@@ -147,13 +137,7 @@ unsafe fn reg_read(addr: u32) -> u32 {
 /// 3. Flushes UARTs (clock change ahead)
 /// 4. Calls `register_chipv6_phy` (the main blob init)
 /// 5. Reads back calibration results
-#[no_mangle]
-pub unsafe extern "C" fn esp_phy_rf_init(
-    init_data: *const u8, // esp_phy_init_data_t* (128 bytes of params)
-    _mode: u32,           // esp_phy_calibration_mode_t
-    cal_data: *mut u8,    // esp_phy_calibration_data_t*
-    _module: u32,         // phy_rf_module_t
-) -> i32 {
+unsafe fn initialize_phy(cal_data: *mut u8) -> i32 {
     unsafe {
         // Build 256-byte buffer: [128 init_data | 128 cal_data]
         if WORKSPACE.is_null() {
@@ -161,7 +145,7 @@ pub unsafe extern "C" fn esp_phy_rf_init(
         }
         let local_init_data = WORKSPACE.add(CALIBRATION_BYTES);
 
-        core::ptr::copy_nonoverlapping(init_data, local_init_data, 128);
+        core::ptr::copy_nonoverlapping(PHY_INIT_DATA.as_ptr(), local_init_data, 128);
         // cal_data starts at offset 0 in esp_phy_calibration_data_t.rf_cal_data
         core::ptr::copy_nonoverlapping(cal_data, local_init_data.add(128), 128);
 
@@ -202,199 +186,17 @@ pub unsafe extern "C" fn esp_phy_rf_init(
     }
 }
 
-/// PHY RF deinit (no-op).
-#[no_mangle]
-pub unsafe extern "C" fn esp_phy_rf_deinit(_module: u32) -> i32 {
-    sys::ESP_OK
-}
-
-// ---------------------------------------------------------------------------
-// PHY init data accessors
-// ---------------------------------------------------------------------------
-
-/// Return a pointer to the built-in PHY init data.
-#[no_mangle]
-pub unsafe extern "C" fn esp_phy_get_init_data() -> *const u8 {
-    PHY_INIT_DATA.as_ptr()
-}
-
-/// Release PHY init data (no-op for built-in data).
-#[no_mangle]
-pub unsafe extern "C" fn esp_phy_release_init_data(_init_data: *const u8) {}
-
-// ---------------------------------------------------------------------------
-// NVS calibration data
-// ---------------------------------------------------------------------------
-
-const PHY_NAMESPACE: &[u8] = b"phy\0";
-const PHY_CAL_DATA_KEY: &[u8] = b"cal_data\0";
-const PHY_RX_GAIN_DC_TABLE_KEY: &[u8] = b"dc_table\0";
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_phy_load_cal_data_from_nvs(out_cal_data: *mut u8) -> i32 {
-    unsafe {
-        let mut handle: u32 = 0;
-        let err = nvs_open(PHY_NAMESPACE.as_ptr(), NVS_READONLY, &mut handle);
-        if err != sys::ESP_OK {
-            return err;
-        }
-
-        // rf_cal_data is 128 bytes at offset 0
-        let mut length = 128usize;
-        let err = nvs_get_blob(
-            handle,
-            PHY_CAL_DATA_KEY.as_ptr(),
-            out_cal_data as *mut c_void,
-            &mut length,
-        );
-        if err != sys::ESP_OK || length != 128 {
-            nvs_close(handle);
-            return if err != sys::ESP_OK {
-                err
-            } else {
-                sys::ESP_ERR_INVALID_SIZE
-            };
-        }
-
-        // rx_gain_dc_table is 500 bytes (125 × u32) at offset 128
-        let mut length = 500usize;
-        let err = nvs_get_blob(
-            handle,
-            PHY_RX_GAIN_DC_TABLE_KEY.as_ptr(),
-            out_cal_data.add(128) as *mut c_void,
-            &mut length,
-        );
-        nvs_close(handle);
-        if err != sys::ESP_OK || length != 500 {
-            return if err != sys::ESP_OK {
-                err
-            } else {
-                sys::ESP_ERR_INVALID_SIZE
-            };
-        }
-
-        sys::ESP_OK
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_phy_store_cal_data_to_nvs(cal_data: *const u8) -> i32 {
-    unsafe {
-        let mut handle: u32 = 0;
-        let err = nvs_open(PHY_NAMESPACE.as_ptr(), NVS_READWRITE, &mut handle);
-        if err != sys::ESP_OK {
-            return err;
-        }
-
-        let err = nvs_set_blob(
-            handle,
-            PHY_CAL_DATA_KEY.as_ptr(),
-            cal_data as *const c_void,
-            128,
-        );
-        if err != sys::ESP_OK {
-            nvs_close(handle);
-            return err;
-        }
-
-        let err = nvs_set_blob(
-            handle,
-            PHY_RX_GAIN_DC_TABLE_KEY.as_ptr(),
-            cal_data.add(128) as *const c_void,
-            500,
-        );
-        if err != sys::ESP_OK {
-            nvs_close(handle);
-            return err;
-        }
-
-        let err = nvs_commit(handle);
-        nvs_close(handle);
-        err
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Main PHY load + init entry point
-// ---------------------------------------------------------------------------
-
-/// Load calibration data from NVS and initialize the PHY.
-///
-/// This is called during WiFi startup. If NVS calibration data is available
-/// and valid, a partial calibration is done (faster). Otherwise, full
-/// calibration is performed.
+/// Initialize the PHY on the native radio's permanent first-attach path.
+/// There is no persisted calibration store; the reserved workspace starts zeroed.
 #[no_mangle]
 pub unsafe extern "C" fn esp_phy_load_cal_and_init(_module: u32) {
     unsafe {
-        let cal_data = WORKSPACE;
-        if cal_data.is_null() {
-            INIT_RESULT.store(sys::ESP_ERR_INVALID_STATE, Ordering::Release);
-            return;
-        }
-        let init_data = esp_phy_get_init_data();
-
-        let mut mode: u32 = 0;
-        let err = esp_phy_load_cal_data_from_nvs(cal_data);
-        if err != sys::ESP_OK {
-            mode = 2;
-        }
-
-        let result = esp_phy_rf_init(init_data, mode, cal_data, _module);
+        let result = initialize_phy(WORKSPACE);
         INIT_RESULT.store(result, Ordering::Release);
-        if result != sys::ESP_OK {
-            return;
-        }
-
-        // Store calibration data back to NVS if we did a full cal
-        if mode == 2 || err != sys::ESP_OK {
-            let _ = esp_phy_store_cal_data_to_nvs(cal_data);
-        }
-
-        esp_phy_release_init_data(init_data);
-        // The PHY retained only the persistent DC table. Reclaim both temporary
-        // buffers before native initialization creates its larger runtime tasks.
-        release_workspace();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// VDD33 and TX power
-// ---------------------------------------------------------------------------
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_wifi_get_vdd33() -> u16 {
-    extern "C" {
-        fn phy_get_vdd33() -> u16;
-    }
-    unsafe {
-        // byte 107 of init data must be 0xFF for VDD33 measurement
-        if PHY_INIT_DATA[107] != 0xFF {
-            return 0xFFFF;
-        }
-        let ret = phy_get_vdd33();
-        if ret != 0xFFFF {
-            ret * 12 / 11
-        } else {
-            ret
+        if result == sys::ESP_OK {
+            // The PHY retained only the permanent DC table. Release temporary
+            // buffers before native initialization creates its runtime tasks.
+            release_workspace();
         }
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_wifi_set_max_tx_power_via_vdd33(vdd33: u16) {
-    extern "C" {
-        fn phy_vdd33_set_tpw(vdd33: u16);
-    }
-    unsafe { phy_vdd33_set_tpw(vdd33) }
-}
-
-/// `phy_printf` stub — the blob calls this for PHY debug output.
-///
-/// The real signature is `int phy_printf(const char *fmt, ...)` (C-variadic).
-/// On Xtensa call0 ABI, extra arguments are simply ignored by the callee,
-/// so a non-variadic `extern "C" fn` with the same symbol name is safe as
-/// a no-op stub. The caller pushes args onto the stack; we never read them.
-#[no_mangle]
-pub unsafe extern "C" fn phy_printf() -> i32 {
-    0
 }

@@ -1,4 +1,4 @@
-//! System API: MAC address management, chip info, CPU frequency.
+//! Native MAC-address and CPU-frequency services.
 //!
 //! Replaces `sdk_overrides/system_api.c`. These functions are called by
 //! both Rust code (via FFI) and the WiFi blob libraries (by symbol name).
@@ -27,8 +27,6 @@ const CPU_CLK_FREQ: u32 = 80_000_000;
 // ---------------------------------------------------------------------------
 // Globals
 // ---------------------------------------------------------------------------
-
-static mut BASE_MAC_ADDR: [u8; 6] = [0; 6];
 
 /// CPU clock ticks per microsecond. Used by `esp_timer_get_time` and
 /// `ets_delay_us` (ROM functions). Updated by `os_update_cpu_frequency`.
@@ -59,28 +57,6 @@ extern "C" {
 // ---------------------------------------------------------------------------
 // MAC address functions
 // ---------------------------------------------------------------------------
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_base_mac_addr_set(mac: *const u8) -> i32 {
-    unsafe {
-        if mac.is_null() {
-            return sys::ESP_ERR_INVALID_ARG;
-        }
-        core::ptr::copy_nonoverlapping(mac, BASE_MAC_ADDR.as_mut_ptr(), 6);
-        sys::ESP_OK
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_base_mac_addr_get(mac: *mut u8) -> i32 {
-    unsafe {
-        if BASE_MAC_ADDR.iter().all(|&b| b == 0) {
-            return 0x1102; // ESP_ERR_INVALID_MAC
-        }
-        core::ptr::copy_nonoverlapping(BASE_MAC_ADDR.as_ptr(), mac, 6);
-        sys::ESP_OK
-    }
-}
 
 /// Read the default MAC address from EFUSE registers.
 ///
@@ -195,36 +171,6 @@ pub unsafe extern "C" fn esp_read_mac(mac: *mut u8, mac_type: u32) -> i32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Chip info and system utilities
-// ---------------------------------------------------------------------------
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_get_idf_version() -> *const u8 {
-    b"v3.4-dirty\0".as_ptr()
-}
-
-/// esp_chip_info_t equivalent (the SDK struct may not be in bindgen output).
-#[repr(C)]
-pub(crate) struct ChipInfo {
-    model: u32,
-    features: u32,
-    cores: u8,
-    revision: u8,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_chip_info(out_info: *mut ChipInfo) {
-    unsafe {
-        let info = &mut *out_info;
-        core::ptr::write_bytes(out_info as *mut u8, 0, core::mem::size_of::<ChipInfo>());
-        info.model = 1; // CHIP_ESP8266
-        info.revision = 1;
-        info.cores = 1;
-        info.features = 1; // CHIP_FEATURE_WIFI_BGN
-    }
-}
-
 /// Update CPU frequency tracking. Called when the DPORT double-clock bit changes.
 ///
 /// Updates `g_esp_ticks_per_us` and `_xt_tick_divisor` to match the actual
@@ -243,23 +189,4 @@ pub unsafe extern "C" fn os_update_cpu_frequency(_ticks_per_us: u32) {
 #[no_mangle]
 pub unsafe extern "C" fn ets_update_cpu_frequency(ticks_per_us: u32) {
     unsafe { os_update_cpu_frequency(ticks_per_us) }
-}
-
-// ---------------------------------------------------------------------------
-// Old sysconf addr (ROM compatibility)
-// ---------------------------------------------------------------------------
-
-extern "C" {
-    static rtc_sys_info: RtcSysInfoC;
-}
-
-#[repr(C)]
-pub struct RtcSysInfoC {
-    pub old_sysconf_addr: u32,
-    // ... other fields we don't need
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn esp_get_old_sysconf_addr() -> u32 {
-    unsafe { rtc_sys_info.old_sysconf_addr }
 }

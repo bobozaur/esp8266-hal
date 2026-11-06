@@ -146,14 +146,14 @@ mod tests {
 
 /// Alarm ownership is independent of IRQ programming. Taking a callback clears
 /// the deadline before the callback can re-arm its slot.
-#[cfg(any(feature = "embassy", test))]
+#[cfg(any(feature = "embassy", feature = "wifi-embassy-net", test))]
 pub(crate) struct Alarm {
     pub(crate) at: u64,
     pub(crate) callback: fn(*mut ()),
     pub(crate) ctx: *mut (),
 }
 
-#[cfg(any(feature = "embassy", test))]
+#[cfg(any(feature = "embassy", feature = "wifi-embassy-net", test))]
 impl Alarm {
     pub(crate) const fn new(callback: fn(*mut ())) -> Self {
         Self {

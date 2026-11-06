@@ -28,7 +28,10 @@ pub mod executor;
 pub(crate) mod runtime_clock;
 #[cfg(any(test, target_arch = "xtensa"))]
 pub(crate) mod sdk_state;
-#[cfg(all(feature = "embassy", target_arch = "xtensa"))]
+#[cfg(all(
+    any(feature = "embassy", feature = "wifi-embassy-net"),
+    target_arch = "xtensa"
+))]
 pub(crate) mod timer_driver;
 
 #[cfg(all(feature = "wifi-smoltcp", any(target_arch = "xtensa", test)))]

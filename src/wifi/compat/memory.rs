@@ -213,6 +213,16 @@ unsafe fn init_allocation_site(
 
 const HEADER_SIZE: usize = core::mem::size_of::<u32>();
 
+/// Return the usable size recorded by this C allocation boundary.
+///
+/// # Safety
+/// `pointer` must be the exact, non-null base of a live allocation returned by
+/// this module's C allocation functions. Its owner must keep it alive.
+pub(crate) unsafe fn allocation_size(pointer: *const c_void) -> usize {
+    // SAFETY: the live allocation's immutable header precedes its user bytes.
+    unsafe { pointer.cast::<u8>().sub(HEADER_SIZE).cast::<u32>().read() as usize - HEADER_SIZE }
+}
+
 fn c_malloc(size: usize) -> *mut c_void {
     if size == 0 {
         return ptr::null_mut();
@@ -258,8 +268,8 @@ fn c_realloc(ptr: *mut c_void, new_size: usize) -> *mut c_void {
         c_free(ptr);
         return ptr::null_mut();
     }
-    let old_total = unsafe { ptr.cast::<u8>().sub(HEADER_SIZE).cast::<u32>().read() };
-    let old_usable = old_total as usize - HEADER_SIZE;
+    // SAFETY: realloc's caller owns this exact live C allocation.
+    let old_usable = unsafe { allocation_size(ptr) };
     if new_size <= old_usable {
         return ptr;
     }
@@ -346,27 +356,6 @@ pub unsafe extern "C" fn _free_r(_reent: *mut c_void, pointer: *mut c_void) {
 // FreeRTOS-compatible symbols
 // ---------------------------------------------------------------------------
 
-#[cfg_attr(target_arch = "xtensa", no_mangle)]
-pub unsafe extern "C" fn pvPortMalloc(size: u32) -> *mut c_void {
-    c_malloc(size as usize)
-}
-#[cfg_attr(target_arch = "xtensa", no_mangle)]
-pub unsafe extern "C" fn vPortFree(ptr: *mut c_void) {
-    c_free(ptr)
-}
-#[cfg_attr(target_arch = "xtensa", no_mangle)]
-pub unsafe extern "C" fn pvPortRealloc(ptr: *mut c_void, size: u32) -> *mut c_void {
-    c_realloc(ptr, size as usize)
-}
-#[cfg_attr(target_arch = "xtensa", no_mangle)]
-pub unsafe extern "C" fn pvPortCalloc(count: u32, size: u32) -> *mut c_void {
-    unsafe { calloc(count as usize, size as usize) }
-}
-#[cfg_attr(target_arch = "xtensa", no_mangle)]
-pub unsafe extern "C" fn pvPortZalloc(size: u32) -> *mut c_void {
-    unsafe { zalloc(size as usize) }
-}
-
 // ---------------------------------------------------------------------------
 // heap_caps_* symbols (SDK C code)
 // ---------------------------------------------------------------------------
@@ -384,17 +373,6 @@ pub unsafe extern "C" fn _heap_caps_malloc(
 #[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn _heap_caps_free(ptr: *mut c_void, _file: *const u8, _line: usize) {
     c_free(ptr)
-}
-
-#[cfg_attr(target_arch = "xtensa", no_mangle)]
-pub unsafe extern "C" fn _heap_caps_calloc(
-    count: usize,
-    size: usize,
-    _caps: u32,
-    _file: *const u8,
-    _line: usize,
-) -> *mut c_void {
-    unsafe { calloc(count, size) }
 }
 
 #[cfg_attr(target_arch = "xtensa", no_mangle)]
@@ -420,9 +398,6 @@ pub unsafe extern "C" fn _heap_caps_realloc(
 }
 
 #[cfg_attr(target_arch = "xtensa", no_mangle)]
-pub unsafe extern "C" fn heap_caps_init() {}
-
-#[cfg_attr(target_arch = "xtensa", no_mangle)]
 pub unsafe extern "C" fn heap_caps_get_dram_free_size() -> u32 {
     total_free() as u32
 }
@@ -433,12 +408,13 @@ pub unsafe extern "C" fn esp_get_free_heap_size() -> u32 {
 }
 
 #[cfg(all(test, not(target_arch = "xtensa")))]
-mod tests {
+pub(crate) mod tests {
     extern crate std;
 
     use core::alloc::{GlobalAlloc, Layout};
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::alloc::System;
+    use std::sync::{Mutex, MutexGuard, Once};
 
     use super::*;
 
@@ -489,6 +465,15 @@ mod tests {
         budget: AtomicUsize::new(usize::MAX),
     };
 
+    /// Serialize tests that use the native allocator's permanent registry.
+    pub(crate) fn allocator_guard() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        static INSTALL: Once = Once::new();
+        let guard = LOCK.lock().unwrap();
+        INSTALL.call_once(|| unsafe { install(&PROVIDER) });
+        guard
+    }
+
     #[test]
     fn native_buffer_dimensions_match_pinned_sdk_layout_and_reinit_lifetime() {
         let mut layout = InitBufferLayout {
@@ -515,8 +500,7 @@ mod tests {
 
     #[test]
     fn c_abi_preserves_allocation_on_realloc_failure_and_releases_its_layout() {
-        // One test owns installation; no other host path uses this SDK registry.
-        unsafe { install(&PROVIDER) };
+        let _guard = allocator_guard();
         assert!(c_malloc(0).is_null());
         assert!(c_malloc(usize::MAX).is_null());
         assert!(unsafe { calloc(usize::MAX, 2) }.is_null());

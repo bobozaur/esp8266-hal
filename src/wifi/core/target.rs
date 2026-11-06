@@ -1,8 +1,4 @@
-#[cfg(any(
-    feature = "wifi-promiscuous",
-    feature = "wifi-wps",
-    feature = "wifi-smartconfig"
-))]
+#[cfg(feature = "wifi-promiscuous")]
 use portable_atomic::AtomicU32;
 use portable_atomic::{AtomicBool, Ordering};
 
@@ -23,10 +19,7 @@ use super::{
 #[cfg(feature = "wifi-esp-now")]
 use super::{EspNowPeerConfig, EspNowRxFrame, EspNowSendStatus};
 #[cfg(feature = "wifi-promiscuous")]
-use super::{
-    PromiscuousControlFilter, PromiscuousFilter, PromiscuousFrameInfo, PromiscuousPacketType,
-    PromiscuousRxFrame,
-};
+use super::{PromiscuousControlFilter, PromiscuousFilter};
 #[cfg(feature = "wifi-smartconfig")]
 use super::{SmartConfigStartConfig, SmartConfigTimeout, SmartConfigType};
 #[cfg(feature = "wifi-enterprise")]
@@ -845,6 +838,7 @@ impl Sdk {
     pub(crate) fn enable_promiscuous(
         &mut self,
         filter: PromiscuousFilter,
+        control_filter: PromiscuousControlFilter,
     ) -> Result<(), DriverError> {
         let raw_filter = esp8266_wifi_sys::wifi_promiscuous_filter_t {
             filter_mask: map_promiscuous_filter(filter),
@@ -854,7 +848,18 @@ impl Sdk {
             esp8266_wifi_sys::esp_wifi_set_promiscuous_filter(&raw_filter)
         })
         .map_err(map_esp_driver_error)?;
+        // Native subtype settings survive capture stop, including between sessions.
+        self.set_promiscuous_control_filter(control_filter)?;
         PROMISCUOUS_FILTER_BITS.store(0, Ordering::Release);
+        // SmartConfig narrows these global settings and leaves them in place.
+        // Restore full capture for new packets; queued packets keep their own
+        // allocation bounds in promiscuous_frame.
+        unsafe {
+            esp8266_wifi_sys::esp_wifi_set_promiscuous_data_len(
+                PROMISCUOUS_MAX_PAYLOAD_PREFIX as u32,
+            );
+            esp8266_wifi_sys::esp_wifi_set_promiscuous_len_filter(0, 1500);
+        }
 
         crate::wifi::compat::port::set_wdev_tick_poll_enabled(true);
         for _ in 0..4 {
@@ -883,7 +888,6 @@ impl Sdk {
         }
 
         PROMISCUOUS_FILTER_BITS.store(filter.bits() as u32, Ordering::Release);
-        self.promiscuous_enabled = true;
         Ok(())
     }
 
@@ -1270,49 +1274,21 @@ unsafe extern "C" fn promiscuous_callback(
         return;
     };
 
-    let packet = unsafe { &*(buffer as *const esp8266_wifi_sys::wifi_promiscuous_pkt_t) };
     let packet_type = map_promiscuous_packet_type(packet_type);
-    let original_len = if packet.rx_ctrl.sig_mode() != 0 {
-        packet.rx_ctrl.ht_length() as usize
-    } else {
-        packet.rx_ctrl.legacy_length() as usize
-    };
-    let payload_len = match packet_type {
-        PromiscuousPacketType::Misc => 0,
-        PromiscuousPacketType::Management
-        | PromiscuousPacketType::Control
-        | PromiscuousPacketType::Data => original_len.min(PROMISCUOUS_MAX_PAYLOAD_PREFIX),
-    };
-
-    let payload = if payload_len == 0 {
-        &[]
-    } else {
-        unsafe { core::slice::from_raw_parts(packet.payload.as_ptr(), payload_len) }
-    };
     let active_filter = PromiscuousFilter::from_bits_truncate(
         PROMISCUOUS_FILTER_BITS.load(Ordering::Acquire) as u8,
     );
     if active_filter.is_empty() || !active_filter.contains(packet_type) {
         return;
     }
-    let raw_channel = packet.rx_ctrl.channel();
-    let channel = if (1..=14).contains(&raw_channel) {
-        raw_channel
-    } else {
-        PROMISCUOUS_CHANNEL.load(Ordering::Acquire) as u8
-    };
-    if !(1..=14).contains(&channel) {
-        return;
-    }
-
-    let info = PromiscuousFrameInfo {
-        rssi: packet.rx_ctrl.rssi(),
-        channel,
-        packet_type,
-        original_len: original_len.min(u16::MAX as usize) as u16,
-    };
-
-    if let Ok(frame) = PromiscuousRxFrame::new(info, payload) {
+    // SAFETY: the pinned PP dispatcher retains the allocation until we return.
+    if let Some(frame) = unsafe {
+        promiscuous_frame(
+            buffer.cast(),
+            packet_type,
+            PROMISCUOUS_CHANNEL.load(Ordering::Acquire) as u8,
+        )
+    } {
         let _ = resources.enqueue_promiscuous_rx(frame);
     }
 }

@@ -10,9 +10,11 @@ import tempfile
 from pathlib import Path
 
 
-CASES = ("short", "cached", "distinct", "fragments", "empty-output",
+CASES = ("short", "cached", "distinct", "cache-identifier", "cache-failure",
+         "fragments", "empty-output",
          "lifecycle-init", "lifecycle-queue", "lifecycle-rx", "lifecycle-suspended",
-         "lifecycle-active", "lifecycle-credentials", "tls-backend")
+         "lifecycle-active", "lifecycle-credentials", "tls-backend", "tls-exporter")
+TLS_CASES = ("tls-backend", "tls-exporter")
 
 
 def run_tests(args, output, shared):
@@ -32,7 +34,7 @@ def run_tests(args, output, shared):
     subprocess.run([args.cc, "-O1", "-fno-pie", "-Wall", "-c", str(here / "host.c"),
                     "-o", str(host)], check=True)
     groups = {}
-    if any(case != "tls-backend" for case in selected):
+    if any(case not in TLS_CASES for case in selected):
         groups["native-eap"] = [
             args.request_source or canonical / "esp_wpa2_patched.c",
             args.tls_source or canonical / "eap_tls_common_patched.c",
@@ -41,7 +43,7 @@ def run_tests(args, output, shared):
             args.sdk / "components/wpa_supplicant/src/eap_peer/eap_common.c",
             here / "fixture.c",
         ]
-    if "tls-backend" in selected:
+    if any(case in TLS_CASES for case in selected):
         groups["native-tls"] = [
             args.backend_source or canonical / "tls_mbedtls_patched.c",
             args.sdk / "components/wpa_supplicant/src/utils/wpabuf.c",
@@ -57,7 +59,7 @@ def run_tests(args, output, shared):
                         *(str(obj) for obj in objects), str(host), "-o", str(output / name)], check=True)
     failures = []
     for case in selected:
-        executable = output / ("native-tls" if case == "tls-backend" else "native-eap")
+        executable = output / ("native-tls" if case in TLS_CASES else "native-eap")
         print(f"native EAP case: {case}", flush=True)
         try:
             subprocess.run([str(executable), case], check=True, timeout=10)

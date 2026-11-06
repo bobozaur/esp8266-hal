@@ -49,6 +49,7 @@ pub(crate) struct Sdk {
     pub(crate) session_claimed: bool,
     pub(crate) commands: usize,
     pub(crate) fail_next: Option<DriverError>,
+    pub(crate) stop_cleanup_error: Option<DriverError>,
     pub(crate) now: u64,
     #[cfg(feature = "wifi-esp-now")]
     pub(crate) esp_now_initialized: bool,
@@ -58,6 +59,8 @@ pub(crate) struct Sdk {
     pub(crate) peer_count_error: Option<DriverError>,
     #[cfg(feature = "wifi-promiscuous")]
     pub(crate) promiscuous_enabled: bool,
+    #[cfg(feature = "wifi-promiscuous")]
+    pub(crate) promiscuous_control_filter: PromiscuousControlFilter,
     #[cfg(feature = "wifi-wps")]
     pub(crate) wps_enabled: bool,
     #[cfg(feature = "wifi-smartconfig")]
@@ -85,6 +88,7 @@ impl Sdk {
             session_claimed: false,
             commands: 0,
             fail_next: None,
+            stop_cleanup_error: None,
             now: 0,
             #[cfg(feature = "wifi-esp-now")]
             esp_now_initialized: false,
@@ -94,6 +98,8 @@ impl Sdk {
             peer_count_error: None,
             #[cfg(feature = "wifi-promiscuous")]
             promiscuous_enabled: false,
+            #[cfg(feature = "wifi-promiscuous")]
+            promiscuous_control_filter: PromiscuousControlFilter::empty(),
             #[cfg(feature = "wifi-wps")]
             wps_enabled: false,
             #[cfg(feature = "wifi-smartconfig")]
@@ -138,6 +144,26 @@ impl Sdk {
         self.command()?;
         self.started = false;
         unsafe { &*self.resources }.reset_runtime();
+        if let Some(error) = self.stop_cleanup_error.take() {
+            return Err(error);
+        }
+        #[cfg(feature = "wifi-esp-now")]
+        {
+            self.esp_now_initialized = false;
+            self.esp_now_peers.clear();
+        }
+        #[cfg(feature = "wifi-promiscuous")]
+        {
+            self.promiscuous_enabled = false;
+        }
+        #[cfg(feature = "wifi-wps")]
+        {
+            self.wps_enabled = false;
+        }
+        #[cfg(feature = "wifi-smartconfig")]
+        {
+            self.smartconfig_active = false;
+        }
         Ok(())
     }
     pub(crate) fn shutdown(&mut self) -> bool {
@@ -261,8 +287,13 @@ impl Sdk {
         self.command()
     }
     #[cfg(feature = "wifi-promiscuous")]
-    pub(crate) fn enable_promiscuous(&mut self, _: PromiscuousFilter) -> Result<(), DriverError> {
+    pub(crate) fn enable_promiscuous(
+        &mut self,
+        _: PromiscuousFilter,
+        control_filter: PromiscuousControlFilter,
+    ) -> Result<(), DriverError> {
         self.command()?;
+        self.set_promiscuous_control_filter(control_filter)?;
         self.promiscuous_enabled = true;
         Ok(())
     }
@@ -275,9 +306,11 @@ impl Sdk {
     #[cfg(feature = "wifi-promiscuous")]
     pub(crate) fn set_promiscuous_control_filter(
         &mut self,
-        _: PromiscuousControlFilter,
+        filter: PromiscuousControlFilter,
     ) -> Result<(), DriverError> {
-        self.command()
+        self.command()?;
+        self.promiscuous_control_filter = filter;
+        Ok(())
     }
     #[cfg(feature = "wifi-wps")]
     pub(crate) fn enable_wps(&mut self, _: &WpsConfig<'_>) -> Result<(), DriverError> {

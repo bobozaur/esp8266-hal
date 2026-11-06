@@ -372,7 +372,6 @@ unsafe extern "C" fn idle_task(_param: *mut c_void) {
         }
 
         unsafe {
-            super::port::vApplicationIdleHook();
             super::port::esp_internal_idle_hook();
         }
     }
@@ -576,30 +575,6 @@ pub(crate) fn has_free_task_slot() -> bool {
     }
 }
 
-/// `xTaskGenericCreate` — alias used by some SDK code.
-#[no_mangle]
-pub unsafe extern "C" fn xTaskGenericCreate(
-    task_code: unsafe extern "C" fn(*mut c_void),
-    name: *const c_char,
-    stack_depth: u16,
-    parameters: *mut c_void,
-    priority: u32,
-    created_task: *mut *mut c_void,
-    _stack_buffer: *mut u8,
-    _regions: *const c_void,
-) -> i32 {
-    unsafe {
-        xTaskCreate(
-            task_code,
-            name,
-            stack_depth,
-            parameters,
-            priority,
-            created_task,
-        )
-    }
-}
-
 // ---------------------------------------------------------------------------
 // FreeRTOS API: task deletion
 // ---------------------------------------------------------------------------
@@ -721,95 +696,9 @@ pub unsafe extern "C" fn xTaskResumeAll() -> i32 {
     }
 }
 
-/// `vTaskSuspend` — suspend a specific task (or current if NULL).
-#[no_mangle]
-pub unsafe extern "C" fn vTaskSuspend(handle: *mut c_void) {
-    unsafe {
-        critical::vPortEnterCritical();
-
-        let idx = if handle.is_null() {
-            CURRENT_TASK
-        } else {
-            handle_to_index(handle)
-        };
-
-        if idx < MAX_TASKS {
-            cancel_task_wait_locked(idx);
-            TASKS[idx].state = TaskState::Suspended;
-        }
-
-        let was_current = idx == CURRENT_TASK;
-        critical::vPortExitCritical();
-
-        if was_current {
-            super::port::PendSV(1);
-        }
-    }
-}
-
-/// `vTaskResume` — resume a suspended task.
-#[no_mangle]
-pub unsafe extern "C" fn vTaskResume(handle: *mut c_void) {
-    unsafe {
-        if handle.is_null() {
-            return;
-        }
-        critical::vPortEnterCritical();
-
-        let idx = handle_to_index(handle);
-        if idx < MAX_TASKS
-            && TASKS[idx].state == TaskState::Suspended
-            && TASK_WAIT_KIND[idx] == WaitObjectKind::None
-        {
-            TASKS[idx].state = TaskState::Ready;
-        }
-
-        critical::vPortExitCritical();
-    }
-}
-
 // ---------------------------------------------------------------------------
 // FreeRTOS API: priority
 // ---------------------------------------------------------------------------
-
-/// `uxTaskPriorityGet` — return a task's current priority.
-#[no_mangle]
-pub unsafe extern "C" fn uxTaskPriorityGet(handle: *const c_void) -> u32 {
-    unsafe {
-        let idx = if handle.is_null() {
-            CURRENT_TASK
-        } else {
-            handle_to_index(handle as *mut c_void)
-        };
-        if idx < MAX_TASKS {
-            TASKS[idx].priority
-        } else {
-            0
-        }
-    }
-}
-
-/// `vTaskPrioritySet` — change a task's priority.
-#[no_mangle]
-pub unsafe extern "C" fn vTaskPrioritySet(handle: *mut c_void, new_priority: u32) {
-    unsafe {
-        critical::vPortEnterCritical();
-
-        let idx = if handle.is_null() {
-            CURRENT_TASK
-        } else {
-            handle_to_index(handle)
-        };
-
-        if idx < MAX_TASKS {
-            let prio = new_priority.min(MAX_PRIORITIES - 1);
-            TASKS[idx].priority = prio;
-            TASKS[idx].base_priority = prio;
-        }
-
-        critical::vPortExitCritical();
-    }
-}
 
 // ---------------------------------------------------------------------------
 // FreeRTOS API: queries
@@ -921,16 +810,6 @@ pub unsafe extern "C" fn vTaskStepTick(ticks: u32) {
     unsafe {
         TICK_COUNT += ticks as u64;
     }
-}
-
-/// `xTaskGetTickCount` — return the current tick count (truncated to u32).
-///
-/// The internal counter is u64 but the FreeRTOS API returns u32, so this
-/// wraps every ~497 days at this port's 100 Hz tick rate. C callers must
-/// handle wrap; Rust timeout code uses the internal monotonic u64 counter.
-#[no_mangle]
-pub unsafe extern "C" fn xTaskGetTickCount() -> u32 {
-    unsafe { TICK_COUNT as u32 }
 }
 
 // ---------------------------------------------------------------------------

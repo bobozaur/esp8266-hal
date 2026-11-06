@@ -428,12 +428,16 @@ int eap_sm_process_request(struct eap_sm *sm, struct wpabuf *reqData)
         return ESP_FAIL;
     }
 
-    if (ehdr->identifier == sm->current_identifier) {
+    if (sm->lastRespData && ehdr->identifier == sm->current_identifier) {
         /*Retransmit*/
         resp = sm->lastRespData;
         goto send_resp;
     }
 
+    /* The response pointer establishes cache validity; every identifier is legal.
+     * A failed/ignored new request must not leave the previous response cached. */
+    wpabuf_free(sm->lastRespData);
+    sm->lastRespData = NULL;
     sm->current_identifier = ehdr->identifier;
 
     pos = (u8 *)(ehdr + 1);
@@ -506,15 +510,9 @@ send_resp:
     }
     ret = eap_sm_send_eapol(sm, resp);
     if (ret == ESP_OK) {
-        if (resp != sm->lastRespData) {
-            wpabuf_free(sm->lastRespData);
-            sm->lastRespData = resp;
-        }
+        sm->lastRespData = resp;
     } else {
-        if (resp != sm->lastRespData) {
-            wpabuf_free(resp);
-        }
-        wpabuf_free(sm->lastRespData);
+        wpabuf_free(resp);
         sm->lastRespData = NULL;
 
         if (ret == WPA_ERR_INVALID_BSSID) {
@@ -825,7 +823,6 @@ static int eap_peer_sm_init(void)
     sm = os_zalloc(sizeof(*sm));
     if (!sm)
         goto no_mem;
-    sm->current_identifier = 0xff;
     sm->finish_state = WPA2_ENT_EAP_STATE_NOT_START;
     ret = esp_wifi_get_mac(WIFI_IF_STA, sm->ownaddr);
     if (ret != ESP_OK)

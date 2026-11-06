@@ -48,12 +48,12 @@ smoltcp = { version = "0.12", default-features = false, features = [
   "proto-ipv4",
   "socket-udp",
 ], optional = true }
-embassy-executor = { version = "=0.6.3", default-features = false, features = ["task-arena-size-1024", "integrated-timers"], optional = true }
+embassy-executor = { version = "=0.6.3", default-features = false, features = ["task-arena-size-1024"], optional = true }
 embassy-time = { version = "=0.3.2", default-features = false, features = [
   "tick-hz-1_000_000",
+  "generic-queue",
 ], optional = true }
 embassy-time-driver = { version = "=0.1.0", default-features = false, optional = true }
-embassy-time-queue-driver = { version = "=0.1.0", default-features = false, optional = true }
 critical-section = { version = "1.2", features = ["restore-state-u64"] }
 embassy-net-driver-channel = { version = "=0.3.0", optional = true }
 embassy-futures = { version = "=0.1.1", optional = true }
@@ -78,6 +78,9 @@ embassy-net = { version = "=0.5.0", default-features = false, features = [
 ] }
 embedded-io-async = "0.6"
 embassy-futures = "0.1"
+# The examples have at most three timed tasks. Applications select their own
+# queue capacity through embassy-time without changing the HAL's features.
+embassy-time = { version = "=0.3.2", default-features = false, features = ["generic-queue-8"] }
 smoltcp = { version = "0.12", default-features = false, features = [
   "medium-ethernet",
   "proto-ipv4",
@@ -88,6 +91,7 @@ smoltcp = { version = "0.12", default-features = false, features = [
 
 [target.'cfg(not(target_arch = "xtensa"))'.dev-dependencies]
 proptest = { version = "=1.6.0", default-features = false, features = ["std"] }
+embassy-time = { version = "=0.3.2", default-features = false, features = ["mock-driver"] }
 
 [target.'cfg(target_arch = "xtensa")'.dev-dependencies]
 portable-atomic = { version = "1", default-features = false, features = ["unsafe-assume-single-core"] }
@@ -106,15 +110,15 @@ name = "uart_interrupt"
 
 [[example]]
 name = "tcp_client"
-required-features = ["wifi-embassy-net"]
+required-features = ["wifi-embassy-net", "embassy"]
 
 [[example]]
 name = "tcp_server"
-required-features = ["wifi-embassy-net"]
+required-features = ["wifi-embassy-net", "embassy"]
 
 [[example]]
 name = "sta_static_ip"
-required-features = ["wifi-embassy-net"]
+required-features = ["wifi-embassy-net", "embassy"]
 
 [[example]]
 name = "wifi_core_connect"
@@ -161,10 +165,6 @@ name = "wifi_core_config"
 required-features = ["wifi"]
 
 [[test]]
-name = "wifi_core_scan"
-required-features = ["wifi"]
-
-[[test]]
 name = "wifi_core_provisioning"
 required-features = ["wifi-smartconfig"]
 
@@ -185,13 +185,14 @@ embassy = [
   "dep:embassy-executor",
   "dep:embassy-time",
   "dep:embassy-time-driver",
-  "dep:embassy-time-queue-driver",
 ]
 wifi-smoltcp = ["wifi", "dep:smoltcp"]
 wifi-embassy-net = [
-  "embassy",
+  "wifi",
   "dep:embassy-net-driver-channel",
   "dep:embassy-futures",
+  "dep:embassy-time",
+  "dep:embassy-time-driver",
 ]
 wifi-smartconfig = ["wifi", "esp8266-wifi-sys/smartconfig"]
 wifi-esp-now = ["wifi", "esp8266-wifi-sys/esp-now"]

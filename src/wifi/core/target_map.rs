@@ -1,14 +1,19 @@
-#[cfg(feature = "wifi-promiscuous")]
-use super::PromiscuousFilter;
+#[cfg(all(feature = "wifi-promiscuous", target_arch = "xtensa"))]
+use super::PromiscuousControlFilter;
 #[cfg(all(feature = "wifi-smartconfig", target_arch = "xtensa"))]
 use super::SmartConfigType;
 #[cfg(all(feature = "wifi-esp-now", target_arch = "xtensa"))]
 use super::{feature::EspNowInterface, EspNowPeerConfig};
+#[cfg(feature = "wifi-promiscuous")]
+use super::{
+    feature::PROMISCUOUS_MAX_PAYLOAD_PREFIX, PromiscuousFilter, PromiscuousFrameInfo,
+    PromiscuousPacketType, PromiscuousRxFrame,
+};
 #[cfg(target_arch = "xtensa")]
-use super::{AccessPointConfig, ApCredential, RawMode, ScanOptions, ScanType};
-use super::{Channel, ClientConfig, DriverError, InitConfig, StationPowerSave};
-#[cfg(all(feature = "wifi-promiscuous", target_arch = "xtensa"))]
-use super::{PromiscuousControlFilter, PromiscuousPacketType};
+use super::{AccessPointConfig, ApCredential, RawMode};
+use super::{
+    Channel, ClientConfig, DriverError, InitConfig, ScanOptions, ScanType, StationPowerSave,
+};
 #[cfg(all(feature = "wifi-wps", target_arch = "xtensa"))]
 use super::{WpsConfig, WpsMode};
 
@@ -28,6 +33,77 @@ pub(super) fn map_internal_tx_result(result: i32) -> Result<(), DriverError> {
         esp8266_wifi_sys::ESP_ERR_NO_MEM => Err(DriverError::OutOfMemory),
         code => Err(DriverError::Sdk(code)),
     }
+}
+
+/// Copy the initialized prefix of a native PP capture into an owned frame.
+///
+/// # Safety
+/// `packet` must be the live callback pointer from the pinned SDK's
+/// `ppProcessRxPktHdr`: eight bytes into an allocation from our C allocator,
+/// followed by the 12-byte RX control record and the initialized capture prefix.
+/// The allocation must remain live and unmodified throughout this call.
+#[cfg(feature = "wifi-promiscuous")]
+pub(super) unsafe fn promiscuous_frame(
+    packet: *const esp8266_wifi_sys::wifi_promiscuous_pkt_t,
+    packet_type: PromiscuousPacketType,
+    fallback_channel: u8,
+) -> Option<PromiscuousRxFrame> {
+    // SAFETY: every PP capture producer initializes the RX control record.
+    let rx_ctrl = unsafe { core::ptr::addr_of!((*packet).rx_ctrl).read() };
+    let original_len = if rx_ctrl.sig_mode() != 0 {
+        rx_ctrl.ht_length()
+    } else {
+        rx_ctrl.legacy_length()
+    };
+    let channel = if (1..=14).contains(&rx_ctrl.channel()) {
+        rx_ctrl.channel()
+    } else {
+        fallback_channel
+    };
+    if !(1..=14).contains(&channel) {
+        return None;
+    }
+
+    let payload_len = if packet_type == PromiscuousPacketType::Misc {
+        0
+    } else {
+        const PP_ENVELOPE_SIZE: usize = 8;
+        const RX_CONTROL_SIZE: usize = core::mem::size_of::<esp8266_wifi_sys::wifi_pkt_rx_ctrl_t>();
+        // SAFETY: all four wDev_ProcessFiq event-9 producers pass allocation+8
+        // to the callback. Retain the original raw pointer's allocation provenance.
+        let allocation = unsafe { packet.cast::<u8>().sub(PP_ENVELOPE_SIZE) };
+        let available = unsafe { crate::wifi::compat::memory::allocation_size(allocation.cast()) }
+            .saturating_sub(PP_ENVELOPE_SIZE + RX_CONTROL_SIZE);
+        // Nonaggregated captures allocate exactly their initialized prefix.
+        // Aggregates copy only 40 payload bytes, followed by an MPDU length table.
+        // Queued captures can retain SmartConfig's old 24/40-byte prefix even
+        // after the current capture settings have been restored.
+        let capture_limit = if rx_ctrl.aggregation() {
+            40
+        } else {
+            PROMISCUOUS_MAX_PAYLOAD_PREFIX
+        };
+        usize::from(original_len).min(available).min(capture_limit)
+    };
+    // SAFETY: the allocation-specific bound above excludes both uncaptured
+    // bytes and the aggregate trailer. The raw field pointer retains the
+    // allocation provenance and remains valid until the owned copy is complete.
+    let payload = unsafe {
+        core::slice::from_raw_parts(
+            core::ptr::addr_of!((*packet).payload).cast::<u8>(),
+            payload_len,
+        )
+    };
+    PromiscuousRxFrame::new(
+        PromiscuousFrameInfo {
+            rssi: rx_ctrl.rssi(),
+            channel,
+            packet_type,
+            original_len,
+        },
+        payload,
+    )
+    .ok()
 }
 
 #[inline(always)]
@@ -59,8 +135,8 @@ pub(super) fn raw_init_config(config: &InitConfig) -> esp8266_wifi_sys::wifi_ini
         rx_pkt_num: config.rx_pkt_num(),
         left_continuous_rx_buf_num: config.rx_buf_num().min(16),
         tx_buf_num: config.tx_buf_num(),
-        // The Rust NVS shim supports PHY/MAC startup, but not the complete
-        // `nvs.net80211` persistence model expected by the blob.
+        // The native Wi-Fi configuration persistence model is unavailable;
+        // the Rust NVS shim supports only the startup MAC record.
         nvs_enable: 0,
         nano_enable: 0,
         wpa3_sae_enable: 1,
@@ -143,7 +219,6 @@ pub(super) const fn raw_mode(mode: RawMode) -> esp8266_wifi_sys::wifi_mode_t {
     }
 }
 
-#[cfg(target_arch = "xtensa")]
 pub(super) struct RawScanConfigBuffers {
     ssid: [u8; 33],
     bssid: [u8; 6],
@@ -151,7 +226,6 @@ pub(super) struct RawScanConfigBuffers {
     has_bssid: bool,
 }
 
-#[cfg(target_arch = "xtensa")]
 impl RawScanConfigBuffers {
     pub(super) fn from_options(options: &ScanOptions) -> Self {
         let mut buffers = Self {
@@ -172,7 +246,21 @@ impl RawScanConfigBuffers {
     }
 
     pub(super) fn as_raw(&mut self, options: &ScanOptions) -> esp8266_wifi_sys::wifi_scan_config_t {
-        let timings = options.scan_timings();
+        let (scan_type, scan_time) = match options.scan_kind() {
+            ScanType::Active { min_ms, max_ms } => (
+                esp8266_wifi_sys::WIFI_SCAN_TYPE_ACTIVE,
+                esp8266_wifi_sys::wifi_scan_time_t {
+                    active: esp8266_wifi_sys::wifi_active_scan_time_t {
+                        min: min_ms,
+                        max: max_ms,
+                    },
+                },
+            ),
+            ScanType::Passive { dwell_ms } => (
+                esp8266_wifi_sys::WIFI_SCAN_TYPE_PASSIVE,
+                esp8266_wifi_sys::wifi_scan_time_t { passive: dwell_ms },
+            ),
+        };
         esp8266_wifi_sys::wifi_scan_config_t {
             ssid: if self.has_ssid {
                 self.ssid.as_mut_ptr()
@@ -186,21 +274,8 @@ impl RawScanConfigBuffers {
             },
             channel: options.target_channel().map_or(0, Channel::get),
             show_hidden: options.shows_hidden(),
-            scan_type: match options.scan_kind() {
-                ScanType::Active => esp8266_wifi_sys::WIFI_SCAN_TYPE_ACTIVE,
-                ScanType::Passive => esp8266_wifi_sys::WIFI_SCAN_TYPE_PASSIVE,
-            },
-            scan_time: match options.scan_kind() {
-                ScanType::Active => esp8266_wifi_sys::wifi_scan_time_t {
-                    active: esp8266_wifi_sys::wifi_active_scan_time_t {
-                        min: timings.active_min_ms(),
-                        max: timings.active_max_ms(),
-                    },
-                },
-                ScanType::Passive => esp8266_wifi_sys::wifi_scan_time_t {
-                    passive: timings.passive_ms(),
-                },
-            },
+            scan_type,
+            scan_time,
         }
     }
 }
@@ -375,6 +450,87 @@ pub(super) fn raw_esp_now_peer(peer: &EspNowPeerConfig) -> esp8266_wifi_sys::esp
 mod tests {
     use super::super::StationCredential;
     use super::*;
+
+    #[cfg(feature = "wifi-promiscuous")]
+    #[test]
+    fn native_capture_uses_each_allocation_prefix_and_excludes_aggregate_trailers() {
+        use crate::wifi::compat::memory;
+
+        let _guard = memory::tests::allocator_guard();
+        for (prefix, aggregated, packet_type, ht) in [
+            (24, false, PromiscuousPacketType::Data, false),
+            (40, false, PromiscuousPacketType::Management, true),
+            (112, false, PromiscuousPacketType::Control, false),
+            (200, false, PromiscuousPacketType::Data, true),
+            (40, true, PromiscuousPacketType::Data, true),
+            (0, false, PromiscuousPacketType::Misc, false),
+        ] {
+            let original_len = 1200u16;
+            let mut rx_ctrl = esp8266_wifi_sys::wifi_pkt_rx_ctrl_t { _data: [0; 12] };
+            rx_ctrl._data[0] = (-41i8) as u8;
+            if ht {
+                rx_ctrl._data[1] = 1 << 6;
+                rx_ctrl._data[5..7].copy_from_slice(&original_len.to_le_bytes());
+            } else {
+                rx_ctrl._data[2..4].copy_from_slice(&original_len.to_le_bytes());
+            }
+            let allocation_len = if aggregated {
+                rx_ctrl._data[7] = 1 << 3;
+                rx_ctrl._data[9] = 3;
+                64 + 2 * usize::from(rx_ctrl.ampdu_cnt())
+            } else {
+                20 + prefix
+            };
+            // SAFETY: this is the real C allocation boundary used by the PP
+            // producers. Initialize exactly their RX control and payload prefix;
+            // leave the aggregate trailer uninitialized to detect any overread.
+            let allocation = unsafe { memory::malloc(allocation_len) }.cast::<u8>();
+            assert!(!allocation.is_null());
+            let packet =
+                unsafe { allocation.add(8) }.cast::<esp8266_wifi_sys::wifi_promiscuous_pkt_t>();
+            unsafe {
+                core::ptr::addr_of_mut!((*packet).rx_ctrl).write(rx_ctrl);
+                allocation.add(20).write_bytes(0xa5, prefix);
+            }
+            let frame = unsafe { promiscuous_frame(packet, packet_type, 6) }.unwrap();
+            unsafe { memory::free(allocation.cast()) };
+
+            assert_eq!(frame.info().rssi, -41);
+            assert_eq!(frame.info().channel, 6);
+            assert_eq!(frame.info().packet_type, packet_type);
+            assert_eq!(frame.original_len(), usize::from(original_len));
+            assert_eq!(frame.payload().len(), prefix.min(112));
+            assert!(frame.payload().iter().all(|byte| *byte == 0xa5));
+            assert!(frame.is_truncated());
+        }
+    }
+
+    #[test]
+    fn scan_method_selects_its_native_timing_union_and_preserves_defaults() {
+        let mut buffers = RawScanConfigBuffers::from_options(&ScanOptions::all());
+        for (options, expected) in [
+            (ScanOptions::all(), (0, 0)),
+            (
+                ScanOptions::all().scan_type(ScanType::Active {
+                    min_ms: 200,
+                    max_ms: 500,
+                }),
+                (200, 500),
+            ),
+        ] {
+            let raw = buffers.as_raw(&options);
+            assert_eq!(raw.scan_type, esp8266_wifi_sys::WIFI_SCAN_TYPE_ACTIVE);
+            // SAFETY: the active discriminant above selects the initialized union field.
+            let active = unsafe { raw.scan_time.active };
+            assert_eq!((active.min, active.max), expected);
+        }
+        for dwell_ms in [0, 100] {
+            let raw = buffers.as_raw(&ScanOptions::all().scan_type(ScanType::Passive { dwell_ms }));
+            assert_eq!(raw.scan_type, esp8266_wifi_sys::WIFI_SCAN_TYPE_PASSIVE);
+            // SAFETY: the passive discriminant above selects the initialized union field.
+            assert_eq!(unsafe { raw.scan_time.passive }, dwell_ms);
+        }
+    }
 
     #[test]
     fn internal_tx_preserves_native_byte_abi_backpressure() {

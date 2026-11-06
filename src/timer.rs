@@ -1,4 +1,7 @@
 //! ESP8266 timers, clocked from the fixed 80 MHz peripheral bus.
+//!
+//! The embedded-hal delay traits accept `u8`, `u16`, `u32` and nonnegative `i32`
+//! durations. Negative signed delays panic before changing the timer.
 
 use crate::time::Duration;
 use embedded_hal::blocking::delay::{DelayMs, DelayUs};
@@ -38,6 +41,28 @@ fn duration_ticks(duration: Duration, max: u32) -> Result<u32, DurationTooLong> 
     } else {
         Ok(ticks as u32)
     }
+}
+
+macro_rules! impl_timer_delays {
+    ($name:ident, $($input:ty),+) => {
+        $(
+            impl DelayUs<$input> for $name {
+                fn delay_us(&mut self, us: $input) {
+                    let us = i64::from(us);
+                    assert!(us >= 0, "delay must be nonnegative");
+                    self.delay(Duration::from_micros(us as u64));
+                }
+            }
+
+            impl DelayMs<$input> for $name {
+                fn delay_ms(&mut self, ms: $input) {
+                    let ms = i64::from(ms);
+                    assert!(ms >= 0, "delay must be nonnegative");
+                    self.delay(Duration::from_millis(ms as u64));
+                }
+            }
+        )+
+    };
 }
 
 macro_rules! impl_timer {
@@ -123,16 +148,7 @@ macro_rules! impl_timer {
                 Ok(())
             }
         }
-        impl DelayUs<u32> for $name {
-            fn delay_us(&mut self, us: u32) {
-                self.delay(Duration::from_micros(u64::from(us)));
-            }
-        }
-        impl DelayMs<u32> for $name {
-            fn delay_ms(&mut self, ms: u32) {
-                self.delay(Duration::from_millis(u64::from(ms)));
-            }
-        }
+        impl_timer_delays!($name, u8, u16, u32, i32);
     };
 }
 
@@ -186,6 +202,39 @@ impl Timer1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_timers_support_embedded_hal_delay_input_widths() {
+        fn assert_delays<T>()
+        where
+            T: DelayUs<u8>
+                + DelayUs<u16>
+                + DelayUs<u32>
+                + DelayUs<i32>
+                + DelayMs<u8>
+                + DelayMs<u16>
+                + DelayMs<u32>
+                + DelayMs<i32>,
+        {
+        }
+        assert_delays::<Timer1>();
+        assert_delays::<Timer2>();
+    }
+
+    #[test]
+    #[should_panic(expected = "delay must be nonnegative")]
+    fn negative_microsecond_delay_is_rejected_before_register_access() {
+        // No peripheral initialization is needed: invalid input must fail
+        // before reading or writing any timer register.
+        Timer1 { _private: () }.delay_us(-1_i32);
+    }
+
+    #[test]
+    #[should_panic(expected = "delay must be nonnegative")]
+    fn negative_millisecond_delay_is_rejected_before_register_access() {
+        Timer2 { _private: () }.delay_ms(i32::MIN);
+    }
+
     #[test]
     fn tick_rounding_and_timer_ranges() {
         assert_eq!(duration_ticks(Duration::ZERO, TIMER1_MAX), Ok(1));

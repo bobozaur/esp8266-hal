@@ -9,6 +9,7 @@
 #include "utils/common.h"
 #include "utils/wpabuf.h"
 #include "common/eapol_common.h"
+#include "rsn_supp/wpa.h"
 #include "eap_peer/eap_i.h"
 #include "eap_peer/eap.h"
 #include "eap_peer/eap_config.h"
@@ -31,6 +32,9 @@ static unsigned calls, drops, live_count, fail_at, bssid_calls, decrypt_calls;
 static unsigned handshake_calls;
 static int tls_failed, method_active;
 static struct wpabuf *method_response;
+static unsigned request_method_calls, transmit_calls;
+static int transmit_allowed;
+static u8 transmit_identifier, transmit_type;
 
 static void *allocate(size_t size)
 {
@@ -98,13 +102,37 @@ void *_heap_caps_realloc(void *p, size_t n, uint32_t caps, const char *f, size_t
 }
 
 int esp_wifi_get_assoc_bssid_internal(uint8_t *bssid)
-{ bssid_calls++; return -1; }
+{
+    bssid_calls++;
+    if (!transmit_allowed)
+        return -1;
+    memset(bssid, 0x42, 6);
+    return ESP_OK;
+}
 esp_err_t esp_wifi_set_wpa2_ent_state_internal(wpa2_ent_eap_state_t state) { return ESP_OK; }
 int esp_wifi_internal_tx(wifi_interface_t interface, void *buffer, uint16_t len)
-{ fixture_fail(__LINE__); return -1; }
+{
+    const struct l2_ethhdr *eth = buffer;
+    const struct ieee802_1x_hdr *eapol = (const void *)(eth + 1);
+    const struct eap_hdr *eap = (const void *)(eapol + 1);
+    CHECK(transmit_allowed && interface == WIFI_IF_STA);
+    CHECK(len >= sizeof(*eth) + sizeof(*eapol) + sizeof(*eap) + 1);
+    CHECK(be_to_host16(eth->h_proto) == ETH_P_EAPOL);
+    CHECK(eapol->type == IEEE802_1X_TYPE_EAP_PACKET);
+    CHECK(be_to_host16(eapol->length) == len - sizeof(*eth) - sizeof(*eapol));
+    CHECK(eap->code == EAP_CODE_RESPONSE && eap->identifier == transmit_identifier);
+    CHECK(be_to_host16(eap->length) == be_to_host16(eapol->length));
+    CHECK(*(const u8 *)(eap + 1) == transmit_type);
+    transmit_calls++;
+    return ESP_OK;
+}
 static struct wpabuf *process(struct eap_sm *sm, void *priv,
                              struct eap_method_ret *ret, const struct wpabuf *request)
-{ return method_response; }
+{
+    CHECK(sm->lastRespData == NULL);
+    request_method_calls++;
+    return method_response;
+}
 
 static void short_requests(void)
 {
@@ -152,6 +180,108 @@ static void transmit_failure(int cached)
     CHECK(eap_sm_process_request(&sm, &request) != ESP_OK);
     CHECK(bssid_calls == 1 && sm.lastRespData == NULL);
     CHECK(drops == (cached ? 1u : 2u) && live_count == 0);
+}
+
+static struct wpabuf *response(u8 identifier)
+{
+    const u8 data[] = { EAP_CODE_RESPONSE, identifier, 0, 5, EAP_TYPE_TLS };
+    struct wpabuf *out = wpabuf_alloc_copy(data, sizeof(data));
+    CHECK(out);
+    return out;
+}
+
+static void request_method(struct eap_sm *sm, struct eap_method *method)
+{
+    memset(method, 0, sizeof(*method));
+    method->vendor = EAP_VENDOR_IETF;
+    method->method = EAP_TYPE_TLS;
+    method->process = process;
+    sm->m = method;
+    sm->eap_method_priv = sm;
+}
+
+static void cache_identifier(void)
+{
+    const u8 identifiers[] = { 255, 0 };
+    struct eap_sm sm;
+    struct eap_method method;
+    struct wpabuf request, *cached;
+    u8 data[] = { EAP_CODE_REQUEST, 0, 0, 5, EAP_TYPE_TLS };
+    unsigned i, processed;
+    transmit_allowed = 1;
+    transmit_type = EAP_TYPE_TLS;
+    for (i = 0; i < sizeof(identifiers); i++) {
+        memset(&sm, 0, sizeof(sm));
+        request_method(&sm, &method);
+        data[1] = transmit_identifier = sm.current_identifier = identifiers[i];
+        method_response = response(identifiers[i]);
+        wpabuf_set(&request, data, sizeof(data));
+        processed = request_method_calls;
+        CHECK(eap_sm_process_request(&sm, &request) == ESP_OK);
+        CHECK(request_method_calls == processed + 1 && sm.lastRespData == method_response);
+        CHECK(live_count == 1);
+        cached = sm.lastRespData;
+        CHECK(eap_sm_process_request(&sm, &request) == ESP_OK);
+        CHECK(request_method_calls == processed + 1 && sm.lastRespData == cached);
+        CHECK(transmit_calls == (i + 1) * 2 && live_count == 1);
+        wpabuf_free(sm.lastRespData);
+        CHECK(live_count == 0);
+    }
+}
+
+static void cache_failure(void)
+{
+    const u8 types[] = { EAP_TYPE_TLS, EAP_TYPE_IDENTITY,
+                         EAP_TYPE_NOTIFICATION, EAP_TYPE_EXPANDED };
+    u8 user[] = "cache-user";
+    u8 data[] = { EAP_CODE_REQUEST, 8, 0, 5, 0 };
+    struct eap_sm sm;
+    struct eap_method method;
+    struct wpabuf request;
+    unsigned mode, attempt, freed, sent, processed;
+    int result;
+    transmit_allowed = 1;
+    for (mode = 0; mode < sizeof(types); mode++) {
+        memset(&sm, 0, sizeof(sm));
+        sm.config.identity = user;
+        sm.config.identity_len = sizeof(user) - 1;
+        sm.current_identifier = 7;
+        sm.lastRespData = response(7);
+        method_response = NULL;
+        if (mode == 0)
+            request_method(&sm, &method);
+        data[1] = 8;
+        data[4] = types[mode];
+        wpabuf_set(&request, data, sizeof(data));
+        freed = drops;
+        sent = transmit_calls;
+        processed = request_method_calls;
+        for (attempt = 0; attempt < 2; attempt++) {
+            fail_at = mode == 1 ? calls + 1 : 0; /* Real Identity builder OOM. */
+            result = eap_sm_process_request(&sm, &request);
+            if (mode == 1) CHECK(calls == fail_at);
+            fail_at = 0;
+            CHECK((result == ESP_OK) == (mode == 2));
+            CHECK(sm.lastRespData == NULL && live_count == 0);
+            CHECK(drops == freed + 1 && transmit_calls == sent);
+            CHECK(request_method_calls == processed + (mode == 0 ? attempt + 1 : 0));
+        }
+        if (mode == 0) {
+            method_response = response(8);
+        } else {
+            if (mode != 1) data[1] = 9;
+            data[4] = EAP_TYPE_IDENTITY;
+        }
+        transmit_identifier = data[1];
+        transmit_type = data[4];
+        CHECK(eap_sm_process_request(&sm, &request) == ESP_OK);
+        CHECK(sm.lastRespData && live_count == 1 && transmit_calls == sent + 1);
+        processed = request_method_calls;
+        CHECK(eap_sm_process_request(&sm, &request) == ESP_OK);
+        CHECK(request_method_calls == processed && transmit_calls == sent + 2);
+        wpabuf_free(sm.lastRespData);
+        CHECK(live_count == 0);
+    }
 }
 
 struct wpabuf *tls_connection_decrypt(void *ctx, struct tls_connection *conn,
@@ -667,6 +797,8 @@ void fixture_tests(const char *name)
     if (strcmp(name, "short") == 0) short_requests();
     else if (strcmp(name, "cached") == 0) transmit_failure(1);
     else if (strcmp(name, "distinct") == 0) transmit_failure(0);
+    else if (strcmp(name, "cache-identifier") == 0) cache_identifier();
+    else if (strcmp(name, "cache-failure") == 0) cache_failure();
     else if (strcmp(name, "fragments") == 0) fragments();
     else if (strcmp(name, "empty-output") == 0) empty_output();
     else if (strcmp(name, "lifecycle-init") == 0) lifecycle_init();

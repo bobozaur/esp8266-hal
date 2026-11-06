@@ -7,7 +7,12 @@
 #include "esp_timer.h"
 #include "esp_wifi_types.h"
 
-/* The Rust newlib adapter owns storage and errno, but never FILE internals. */
+/* Rust owns complete closed streams: zero access flags make retained stdio
+ * fail with EBADF before buffer allocation or operation callbacks. */
+_Static_assert(sizeof(struct __sFILE) == 104, "newlib FILE size");
+_Static_assert(__alignof__(struct __sFILE) == 4, "newlib FILE alignment");
+_Static_assert(offsetof(struct __sFILE, _flags) == 12, "newlib FILE access flags");
+_Static_assert(offsetof(struct __sFILE, _flags2) == 100, "newlib FILE extended flags");
 _Static_assert(sizeof(struct _reent) == 240, "newlib reentrancy size");
 _Static_assert(__alignof__(struct _reent) == 4, "newlib reentrancy alignment");
 _Static_assert(offsetof(struct _reent, _errno) == 0, "newlib errno offset");

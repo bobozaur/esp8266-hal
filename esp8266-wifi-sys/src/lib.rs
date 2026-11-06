@@ -178,9 +178,10 @@ impl wifi_pkt_rx_ctrl_t {
 /// Promiscuous mode received packet.
 ///
 /// The `payload` field is a zero-length array — the actual frame data follows
-/// immediately after `rx_ctrl` in memory. Use the length from `rx_ctrl`
-/// (either `legacy_length()` or `ht_length()` depending on `sig_mode()`), capped
-/// at the SDK's 112-byte capture limit, to determine how many bytes are available.
+/// immediately after `rx_ctrl` in memory. Its length fields describe the original
+/// frame, not the allocation. Available bytes depend on the producer's allocation
+/// and configured capture prefix; aggregated packets contain only 40 frame bytes
+/// followed by native metadata. Consumers must establish those bounds separately.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct wifi_promiscuous_pkt_t {

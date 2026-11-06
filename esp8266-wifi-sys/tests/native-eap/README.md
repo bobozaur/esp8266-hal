@@ -33,6 +33,13 @@ Each case runs in a separate process:
   BSSID lookup must release it exactly once and clear the cache.
 - `distinct`: the same pre-transmit failure with a newly produced response must
   release both distinct buffers once.
+- `cache-identifier`: first requests numbered 255 and 0 must reach their method
+  even when the stored identifier matches. A successful response is retransmitted
+  without rerunning the method; the emitted EAP identifier and type are checked.
+- `cache-failure`: a new request discards its predecessor before a method returns
+  no response, Identity allocation fails, a Notification is ignored, or an
+  expanded request is malformed. Repetition must never send the old response.
+  Successful recovery and its retransmission retain exactly one cached buffer.
 - `fragments`: a 1,537-byte phase-two input in four fragments reserves its full
   capacity once. The decrypt dependency must receive all bytes, including the
   final eight-byte fragment. First-allocation failure must reset input state
@@ -55,6 +62,12 @@ Each case runs in a separate process:
   partial input, fatal and WANT_READ results, output-allocation failure, clearing
   borrowed pointers before return, and owned-flight compaction failure and teardown.
   The fixture enters through public connection APIs; no private layout is copied.
+- `tls-exporter`: the actual backend captures distinct client/server randoms at
+  `CLIENT_CERTIFICATE`, then exports after the mbedTLS handshake state is gone.
+  Controlled PRFs check the 48-byte master secret, random order, EAP/TTLS labels
+  and 64-byte output contract for TLS1.0/1.1 and TLS1.2 SHA1/SHA256/SHA384 suites.
+  TLS1.2 CBC-SHA must use the SHA256 PRF. PRF failures propagate, incomplete
+  handshakes reject export, and export allocates nothing.
 - `lifecycle-suspended`: scheduler-suspended teardown must request worker exit
   without blocking or freeing live state. Initialization cannot overwrite that
   state; ordinary disable later completes cleanup and permits a fresh enable.
@@ -69,7 +82,8 @@ Each case runs in a separate process:
 The tracked allocator checks duplicate frees and writes beyond requested sizes.
 Protocol methods, the public MAC getter, BSSID lookup, native transmission,
 TLS handshake and TLS decryption are controlled dependencies in the request/
-reassembly cases. The backend case controls mbedTLS itself and does not test cryptography. No production function is copied or
+reassembly cases. The backend cases control mbedTLS and the PRFs; they do not
+test cryptography. No production function is copied or
 included into the fixture, and no static visibility is changed. A pass does not qualify TLS
 cryptography, native-TX error propagation, real scheduler timing, target ABI,
 stack depth, IRQ/NMI or radio behavior. Lifecycle schedules use host `ucontext`

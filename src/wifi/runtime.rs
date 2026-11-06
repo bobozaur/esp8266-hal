@@ -76,4 +76,10 @@ impl Runtime {
     pub(crate) fn allocator(&self) -> RuntimeAllocator {
         RuntimeAllocator::new(memory::allocator())
     }
+
+    /// Monotonic time since runtime initialization, with microsecond resolution.
+    /// Uses the same clock as native Wi-Fi deadlines across CPU frequency changes.
+    pub fn now(&self) -> core::time::Duration {
+        core::time::Duration::from_micros(port::monotonic_micros())
+    }
 }

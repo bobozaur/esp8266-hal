@@ -168,16 +168,6 @@ impl RawQueue {
             true
         }
     }
-
-    unsafe fn peek(&self, buf: *mut u8) -> bool {
-        if self.count == 0 {
-            return false;
-        }
-        unsafe {
-            self.read_slot(self.head, buf);
-        }
-        true
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -393,55 +383,20 @@ pub unsafe extern "C" fn xQueueGenericSend(
     }
 }
 
-/// `xQueueGenericSendFromISR` — send from ISR context (never blocks).
-#[no_mangle]
-pub unsafe extern "C" fn xQueueGenericSendFromISR(
-    queue: *mut c_void,
-    item: *const c_void,
-    higher_priority_task_woken: *mut i32,
-    pos: i32,
-) -> i32 {
-    unsafe {
-        if queue.is_null() {
-            return PD_FALSE;
-        }
-        let q = queue as *mut RawQueue;
-        let ok = try_send(q, item as *const u8, pos);
-        if ok {
-            let need_switch = notify_queue_posted(q);
-            if !higher_priority_task_woken.is_null() {
-                *higher_priority_task_woken = if need_switch { PD_PASS } else { PD_FALSE };
-            }
-            PD_PASS
-        } else {
-            PD_FALSE
-        }
-    }
-}
-
-/// `xQueueSendFromISR` — send to back from ISR (legacy API).
+/// `xQueueSendFromISR` — send to the back from ISR context, without blocking.
 #[no_mangle]
 pub unsafe extern "C" fn xQueueSendFromISR(
     queue: *mut c_void,
     item: *const c_void,
     higher_priority_task_woken: *mut i32,
 ) -> i32 {
-    unsafe { xQueueGenericSendFromISR(queue, item, higher_priority_task_woken, QUEUE_SEND_TO_BACK) }
-}
-
-/// `xQueueGiveFromISR` — give a semaphore from ISR.
-#[no_mangle]
-pub unsafe extern "C" fn xQueueGiveFromISR(
-    queue: *mut c_void,
-    higher_priority_task_woken: *mut i32,
-) -> i32 {
     unsafe {
         if queue.is_null() {
             return PD_FALSE;
         }
         let q = queue as *mut RawQueue;
-        if (*q).count < (*q).capacity {
-            (*q).count += 1;
+        let ok = try_send(q, item as *const u8, QUEUE_SEND_TO_BACK);
+        if ok {
             let need_switch = notify_queue_posted(q);
             if !higher_priority_task_woken.is_null() {
                 *higher_priority_task_woken = if need_switch { PD_PASS } else { PD_FALSE };
@@ -464,39 +419,6 @@ pub unsafe extern "C" fn xQueueReceive(
     buffer: *mut c_void,
     timeout: u32,
 ) -> i32 {
-    unsafe { queue_receive_impl(queue, buffer, timeout, false) }
-}
-
-/// `xQueuePeek` — inspect the next item without consuming it.
-#[no_mangle]
-pub unsafe extern "C" fn xQueuePeek(queue: *mut c_void, buffer: *mut c_void, timeout: u32) -> i32 {
-    unsafe { queue_receive_impl(queue, buffer, timeout, true) }
-}
-
-/// `xQueueGenericReceive` — ESP8266 port wrapper.
-#[no_mangle]
-pub unsafe extern "C" fn xQueueGenericReceive(
-    queue: *mut c_void,
-    buffer: *mut c_void,
-    timeout: u32,
-    just_peeking: i32,
-) -> i32 {
-    unsafe {
-        if just_peeking == 0 {
-            xQueueReceive(queue, buffer, timeout)
-        } else {
-            xQueuePeek(queue, buffer, timeout)
-        }
-    }
-}
-
-#[inline(never)]
-unsafe fn queue_receive_impl(
-    queue: *mut c_void,
-    buffer: *mut c_void,
-    timeout: u32,
-    just_peeking: bool,
-) -> i32 {
     unsafe {
         if queue.is_null() {
             return PD_FALSE;
@@ -509,21 +431,13 @@ unsafe fn queue_receive_impl(
 
         loop {
             critical::vPortEnterCritical();
-            let ok = if just_peeking {
-                (*q).peek(buffer as *mut u8)
-            } else {
-                (*q).receive(buffer as *mut u8)
-            };
+            let ok = (*q).receive(buffer as *mut u8);
             if ok {
                 (*q).rx_waiters.remove(task_idx);
-                if !just_peeking {
-                    let need_switch = notify_queue_received(q);
-                    critical::vPortExitCritical();
-                    if need_switch {
-                        super::port::PendSV(1);
-                    }
-                } else {
-                    critical::vPortExitCritical();
+                let need_switch = notify_queue_received(q);
+                critical::vPortExitCritical();
+                if need_switch {
+                    super::port::PendSV(1);
                 }
                 return PD_PASS;
             }
@@ -567,30 +481,6 @@ unsafe fn queue_receive_impl(
                     return PD_FALSE;
                 }
             }
-        }
-    }
-}
-
-/// `xQueueReceiveFromISR` — receive from ISR (never blocks).
-#[no_mangle]
-pub unsafe extern "C" fn xQueueReceiveFromISR(
-    queue: *mut c_void,
-    buffer: *mut c_void,
-    higher_priority_task_woken: *mut i32,
-) -> i32 {
-    unsafe {
-        if queue.is_null() {
-            return PD_FALSE;
-        }
-        let q = queue as *mut RawQueue;
-        if (*q).receive(buffer as *mut u8) {
-            let need_switch = notify_queue_received(q);
-            if !higher_priority_task_woken.is_null() {
-                *higher_priority_task_woken = if need_switch { PD_PASS } else { PD_FALSE };
-            }
-            PD_PASS
-        } else {
-            PD_FALSE
         }
     }
 }
@@ -754,56 +644,6 @@ pub unsafe extern "C" fn xQueueGiveMutexRecursive(queue: *mut c_void) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// Mutex-aware give (used by xSemaphoreGive)
-// ---------------------------------------------------------------------------
-
-/// Give a semaphore or mutex. For plain mutexes, this clears ownership and
-/// restores priority inheritance — unlike `xQueueGenericSend` which only
-/// handles the data-queue / counting-semaphore path.
-///
-/// This is what the FreeRTOS `xSemaphoreGive` macro effectively does:
-/// it checks the queue type and dispatches to the mutex path when needed.
-#[allow(non_snake_case)] // FreeRTOS API naming convention
-pub(crate) unsafe fn xQueueGiveMutexAware(queue: *mut c_void) -> i32 {
-    unsafe {
-        if queue.is_null() {
-            return PD_FALSE;
-        }
-        let q = queue as *mut RawQueue;
-
-        if (*q).queue_type == QUEUE_TYPE_MUTEX {
-            // Plain mutex: clear holder, restore priority, increment count.
-            critical::vPortEnterCritical();
-
-            let current = task::current_task_index();
-            if (*q).mutex_holder != current {
-                // Not the holder — FreeRTOS returns failure here.
-                critical::vPortExitCritical();
-                return PD_FALSE;
-            }
-
-            (*q).mutex_holder = usize::MAX;
-            task::restore_priority(current);
-            (*q).count += 1;
-            let need_switch = notify_queue_posted(q);
-            critical::vPortExitCritical();
-
-            if need_switch {
-                super::port::PendSV(1);
-            }
-            PD_PASS
-        } else if (*q).queue_type == QUEUE_TYPE_RECURSIVE_MUTEX {
-            // Recursive mutex: delegate to the recursive give path.
-            xQueueGiveMutexRecursive(queue)
-        } else {
-            // Counting semaphore / binary semaphore / data queue:
-            // use the generic send path (increment count / enqueue item).
-            xQueueGenericSend(queue, core::ptr::null(), 0, 0)
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------
 
@@ -816,18 +656,6 @@ pub unsafe extern "C" fn uxQueueMessagesWaiting(queue: *const c_void) -> u32 {
         }
         let q = &*(queue as *const RawQueue);
         q.count as u32
-    }
-}
-
-/// `uxQueueSpacesAvailable` — free slots in the queue.
-#[no_mangle]
-pub unsafe extern "C" fn uxQueueSpacesAvailable(queue: *const c_void) -> u32 {
-    unsafe {
-        if queue.is_null() {
-            return 0;
-        }
-        let q = &*(queue as *const RawQueue);
-        (q.capacity - q.count) as u32
     }
 }
 
@@ -899,9 +727,7 @@ unsafe fn unlock_queue(q: *mut RawQueue) {
             }
         }
         q.tx_lock = QUEUE_UNLOCKED;
-        critical::vPortExitCritical();
-
-        critical::vPortEnterCritical();
+        // Keep the exclusive queue view inside one interrupt exclusion region.
         let mut rx_lock = q.rx_lock;
         while rx_lock > QUEUE_LOCKED_UNMODIFIED {
             if q.tx_waiters.wake_highest_priority() {

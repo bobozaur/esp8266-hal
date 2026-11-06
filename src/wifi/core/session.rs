@@ -217,14 +217,8 @@ impl PromiscuousSession<'_> {
         self.resources.reset_promiscuous_runtime();
         self.sdk.spin_once();
         self.sdk.spin_once();
-        self.sdk.enable_promiscuous(filter)?;
+        self.sdk.enable_promiscuous(filter, self.control_filter)?;
         self.filter = filter;
-        if !self.control_filter.is_empty() {
-            if let Err(error) = self.sdk.set_promiscuous_control_filter(self.control_filter) {
-                let _ = self.sdk.disable_promiscuous();
-                return Err(error);
-            }
-        }
         Ok(())
     }
     pub fn stop(&mut self) -> Result<(), DriverError> {
@@ -589,12 +583,40 @@ mod tests {
         session
             .start(super::super::PromiscuousFilter::CONTROL)
             .unwrap();
+        assert_eq!(session.sdk.promiscuous_control_filter, filter);
         session.stop().unwrap();
         assert_eq!(session.control_filter(), filter);
         session
             .start(super::super::PromiscuousFilter::DATA)
             .unwrap();
         assert_eq!(session.filter(), super::super::PromiscuousFilter::DATA);
+        assert_eq!(session.sdk.promiscuous_control_filter, filter);
+
+        session.stop().unwrap();
+        session
+            .set_control_filter(super::super::PromiscuousControlFilter::empty())
+            .unwrap();
+        assert_eq!(session.sdk.promiscuous_control_filter, filter);
+        session
+            .start(super::super::PromiscuousFilter::CONTROL)
+            .unwrap();
+        assert!(session.sdk.promiscuous_control_filter.is_empty());
+
+        session.set_control_filter(filter).unwrap();
+        session.sdk.fail_next = Some(DriverError::Sdk(123));
+        assert_eq!(
+            session.set_control_filter(super::super::PromiscuousControlFilter::empty()),
+            Err(DriverError::Sdk(123))
+        );
+        assert_eq!(session.control_filter(), filter);
+        assert_eq!(session.sdk.promiscuous_control_filter, filter);
+        drop(session);
+        let mut session = c.promiscuous().unwrap();
+        assert!(session.control_filter().is_empty());
+        session
+            .start(super::super::PromiscuousFilter::CONTROL)
+            .unwrap();
+        assert!(session.sdk.promiscuous_control_filter.is_empty());
     }
     #[cfg(feature = "wifi-wps")]
     #[test]

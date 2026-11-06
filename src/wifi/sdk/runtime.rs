@@ -6,14 +6,11 @@
 
 use core::{
     ffi::{c_char, c_void},
-    ptr,
     sync::atomic::{compiler_fence, Ordering},
 };
 
 #[cfg(not(feature = "wifi-esp-now"))]
 use esp8266_wifi_sys as sys;
-
-const CPU_FREQUENCY_HZ: u32 = 80_000_000;
 
 // `esp_wifi_stop` calls this unconditionally, even in firmware that never
 // initialized ESP-NOW. Avoid linking the optional ESP-NOW archive for that
@@ -41,11 +38,6 @@ pub extern "C" fn pp_soft_wdt_stop() {}
 pub extern "C" fn pp_soft_wdt_restart() {}
 
 #[no_mangle]
-pub extern "C" fn esp_log_timestamp() -> u32 {
-    0
-}
-
-#[no_mangle]
 pub extern "C" fn esp_log_early_timestamp() -> u32 {
     0
 }
@@ -55,17 +47,6 @@ pub extern "C" fn esp_log_early_timestamp() -> u32 {
 // so ignoring them is ABI-compatible and avoids unstable Rust C variadics.
 #[no_mangle]
 pub extern "C" fn esp_log_write(_level: u32, _tag: *const c_char, _format: *const c_char) {}
-
-#[no_mangle]
-pub extern "C" fn esp_early_log_write(_level: u32, _tag: *const c_char, _format: *const c_char) {}
-
-#[no_mangle]
-pub extern "C" fn esp_log_level_set(_tag: *const c_char, _level: u32) {}
-
-#[no_mangle]
-pub extern "C" fn esp_log_set_putchar(_function: *mut c_void) -> *mut c_void {
-    ptr::null_mut()
-}
 
 /// Suppress SDK printf calls on timing-sensitive blob task stacks.
 #[no_mangle]
@@ -81,11 +62,6 @@ pub unsafe extern "C" fn pthread_setcancelstate(_state: i32, old_state: *mut i32
         unsafe { old_state.write(0) };
     }
     0
-}
-
-#[no_mangle]
-pub extern "C" fn xtbsp_clock_freq_hz() -> u32 {
-    CPU_FREQUENCY_HZ
 }
 
 #[inline(never)]
@@ -105,39 +81,8 @@ pub extern "C" fn pm_wait4wakeup(_mode: i32) {
 }
 
 #[no_mangle]
-pub extern "C" fn _esp_error_check_failed(
-    _result: i32,
-    _file: *const c_char,
-    _line: i32,
-    _function: *const c_char,
-    _expression: *const c_char,
-) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn panicHandler(_frame: *mut c_void, _watchdog: i32) -> ! {
     loop {
         core::hint::spin_loop();
     }
-}
-
-// The pinned GCC runtime emits these helpers for SDK volatile accesses. The
-// chip is single-core, but interrupt exclusion is still required for atomicity
-// relative to ISR code.
-#[no_mangle]
-pub unsafe extern "C" fn __atomic_load_4(pointer: *const u32, _ordering: i32) -> u32 {
-    critical_section::with(|_| unsafe { pointer.read_volatile() })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn __atomic_store_1(pointer: *mut u8, value: u8, _ordering: i32) {
-    critical_section::with(|_| unsafe { pointer.write_volatile(value) });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn __atomic_store_4(pointer: *mut u32, value: u32, _ordering: i32) {
-    critical_section::with(|_| unsafe { pointer.write_volatile(value) });
 }

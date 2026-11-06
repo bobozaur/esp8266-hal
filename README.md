@@ -19,7 +19,7 @@ ESP8266_HAL_WIFI_SSID=my-network ESP8266_HAL_WIFI_PASS=my-password \
   --no-default-features --features wifi -Zbuild-std=core,alloc
 
 cargo build --release --example tcp_server \
-  --no-default-features --features wifi-embassy-net -Zbuild-std=core,alloc
+  --no-default-features --features wifi-embassy-net,embassy -Zbuild-std=core,alloc
 ```
 
 Normal builds use checked-in native archives and bindings. They need no SDK
@@ -60,6 +60,7 @@ absolute `STACK_SIZE` linker symbol after validating their own stack use. The
 enterprise example reserves 4 KiB to leave room for certificate processing.
 Runtime initialization consumes Timer2/FRC2 and reserves the CPU compare and
 software scheduling interrupts for the boot. Timer1 remains application-owned.
+`Runtime::now()` supplies monotonic `Duration` timestamps for caller-polled stacks.
 Runtime initialization failure requires reset; stopping or dropping Wi-Fi does
 not tear down the scheduler.
 
@@ -85,7 +86,7 @@ for cancellation, session lifetimes and teardown requirements.
 | `wifi` | Controller, packet interfaces and native runtime; enables `rt` and `interrupt` |
 | `embassy` | Optional sleeping executor and time integration |
 | `wifi-smoltcp` | Caller-polled smoltcp device adapter |
-| `wifi-embassy-net` | Embassy network channel and runner; enables `embassy` |
+| `wifi-embassy-net` | Embassy network channel, runner and time integration; executor remains application-selected |
 | `wifi-esp-now` | Plain and encrypted peers, RX and TX completion |
 | `wifi-smartconfig` | ESPTouch/AirKiss provisioning |
 | `wifi-enterprise` | PEAP and EAP-TLS credentials and supplicant |
@@ -96,6 +97,13 @@ Each optional Wi-Fi feature enables `wifi`. ESP-NOW and SmartConfig also select
 their native archives. Ordinary HAL applications can omit `wifi` and its allocator
 and native-runtime requirements. Controller futures work with any suitable
 executor. The optional Embassy executor starts explicitly through `Executor::run`.
+
+Both `embassy` and `wifi-embassy-net` use embassy-time's generic timer queue,
+which accepts any executor's wakers. It defaults to 64 entries; select one
+`generic-queue-N` feature (8, 16, 32, 64 or 128) on the application's
+`embassy-time` dependency to trade static memory for timer capacity. Size it for
+the application's concurrent timer wakers: overflow wakes queued timers early
+and can increase CPU use. The examples select eight entries for three tasks.
 
 Examples use owned UART0 on GPIO1/GPIO3 at 115200 baud. Start with
 [`raw_scan`](examples/raw_scan.rs),

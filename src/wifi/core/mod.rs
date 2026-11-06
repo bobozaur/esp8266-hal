@@ -53,8 +53,8 @@ pub use config::WpsPin;
 pub use config::{
     AccessPointConfig, AccessPointRecord, ApClientLimit, ApCredential, ApStationInfo,
     AuthenticationMethod, BeaconInterval, Channel, ClientConfig, Configuration, InitConfig,
-    Ipv4Addr, MixedConfig, Passphrase, QueueConfig, ScanOptions, ScanTimings, ScanType, Ssid,
-    StationCredential, StationPowerSave,
+    Ipv4Addr, MixedConfig, Passphrase, QueueConfig, ScanOptions, ScanType, Ssid, StationCredential,
+    StationPowerSave,
 };
 #[cfg(feature = "wifi-enterprise")]
 pub use config::{

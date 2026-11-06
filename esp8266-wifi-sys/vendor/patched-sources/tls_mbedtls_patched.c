@@ -804,17 +804,16 @@ int tls_connection_set_session_ticket_cb(void *tls_ctx,
 	return -1;
 }
 
-static int tls_connection_prf(void *tls_ctx, struct tls_connection *conn,
-		       const char *label, int server_random_first,
-		       u8 *out, size_t out_len)
+int tls_connection_export_key(void *tls_ctx, struct tls_connection *conn,
+			      const char *label, u8 *out, size_t out_len)
 {
 	int ret;
-	u8 seed[2 * TLS_RANDOM_LEN];
+	const u8 *seed = conn->randbytes;
 	mbedtls_ssl_context *ssl = &conn->tls->ssl;
 	mbedtls_ssl_transform *transform = ssl->transform;
 
-	if (!ssl || !transform) {
-		wpa_printf(MSG_ERROR, "TLS: %s, session ingo is null", __func__);
+	if (!transform) {
+		wpa_printf(MSG_ERROR, "TLS: %s, session info is null", __func__);
 		return -1;
 	}
 	if (ssl->state != MBEDTLS_SSL_HANDSHAKE_OVER) {
@@ -822,24 +821,19 @@ static int tls_connection_prf(void *tls_ctx, struct tls_connection *conn,
 		return -1;
 	}
 
-	if (server_random_first) {
-		os_memcpy(seed, conn->randbytes + TLS_RANDOM_LEN, TLS_RANDOM_LEN);
-		os_memcpy(seed + TLS_RANDOM_LEN, conn->randbytes, TLS_RANDOM_LEN);
-	} else {
-		os_memcpy(seed, conn->randbytes, 2 * TLS_RANDOM_LEN);
-	}
-
 	wpa_hexdump_key(MSG_MSGDUMP, "random", seed, 2 * TLS_RANDOM_LEN);
 	wpa_hexdump_key(MSG_MSGDUMP, "master", ssl->session->master, TLS_MASTER_SECRET_LEN);
 
-	if (transform->ciphersuite_info->mac == MBEDTLS_MD_SHA384) {
+	/* TLS 1.2 uses SHA256 even when the record MAC is SHA1 (RFC 5246).
+	 * EAP always seeds the PRF with client_random || server_random. */
+	if (ssl->minor_ver < MBEDTLS_SSL_MINOR_VERSION_3) {
+		ret = tls_prf_sha1_md5(ssl->session->master, TLS_MASTER_SECRET_LEN,
+				label, seed, 2 * TLS_RANDOM_LEN, out, out_len);
+	} else if (transform->ciphersuite_info->mac == MBEDTLS_MD_SHA384) {
 		ret = tls_prf_sha384(ssl->session->master, TLS_MASTER_SECRET_LEN,
 				label, seed, 2 * TLS_RANDOM_LEN, out, out_len);
-	} else if (transform->ciphersuite_info->mac == MBEDTLS_MD_SHA256) {
-		ret = tls_prf_sha256(ssl->session->master, TLS_MASTER_SECRET_LEN,
-				label, seed, 2 * TLS_RANDOM_LEN, out, out_len);
 	} else {
-		ret = tls_prf_sha1_md5(ssl->session->master, TLS_MASTER_SECRET_LEN,
+		ret = tls_prf_sha256(ssl->session->master, TLS_MASTER_SECRET_LEN,
 				label, seed, 2 * TLS_RANDOM_LEN, out, out_len);
 	}
 
@@ -849,12 +843,6 @@ static int tls_connection_prf(void *tls_ctx, struct tls_connection *conn,
 	wpa_hexdump_key(MSG_MSGDUMP, "key", out, out_len);
 
 	return ret;
-}
-
-int tls_connection_export_key(void *tls_ctx, struct tls_connection *conn,
-			      const char *label, u8 *out, size_t out_len)
-{
-	return tls_connection_prf(tls_ctx, conn, label, 0, out, out_len);
 }
 
 int tls_connection_shutdown(void *tls_ctx, struct tls_connection *conn)

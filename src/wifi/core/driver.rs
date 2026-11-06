@@ -146,6 +146,10 @@ impl Controller<'_> {
         self.sdk.set_mode(RawMode::Sta)
     }
     fn begin_start(&mut self) -> Result<(), DriverError> {
+        // A partial stop can stop the radio while session cleanup still owns it.
+        if self.sdk.session_claimed {
+            return Err(DriverError::Busy);
+        }
         if self.sdk.started || self.sdk.mode.is_none() {
             return Err(DriverError::InvalidState);
         }
@@ -661,6 +665,44 @@ mod tests {
         assert!(c.sdk.mode.is_none());
         assert!(!r.state.with(|s| s.station_configured));
         assert_eq!(c.start_blocking(1000), Err(DriverError::InvalidState));
+    }
+    #[cfg(feature = "wifi-wps")]
+    #[test]
+    fn partial_stop_keeps_session_claimed_until_cleanup_succeeds() {
+        let r = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&r);
+        let mut c = Controller {
+            sdk: &mut sdk,
+            resources: &r,
+        };
+        c.enable_station().unwrap();
+        c.start_blocking(0).unwrap();
+        let mut session = c.wps().unwrap();
+        session.start(&super::super::WpsConfig::pbc()).unwrap();
+        core::mem::forget(session);
+
+        c.sdk.stop_cleanup_error = Some(DriverError::Sdk(123));
+        assert_eq!(c.stop(), Err(DriverError::Sdk(123)));
+        assert!(!c.sdk.started);
+        assert!(c.sdk.session_claimed);
+        assert!(c.sdk.wps_enabled);
+        let commands = c.sdk.commands;
+        assert_eq!(c.start_blocking(0), Err(DriverError::Busy));
+        let w = waker();
+        let mut cx = Context::from_waker(&w);
+        let mut start = HostBox::pin(c.start_async());
+        assert_eq!(
+            start.as_mut().poll(&mut cx),
+            Poll::Ready(Err(DriverError::Busy))
+        );
+        drop(start);
+        assert_eq!(c.sdk.commands, commands);
+        assert!(r.state.with(|s| s.stopping));
+
+        c.stop().unwrap();
+        assert!(!c.sdk.session_claimed);
+        assert!(!c.sdk.wps_enabled);
+        c.start_blocking(0).unwrap();
     }
     #[test]
     fn blocking_scan_timeout_can_be_cancelled_without_executor() {

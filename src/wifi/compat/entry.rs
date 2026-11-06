@@ -19,7 +19,7 @@ extern "C" {
 ///   offset 0x04: _stdin  (FILE*)
 ///   offset 0x08: _stdout (FILE*)
 ///   offset 0x0C: _stderr (FILE*)
-///   offset 0x18: __sdidinit (int, must be 1)
+///   offset 0x18: __sdidinit (int, 1 after installing complete streams)
 ///
 /// The blob writes 32-bit pointers and ints into this storage. Keep it at
 /// least 4-byte aligned so those raw stores cannot fault on layouts where a
@@ -31,27 +31,33 @@ struct ReentStorage([u8; 240]);
 #[cfg(target_arch = "xtensa")]
 static mut REENT_STRUCT: ReentStorage = ReentStorage([0; 240]);
 
+/// Complete pinned-newlib FILE storage. Zero access flags make stdio return
+/// EBADF before using buffers or callbacks. The 32-byte __sf_fake_* prefixes
+/// are insufficient once __sdidinit is set: stdio accesses flags2 at byte100.
+#[repr(C, align(4))]
+#[cfg(target_arch = "xtensa")]
+struct ClosedStream([u8; 104]);
+
+#[cfg(target_arch = "xtensa")]
+static mut CLOSED_STREAMS: [ClosedStream; 3] = [const { ClosedStream([0; 104]) }; 3];
+
 /// Initialize `_global_impure_ptr` so that `__getreent()` returns a valid
 /// (if minimal) reent struct. Must be called before any WiFi blob function.
 #[cfg(target_arch = "xtensa")]
 pub(crate) unsafe fn init_newlib_reent() {
     unsafe {
-        extern "C" {
-            static __sf_fake_stdin: u8;
-            static __sf_fake_stdout: u8;
-            static __sf_fake_stderr: u8;
-        }
-
         REENT_STRUCT = ReentStorage([0; 240]);
+        CLOSED_STREAMS = [const { ClosedStream([0; 104]) }; 3];
         let base = REENT_STRUCT.0.as_mut_ptr();
+        let streams = core::ptr::addr_of_mut!(CLOSED_STREAMS).cast::<ClosedStream>();
 
         // _stdin at offset 0x04
-        *(base.add(0x04) as *mut *const u8) = &__sf_fake_stdin;
+        *(base.add(0x04) as *mut *mut ClosedStream) = streams;
         // _stdout at offset 0x08
-        *(base.add(0x08) as *mut *const u8) = &__sf_fake_stdout;
+        *(base.add(0x08) as *mut *mut ClosedStream) = streams.add(1);
         // _stderr at offset 0x0C
-        *(base.add(0x0C) as *mut *const u8) = &__sf_fake_stderr;
-        // __sdidinit at offset 0x18 — must be 1
+        *(base.add(0x0C) as *mut *mut ClosedStream) = streams.add(2);
+        // Full streams are installed; prevent newlib's allocating __sinit.
         *(base.add(0x18) as *mut i32) = 1;
 
         _global_impure_ptr = base;

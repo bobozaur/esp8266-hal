@@ -229,15 +229,6 @@ pub unsafe extern "C" fn esp_wifi_init(config: *const sys::wifi_init_config_t) -
     }
 }
 
-/// Set RF option for deep sleep.
-#[no_mangle]
-pub unsafe extern "C" fn esp_deep_sleep_set_rf_option(option: u8) {
-    extern "C" {
-        fn phy_afterwake_set_rfoption(option: u8);
-    }
-    unsafe { phy_afterwake_set_rfoption(option) }
-}
-
 /// Maximum number of APs returned by scan.
 #[no_mangle]
 pub unsafe extern "C" fn esp_wifi_scan_get_ap_num_max() -> usize {

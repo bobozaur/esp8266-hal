@@ -246,55 +246,12 @@ impl ApStationInfo {
     }
 }
 
+/// Scan method and its per-channel timing, in milliseconds.
+/// Zero timing values select the native SDK defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanType {
-    Active,
-    Passive,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ScanTimings {
-    active_min_ms: u32,
-    active_max_ms: u32,
-    passive_ms: u32,
-}
-
-impl ScanTimings {
-    pub const fn sdk_default() -> Self {
-        Self {
-            active_min_ms: 0,
-            active_max_ms: 0,
-            passive_ms: 0,
-        }
-    }
-
-    pub const fn active(min_ms: u32, max_ms: u32) -> Self {
-        Self {
-            active_min_ms: min_ms,
-            active_max_ms: max_ms,
-            passive_ms: 0,
-        }
-    }
-
-    pub const fn passive(ms: u32) -> Self {
-        Self {
-            active_min_ms: 0,
-            active_max_ms: 0,
-            passive_ms: ms,
-        }
-    }
-
-    pub const fn active_min_ms(self) -> u32 {
-        self.active_min_ms
-    }
-
-    pub const fn active_max_ms(self) -> u32 {
-        self.active_max_ms
-    }
-
-    pub const fn passive_ms(self) -> u32 {
-        self.passive_ms
-    }
+    Active { min_ms: u32, max_ms: u32 },
+    Passive { dwell_ms: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -304,7 +261,6 @@ pub struct ScanOptions {
     channel: Option<Channel>,
     show_hidden: bool,
     scan_type: ScanType,
-    timings: ScanTimings,
 }
 
 impl ScanOptions {
@@ -314,8 +270,10 @@ impl ScanOptions {
             bssid: None,
             channel: None,
             show_hidden: false,
-            scan_type: ScanType::Active,
-            timings: ScanTimings::sdk_default(),
+            scan_type: ScanType::Active {
+                min_ms: 0,
+                max_ms: 0,
+            },
         }
     }
 
@@ -344,11 +302,6 @@ impl ScanOptions {
         self
     }
 
-    pub const fn timings(mut self, timings: ScanTimings) -> Self {
-        self.timings = timings;
-        self
-    }
-
     pub const fn target_ssid(&self) -> Option<&Ssid> {
         self.ssid.as_ref()
     }
@@ -367,10 +320,6 @@ impl ScanOptions {
 
     pub const fn scan_kind(&self) -> ScanType {
         self.scan_type
-    }
-
-    pub const fn scan_timings(&self) -> ScanTimings {
-        self.timings
     }
 }
 

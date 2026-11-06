@@ -356,6 +356,67 @@ mod tests {
     }
 
     #[test]
+    fn timed_tx_retry_wakes_an_executor_independent_waker_on_both_interfaces() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct WakeCount(AtomicUsize);
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // Keep the global timer queue's allocated alarm intact across iterations.
+        let clock = embassy_time::MockDriver::get();
+        for id in [InterfaceId::Station, InterfaceId::AccessPoint] {
+            let resources = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+            resources
+                .publish_event(match id {
+                    InterfaceId::Station => WifiEvent::StaConnected,
+                    InterfaceId::AccessPoint => WifiEvent::ApStarted,
+                })
+                .unwrap();
+            let interface = Interface {
+                resources: &resources,
+                id,
+                mac: [2, 0, 0, 0, 0, 1],
+            };
+            let mut state = NetDriverStateWithMtu::<82, 1, 1>::new();
+            let (mut runner, mut device) = new_with_mtu(&mut state, interface).unwrap();
+            let tx = TxScript::new([
+                Err(DriverError::WouldBlock),
+                Err(DriverError::WouldBlock),
+                Ok(()),
+            ]);
+            let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+            let waker = Waker::from(wakes.clone());
+            let mut cx = Context::from_waker(&waker);
+            device
+                .transmit(&mut cx)
+                .unwrap()
+                .consume(14, |buffer| buffer.fill(0x55));
+            let mut run = Box::pin(runner.run());
+
+            assert!(run.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(tx.frames().len(), 1);
+            assert!(run.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(tx.frames().len(), 1);
+            for submissions in [2, 3] {
+                let previous_wakes = wakes.0.load(Ordering::Relaxed);
+                clock.advance(Duration::from_millis(1));
+                assert!(wakes.0.load(Ordering::Relaxed) > previous_wakes);
+                assert!(run.as_mut().poll(&mut cx).is_pending());
+                assert_eq!(tx.frames().len(), submissions);
+            }
+            for (interface, frame) in tx.frames() {
+                assert_eq!(interface, id);
+                assert_eq!(frame, [0x55; 14]);
+            }
+            assert!(device.transmit(&mut cx).is_some());
+        }
+    }
+
+    #[test]
     fn restart_discards_issued_and_buffered_frames_before_reusing_channel_slots() {
         let resources = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
         let mut sdk = Sdk::new(&resources);

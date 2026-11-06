@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  WIFI_FEATURES: wifi-embassy-net,wifi-smoltcp,wifi-esp-now,wifi-smartconfig,wifi-enterprise,wifi-wps,wifi-promiscuous
+  WIFI_FEATURES: embassy,wifi-embassy-net,wifi-smoltcp,wifi-esp-now,wifi-smartconfig,wifi-enterprise,wifi-wps,wifi-promiscuous
 
 jobs:
   host:
@@ -35,7 +35,7 @@ jobs:
           cargo test --target x86_64-unknown-linux-gnu -p esp8266-wifi-sys -p esp8266-hal-proc-macros
       - name: Check independent feature declarations
         run: |
-          for feature in wifi-smoltcp wifi-embassy-net wifi-esp-now wifi-smartconfig wifi-enterprise wifi-wps wifi-promiscuous; do
+          for feature in embassy wifi-smoltcp wifi-embassy-net wifi-esp-now wifi-smartconfig wifi-enterprise wifi-wps wifi-promiscuous; do
             cargo check --target x86_64-unknown-linux-gnu --no-default-features --features "$feature" --lib --tests
           done
       - name: Lint maintained Rust code
@@ -82,7 +82,7 @@ jobs:
           cargo build --release --example blinky --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --features all_in_ram
       - name: Link supported Wi-Fi feature combinations
         run: |
-          for features in wifi wifi-embassy-net wifi-wps wifi-smartconfig,wifi-smoltcp wifi-esp-now wifi-promiscuous wifi-enterprise "$WIFI_FEATURES"; do
+          for features in wifi embassy embassy,wifi-embassy-net wifi-wps wifi-smartconfig,wifi-smoltcp wifi-esp-now wifi-promiscuous wifi-enterprise "$WIFI_FEATURES"; do
             cargo build --release --examples --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --no-default-features --features "$features"
           done
           cargo doc --no-deps --lib --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --no-default-features --features "$WIFI_FEATURES"
