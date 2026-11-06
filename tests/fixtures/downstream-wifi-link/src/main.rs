@@ -30,7 +30,7 @@ unsafe impl WifiAllocator for Allocator {
     }
 }
 
-#[esp8266_hal::main]
+#[esp8266_hal::entry]
 fn main() -> ! {
     extern "C" {
         static mut _heap_start: u8;

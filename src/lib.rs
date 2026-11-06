@@ -13,7 +13,7 @@ compile_error!("ESP8266 target Wi-Fi requires both the `rt` and `interrupt` feat
 
 pub use embedded_hal as ehal;
 pub use esp8266 as target;
-pub use esp8266_hal_proc_macros::{interrupt, main, ram};
+pub use esp8266_hal_proc_macros::{interrupt, ram};
 
 #[cfg(target_arch = "xtensa")]
 mod critical;
@@ -36,8 +36,6 @@ pub mod time;
 pub mod timer;
 pub mod uart;
 pub mod watchdog;
-
-pub mod logger;
 
 #[cfg(feature = "wifi")]
 #[path = "wifi/core/mod.rs"]

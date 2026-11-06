@@ -77,9 +77,9 @@ void esp8266_hal_wps_set_target_ssid(const unsigned char *ssid, unsigned int len
 #ifdef USE_WPS_TASK
 struct wps_rx_param {
     u8 sa[WPS_ADDR_LEN];
-    u8 *buf;
-    int len;
+    u32 len;
     STAILQ_ENTRY(wps_rx_param) bqentry;
+    u8 buf[];
 };
 static STAILQ_HEAD(,wps_rx_param) s_wps_rxq;
 
@@ -193,7 +193,6 @@ static void wps_rxq_deinit(void)
     while ((param = STAILQ_FIRST(&s_wps_rxq)) != NULL) {
         STAILQ_REMOVE_HEAD(&s_wps_rxq, bqentry);
         STAILQ_NEXT(param,bqentry) = NULL;
-        os_free(param->buf);
         os_free(param);
     }
     DATA_MUTEX_GIVE();
@@ -253,7 +252,6 @@ void wps_task(void *pvParameters )
                 struct wps_rx_param *param = NULL;
                 while ((param = wps_rxq_dequeue()) != NULL) {
                     wps_sm_rx_eapol_internal(param->sa, param->buf, param->len);
-                    os_free(param->buf);
                     os_free(param);
                 }
                 break;
@@ -1112,15 +1110,13 @@ int wps_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len)
 
 #ifdef USE_WPS_TASK
     {
-        struct wps_rx_param *param = (struct wps_rx_param *)os_zalloc(sizeof(struct wps_rx_param));   /* free in task */
-
-        if (!param) {
+        struct wps_rx_param *param;
+        /* Header and bytes are released together by the worker or teardown. */
+        if (len > SIZE_MAX - sizeof(*param)) {
             return ESP_ERR_NO_MEM;
         }
-
-        param->buf = (u8 *)os_zalloc(len);   /* free in task */
-        if (!param->buf) {
-            os_free(param);
+        param = os_malloc(sizeof(*param) + len);
+        if (!param) {
             return ESP_ERR_NO_MEM;
         }
         memcpy(param->buf, buf, len);

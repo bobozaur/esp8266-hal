@@ -1,6 +1,47 @@
-//! Concrete SDK double for exercising production control/session logic on host.
+//! Concrete SDK double for exercising production control and packet logic on host.
 extern crate std;
-use super::{resources::Resources, *};
+#[cfg(feature = "wifi-embassy-net")]
+pub(crate) use super::packet::RawRxRecord;
+pub(crate) use super::resources::{InterfaceId, Resources};
+use super::*;
+use std::{cell::RefCell, collections::VecDeque, vec::Vec};
+
+struct TxState {
+    results: VecDeque<Result<(), DriverError>>,
+    frames: Vec<(InterfaceId, Vec<u8>)>,
+}
+
+std::thread_local! {
+    static TX: RefCell<Option<TxState>> = const { RefCell::new(None) };
+}
+
+/// One test's native TX outcomes; unrelated host tests keep an unavailable radio.
+pub(crate) struct TxScript(core::marker::PhantomData<*mut ()>);
+
+impl TxScript {
+    pub(crate) fn new(results: impl IntoIterator<Item = Result<(), DriverError>>) -> Self {
+        TX.with(|tx| {
+            let mut tx = tx.borrow_mut();
+            assert!(tx.is_none(), "one TX script per test thread");
+            *tx = Some(TxState {
+                results: results.into_iter().collect(),
+                frames: Vec::new(),
+            });
+        });
+        Self(core::marker::PhantomData)
+    }
+
+    pub(crate) fn frames(&self) -> Vec<(InterfaceId, Vec<u8>)> {
+        TX.with(|tx| tx.borrow().as_ref().unwrap().frames.clone())
+    }
+}
+
+impl Drop for TxScript {
+    fn drop(&mut self) {
+        TX.with(|tx| *tx.borrow_mut() = None);
+    }
+}
+
 pub(crate) struct Sdk {
     resources: *const Resources,
     pub(crate) started: bool,
@@ -23,6 +64,19 @@ pub(crate) struct Sdk {
     pub(crate) smartconfig_active: bool,
 }
 impl Sdk {
+    pub(crate) fn transmit(interface: InterfaceId, frame: &[u8]) -> Result<(), DriverError> {
+        TX.with(|tx| {
+            let mut tx = tx.borrow_mut();
+            let Some(tx) = tx.as_mut() else {
+                return Err(DriverError::InvalidState);
+            };
+            tx.frames.push((interface, frame.to_vec()));
+            tx.results
+                .pop_front()
+                .expect("unexpected native TX submission")
+        })
+    }
+
     pub(crate) fn new(resources: &Resources) -> Self {
         Self {
             resources,

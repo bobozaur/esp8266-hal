@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "esp8266", "procmacros", "esp8266-wifi-sys", "xtask"]
+members = [".", "esp8266", "procmacros", "esp8266-wifi-sys"]
 resolver = "2"
 
 [package]
@@ -20,7 +20,6 @@ include = [
   "/ld/**",
   "/build.rs",
   "/README.md",
-  "/docs/**",
   "/LICENSE-APACHE",
   "/LICENSE-MIT",
 ]
@@ -97,13 +96,7 @@ portable-atomic = { version = "1", default-features = false, features = ["unsafe
 name = "blinky"
 
 [[example]]
-name = "entry_probe"
-
-[[example]]
 name = "flash"
-
-[[example]]
-name = "reset_probe"
 
 [[example]]
 name = "serial"
@@ -128,36 +121,32 @@ name = "wifi_core_connect"
 required-features = ["wifi"]
 
 [[example]]
-name = "wifi_core_dhcp_probe"
-required-features = ["wifi-embassy-net"]
-
-[[example]]
 name = "raw_scan"
 required-features = ["wifi"]
 
 [[example]]
 name = "wifi_ap"
-required-features = ["embassy"]
+required-features = ["wifi"]
 
 [[example]]
 name = "wifi_ap_sta"
-required-features = ["wifi-embassy-net"]
+required-features = ["wifi"]
 
 [[example]]
 name = "wifi_promisc"
-required-features = ["wifi-promiscuous", "embassy"]
+required-features = ["wifi-promiscuous"]
 
 [[example]]
 name = "wifi_esp_now_tx"
-required-features = ["wifi-esp-now", "embassy"]
+required-features = ["wifi-esp-now"]
 
 [[example]]
 name = "wifi_esp_now_rx"
-required-features = ["wifi-esp-now", "embassy"]
+required-features = ["wifi-esp-now"]
 
 [[example]]
 name = "wifi_wps"
-required-features = ["wifi-wps", "embassy"]
+required-features = ["wifi-wps"]
 
 [[example]]
 name = "wifi_smartconfig"

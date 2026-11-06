@@ -113,7 +113,6 @@ pub unsafe extern "C" fn __wifi_task_create(
     let result = unsafe {
         task::create_task(
             entry,
-            name.cast(),
             stack_bytes,
             argument,
             priority,

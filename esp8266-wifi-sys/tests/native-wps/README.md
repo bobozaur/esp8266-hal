@@ -30,7 +30,9 @@ Coverage includes initialization allocation failures and retry in both PBC/PIN
 modes, partial cleanup, copied IE/callback ownership, first-credential selection,
 configuration rejection, zero-allocation completion, value queue/coalescing,
 failed start/disable and retry, stale queued work, fragment bounds and lifetime,
-response allocation failures, and scan selection/error handling. Guard pages
+response allocation failures, and scan selection/error handling. Receive packets
+use one allocation each; failed posting retains a queued packet until the next
+receive event or teardown drains it, including allocation failure and retry. Guard pages
 make reads past exact malformed-input lengths fail; the tracked allocator checks
 leaks, double frees, and writes past requested sizes. A valid fragmented message
 must reach the enrollee dependency with exactly the expected bytes.

@@ -618,7 +618,7 @@ mod tests {
                 BYTES.as_ptr().cast_mut().cast(),
                 len,
                 Arc::into_raw(releases.clone()).cast_mut().cast(),
-                Some(release),
+                release,
             )
         }
     }
@@ -793,7 +793,7 @@ mod tests {
                     BYTES.as_ptr().cast_mut().cast(),
                     64,
                     Box::into_raw(context).cast(),
-                    Some(release),
+                    release,
                 )
             };
             r.enqueue_rx(InterfaceId::Station, record).unwrap();

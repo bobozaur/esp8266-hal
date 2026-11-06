@@ -1,141 +1,43 @@
-use std::env;
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::PathBuf;
-
-const IROM_FLASH_OFFSET_ENV: &str = "ESP8266_HAL_IROM_FLASH_OFFSET";
-const EAP_FILE_ENV_VARS: [&str; 7] = [
-    "ESP8266_HAL_EAP_CA_CERT_PEM_NUL_FILE",
-    "ESP8266_HAL_EAP_CLIENT_CERT_PEM_NUL_FILE",
-    "ESP8266_HAL_EAP_PRIVATE_KEY_PEM_NUL_FILE",
-    "ESP8266_HAL_EAP_PRIVATE_KEY_PASSWORD_NUL_FILE",
-    "ESP8266_HAL_EAP_CA_CERT_DER_FILE",
-    "ESP8266_HAL_EAP_CLIENT_CERT_DER_FILE",
-    "ESP8266_HAL_EAP_PRIVATE_KEY_DER_FILE",
-];
-const DEFAULT_IROM_ORIGIN: u32 = 0x4021_0000;
-const IROM_FLASH_BASE: u32 = 0x4020_0000;
-const IROM_WINDOW_SIZE: u32 = 0x10_0000;
+use std::{env, fs, path::PathBuf};
 
 fn main() {
-    let enterprise = env::var_os("CARGO_FEATURE_WIFI_ENTERPRISE").is_some();
-    for name in EAP_FILE_ENV_VARS {
-        let cfg = name.to_ascii_lowercase();
-        println!("cargo:rustc-check-cfg=cfg({cfg})");
-        println!("cargo:rerun-if-env-changed={name}");
-        if enterprise && env::var_os(name).is_some() {
-            println!("cargo:rustc-cfg={cfg}");
-        }
-    }
-
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let wifi_target = env::var_os("CARGO_FEATURE_WIFI").is_some()
         && env::var("TARGET").as_deref() == Ok("xtensa-esp8266-none-elf");
 
-    // Put the linker script somewhere the linker can find it
-    let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let memory_x = memory_x();
-    File::create(out.join("memory.x"))
-        .unwrap()
-        .write_all(memory_x.as_bytes())
-        .unwrap();
+    fs::write(out.join("memory.x"), include_bytes!("ld/memory.x")).unwrap();
+    let alias = if cfg!(feature = "all_in_ram") {
+        include_str!("ld/ram.x")
+    } else {
+        include_str!("ld/rom.x")
+    };
+    fs::write(out.join("alias.x"), alias).unwrap();
 
-    let alias_x = alias_x();
-    File::create(out.join("alias.x"))
-        .unwrap()
-        .write_all(alias_x.as_bytes())
-        .unwrap();
-
-    // Override xtensa-lx-rt's link.x with our own version that collects
-    // .rodata2.* / .text2.* / .literal2.* orphan sections from the SDK WiFi
-    // blob libraries. Without this, the linker creates misaligned segments
-    // that crash the ESP8266 ROM bootloader.
-    let wifi_link_inputs = if wifi_target {
+    // Collect the SDK's additional sections and select its native symbols and
+    // NMI vector only for Wi-Fi firmware. Dependency Cargo configuration does
+    // not propagate, so the final application still selects -Tlink.x.
+    let wifi_inputs = if wifi_target {
         include_str!("ld/wifi.x")
     } else {
         ""
     };
-    let mut link_x = include_str!("ld/link.x").replace("/* WIFI_LINK_INPUTS */", wifi_link_inputs);
+    let mut link = include_str!("ld/link.x").replace("/* WIFI_LINK_INPUTS */", wifi_inputs);
     if wifi_target {
         fs::write(
             out.join("wifi-exception.x"),
             include_bytes!("ld/wifi-exception.x"),
         )
-        .expect("failed to stage Wi-Fi exception vectors");
-        link_x = link_x.replace("INCLUDE exception.x", "INCLUDE wifi-exception.x");
-    }
-    File::create(out.join("link.x"))
-        .unwrap()
-        .write_all(link_x.as_bytes())
         .unwrap();
-
-    println!("cargo:rustc-link-search={}", out.display());
-
-    if wifi_target {
-        let linker_scripts = PathBuf::from(
+        link = link.replace("INCLUDE exception.x", "INCLUDE wifi-exception.x");
+        let sdk_scripts = PathBuf::from(
             env::var_os("DEP_ESP8266_WIFI_LD_SCRIPTS")
-                .expect("esp8266-wifi-sys did not export its vendored linker scripts"),
+                .expect("esp8266-wifi-sys did not export its linker scripts"),
         );
         for script in ["esp8266.rom.ld", "esp8266.peripherals.ld"] {
-            fs::copy(linker_scripts.join(script), out.join(script))
-                .unwrap_or_else(|error| panic!("failed to stage {script}: {error}"));
+            fs::copy(sdk_scripts.join(script), out.join(script)).unwrap();
         }
     }
-
-    // Re-run when linker scripts change.
-    println!("cargo:rerun-if-changed=ld/memory.x");
-    println!("cargo:rerun-if-changed=ld/link.x");
-    println!("cargo:rerun-if-changed=ld/rom.x");
-    println!("cargo:rerun-if-changed=ld/ram.x");
-    println!("cargo:rerun-if-changed=ld/wifi.x");
-    println!("cargo:rerun-if-changed=ld/wifi-exception.x");
-    println!("cargo:rerun-if-env-changed={IROM_FLASH_OFFSET_ENV}");
-}
-
-fn alias_x() -> &'static str {
-    if cfg!(feature = "all_in_ram") {
-        include_str!("ld/ram.x")
-    } else {
-        include_str!("ld/rom.x")
-    }
-}
-
-fn memory_x() -> String {
-    let mut memory = include_str!("ld/memory.x").to_owned();
-    let Some(offset) = irom_flash_offset() else {
-        return memory;
-    };
-    let origin = IROM_FLASH_BASE
-        .checked_add(offset)
-        .expect("ESP8266_HAL_IROM_FLASH_OFFSET overflows IROM address");
-    memory = memory.replace(
-        &format!("ORIGIN = 0x{DEFAULT_IROM_ORIGIN:08x}, LENGTH = 0xf0000"),
-        &format!(
-            "ORIGIN = 0x{origin:08x}, LENGTH = 0x{:x}",
-            IROM_WINDOW_SIZE - offset
-        ),
-    );
-    memory
-}
-
-fn irom_flash_offset() -> Option<u32> {
-    let raw = env::var(IROM_FLASH_OFFSET_ENV).ok()?;
-    let offset = parse_u32_literal(&raw).unwrap_or_else(|| {
-        panic!("{IROM_FLASH_OFFSET_ENV} must be a decimal or 0x-prefixed number")
-    });
-    if !(0x10000..IROM_WINDOW_SIZE).contains(&offset) || offset & 0xffff != 0 {
-        panic!("{IROM_FLASH_OFFSET_ENV} must be 64 KiB aligned in 0x10000..0x100000");
-    }
-    Some(offset)
-}
-
-fn parse_u32_literal(raw: &str) -> Option<u32> {
-    let value = raw.trim();
-    if let Some(hex) = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-    {
-        u32::from_str_radix(hex, 16).ok()
-    } else {
-        value.parse().ok()
-    }
+    fs::write(out.join("link.x"), link).unwrap();
+    println!("cargo:rustc-link-search={}", out.display());
+    println!("cargo:rerun-if-changed=ld");
 }

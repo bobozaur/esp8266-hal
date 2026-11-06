@@ -9,7 +9,7 @@ use esp8266_hal::prelude::*;
 use esp8266_hal::target::Peripherals;
 use panic_halt as _;
 
-#[esp8266_hal::main]
+#[esp8266_hal::entry]
 fn main() -> ! {
     let dp = Peripherals::take().unwrap();
     // Select the application's baud independently of the ROM boot output.

@@ -159,7 +159,7 @@ unsafe extern "C" fn __level_1_interrupt_body(_level: u32, frame: &mut Context) 
 
         crate::wifi::compat::task::note_interrupt_frame(frame_ptr);
         crate::wifi::compat::port::isr_dispatch();
-        crate::wifi::compat::port::apply_pending_context_switch(frame_ptr);
+        crate::wifi::compat::port::apply_pending_context_switch();
     }
 }
 

@@ -698,6 +698,11 @@ impl Wpa2EnterpriseClientCertificate {
 /// configure the ESP8266 RTOS SDK supplicant. PEM certificate
 /// slices must include a trailing NUL byte for the ESP8266 RTOS SDK; DER slices
 /// should be provided through the DER-specific constructors.
+///
+/// The bundled TLS configuration limits incoming and outgoing record contents
+/// to 2,048 bytes, RSA moduli to 2,048 bits, and EC groups to 256 bits. Certificate
+/// chains and handshake allocations must also fit the application's shared heap;
+/// key-size limits alone do not establish that a certificate profile will fit.
 #[cfg(feature = "wifi-enterprise")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Wpa2EnterpriseCredentials<'a> {
@@ -1084,6 +1089,10 @@ impl Default for InitConfig {
 /// Fixed queue capacities and the ESP-NOW peer limit. Queue storage is allocated
 /// once by Wifi initialization; peers are stored by the native SDK. Zero disables
 /// the corresponding queue or adding peers.
+///
+/// RX capacities bound queued records. Checked-out receive tokens additionally
+/// consume native buffers until released. `frame_bytes` must be between
+/// [`super::MIN_IPV4_ETHERNET_FRAME_SIZE`] and [`super::MAX_ETHERNET_FRAME_SIZE`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueConfig {
     pub station_rx: usize,

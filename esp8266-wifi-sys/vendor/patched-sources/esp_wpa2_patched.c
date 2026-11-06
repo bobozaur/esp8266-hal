@@ -152,9 +152,9 @@ static void wpa2_producer_leave(void)
 struct wpa2_rx_param {
     uint8_t *bssid;
     u8 sa[WPA_ADDR_LEN];
-    u8 *buf;
-    int len;
+    u32 len;
     STAILQ_ENTRY(wpa2_rx_param) bqentry;
+    u8 buf[];
 };
 static STAILQ_HEAD(, wpa2_rx_param) s_wpa2_rxq;
 
@@ -200,7 +200,6 @@ static void wpa2_rxq_discard(struct wpa2_rx_param *param)
     WPA2_STATE_UNLOCK();
     /* A worker may already have taken it while the producer was posting. */
     if (found) {
-        os_free(param->buf);
         os_free(param);
     }
 }
@@ -209,7 +208,6 @@ static void wpa2_rxq_deinit(void)
 {
     struct wpa2_rx_param *param;
     while ((param = wpa2_rxq_dequeue()) != NULL) {
-        os_free(param->buf);
         os_free(param);
     }
 }
@@ -239,7 +237,6 @@ void wpa2_task(void *pvParameters)
             while ((param = wpa2_rxq_dequeue()) != NULL) {
                 eap_sm_rx_eapol_internal(param->sa, param->buf,
                                          param->len, param->bssid);
-                os_free(param->buf);
                 os_free(param);
             }
             break;
@@ -538,14 +535,12 @@ static int eap_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len, uint8_t *bssid)
     /* Cover allocation/enqueue as well as the synchronous completion wait. */
     if (!wpa2_producer_enter())
         return ESP_FAIL;
-    param = os_zalloc(sizeof(*param));
+    /* Header and bytes have the same worker lifetime and one allocation. */
+    if (len > SIZE_MAX - sizeof(*param))
+        goto out;
+    param = os_malloc(sizeof(*param) + len);
     if (!param)
         goto out;
-    param->buf = os_zalloc(len);
-    if (!param->buf) {
-        os_free(param);
-        goto out;
-    }
     param->bssid = bssid;
     memcpy(param->buf, buf, len);
     param->len = len;

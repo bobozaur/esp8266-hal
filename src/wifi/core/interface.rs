@@ -6,6 +6,11 @@ use core::task::Waker;
 
 /// Independent station or access-point Ethernet endpoint borrowed from Wifi.
 /// Connection policy and radio configuration remain on the controller.
+///
+/// RX queue slots hold native buffer leases. Disconnection discards queued
+/// frames for that interface; checked-out adapter tokens remain valid until
+/// released and continue consuming native RX capacity. IP addressing, DHCP,
+/// sockets, and reset of upper-stack state belong to the application.
 pub struct Interface<'d> {
     pub(crate) resources: &'d Resources,
     pub(crate) id: InterfaceId,
@@ -28,9 +33,11 @@ impl<'d> Interface<'d> {
     pub fn link_state(&self) -> LinkState {
         self.resources.interface_link_state(self.id)
     }
+    /// Replaces the link notification waiter. Register before rechecking link state.
     pub fn register_link_waker(&self, w: &Waker) {
         self.resources.register_link_waker(self.id, w)
     }
+    /// Replaces the RX notification waiter. Register before rechecking RX availability.
     pub fn register_rx_waker(&self, w: &Waker) {
         self.resources.register_rx_waker(self.id, w)
     }
@@ -55,6 +62,12 @@ impl<'d> Interface<'d> {
     pub(crate) fn tx_generation(&self) -> u32 {
         self.resources.generation(self.id)
     }
+    /// Copies a complete Ethernet frame into native storage when accepted.
+    ///
+    /// Frames must contain at least the 14-byte Ethernet header and fit
+    /// [`Self::max_frame_size`]. Valid short frames retain their logical length.
+    /// [`DriverError::WouldBlock`] leaves the frame with the caller for retry;
+    /// stopped or disconnected interfaces return [`DriverError::NotStarted`].
     pub fn transmit(&mut self, frame: &[u8]) -> Result<(), DriverError> {
         self.transmit_in_generation(frame, self.tx_generation())
     }
@@ -68,23 +81,13 @@ impl<'d> Interface<'d> {
             return Err(DriverError::PayloadTooLong);
         }
         let _submission = self.resources.begin_submission(self.id, generation)?;
-        #[cfg(target_arch = "xtensa")]
-        {
-            match self.id {
-                InterfaceId::Station => super::target::Sdk::transmit(frame),
-                InterfaceId::AccessPoint => super::target::Sdk::transmit_ap(frame),
-            }
-        }
-        #[cfg(not(target_arch = "xtensa"))]
-        {
-            Err(DriverError::InvalidState)
-        }
+        super::target::Sdk::transmit(self.id, frame)
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "xtensa")))]
 mod tests {
-    use super::super::{allocator::test_allocator, QueueConfig, WifiEvent};
+    use super::super::{allocator::test_allocator, target::TxScript, QueueConfig, WifiEvent};
     use super::*;
 
     #[test]
@@ -103,6 +106,7 @@ mod tests {
             id: InterfaceId::Station,
             mac: [2; 6],
         };
+        let tx = TxScript::new([Ok(()), Ok(()), Ok(()), Ok(())]);
         for len in 0..14 {
             assert_eq!(
                 interface.transmit(&[0; 14][..len]),
@@ -110,11 +114,7 @@ mod tests {
             );
         }
         for len in [14, 18, 42, 82] {
-            // These lengths reach target dispatch; the host has no native TX.
-            assert_eq!(
-                interface.transmit(&[0; 82][..len]),
-                Err(DriverError::InvalidState)
-            );
+            assert_eq!(interface.transmit(&[0; 82][..len]), Ok(()));
         }
         assert_eq!(
             interface.transmit(&[0; 83]),
@@ -124,5 +124,11 @@ mod tests {
             interface.transmit(&[0; 1515]),
             Err(DriverError::PayloadTooLong)
         );
+        let frames = tx.frames();
+        assert_eq!(frames.len(), 4);
+        for ((id, frame), len) in frames.iter().zip([14, 18, 42, 82]) {
+            assert_eq!(*id, InterfaceId::Station);
+            assert_eq!(frame.len(), len);
+        }
     }
 }

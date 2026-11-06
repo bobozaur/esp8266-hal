@@ -11,8 +11,8 @@ from pathlib import Path
 
 
 CASES = ("short", "cached", "distinct", "fragments", "empty-output",
-         "lifecycle-init", "lifecycle-queue", "lifecycle-suspended",
-         "lifecycle-active", "lifecycle-credentials")
+         "lifecycle-init", "lifecycle-queue", "lifecycle-rx", "lifecycle-suspended",
+         "lifecycle-active", "lifecycle-credentials", "tls-backend")
 
 
 def run_tests(args, output, shared):
@@ -27,27 +27,37 @@ def run_tests(args, output, shared):
         flags.extend(("-I", str(path)))
     flags.extend("-D" + define for define in shared["DEFINES"])
     flags.append("-DSSIZE_MAX=2147483647")
-    sources = [
-        args.request_source or canonical / "esp_wpa2_patched.c",
-        args.tls_source or canonical / "eap_tls_common_patched.c",
-        args.sdk / "components/wpa_supplicant/src/utils/wpabuf.c",
-        args.sdk / "components/wpa_supplicant/src/eap_peer/eap.c",
-        args.sdk / "components/wpa_supplicant/src/eap_peer/eap_common.c",
-        here / "fixture.c",
-    ]
-    objects = []
-    for index, source in enumerate(sources):
-        obj = output / f"{index}-{source.stem}.o"
-        subprocess.run([args.cc, *flags, "-c", str(source), "-o", str(obj)], check=True)
-        objects.append(obj)
+    selected = args.case or CASES
     host = output / "host.o"
     subprocess.run([args.cc, "-O1", "-fno-pie", "-Wall", "-c", str(here / "host.c"),
                     "-o", str(host)], check=True)
-    executable = output / "native-eap"
-    subprocess.run([args.cc, "-no-pie", "-Wl,--gc-sections",
-                    *(str(obj) for obj in objects), str(host), "-o", str(executable)], check=True)
+    groups = {}
+    if any(case != "tls-backend" for case in selected):
+        groups["native-eap"] = [
+            args.request_source or canonical / "esp_wpa2_patched.c",
+            args.tls_source or canonical / "eap_tls_common_patched.c",
+            args.sdk / "components/wpa_supplicant/src/utils/wpabuf.c",
+            args.sdk / "components/wpa_supplicant/src/eap_peer/eap.c",
+            args.sdk / "components/wpa_supplicant/src/eap_peer/eap_common.c",
+            here / "fixture.c",
+        ]
+    if "tls-backend" in selected:
+        groups["native-tls"] = [
+            args.backend_source or canonical / "tls_mbedtls_patched.c",
+            args.sdk / "components/wpa_supplicant/src/utils/wpabuf.c",
+            here / "tls_backend.c",
+        ]
+    for name, sources in groups.items():
+        objects = []
+        for index, source in enumerate(sources):
+            obj = output / f"{name}-{index}-{source.stem}.o"
+            subprocess.run([args.cc, *flags, "-c", str(source), "-o", str(obj)], check=True)
+            objects.append(obj)
+        subprocess.run([args.cc, "-no-pie", "-Wl,--gc-sections",
+                        *(str(obj) for obj in objects), str(host), "-o", str(output / name)], check=True)
     failures = []
-    for case in args.case or CASES:
+    for case in selected:
+        executable = output / ("native-tls" if case == "tls-backend" else "native-eap")
         print(f"native EAP case: {case}", flush=True)
         try:
             subprocess.run([str(executable), case], check=True, timeout=10)
@@ -71,6 +81,8 @@ def main():
                         help="Alternate request source for explicit negative controls")
     parser.add_argument("--tls-source", type=Path,
                         help="Alternate TLS common source for explicit negative controls")
+    parser.add_argument("--backend-source", type=Path,
+                        help="Alternate TLS backend source for explicit negative controls")
     parser.add_argument("--case", action="append", choices=CASES)
     args = parser.parse_args()
     if platform.system() != "Linux" or platform.machine() != "x86_64" or os.sysconf("SC_PAGESIZE") != 4096:
@@ -81,6 +93,8 @@ def main():
         args.request_source = args.request_source.resolve()
     if args.tls_source:
         args.tls_source = args.tls_source.resolve()
+    if args.backend_source:
+        args.backend_source = args.backend_source.resolve()
     for header in ("sys/reent.h", "stdio.h"):
         if not (args.sysroot / "include" / header).is_file():
             parser.error("--sysroot must contain the pinned Xtensa newlib include/ headers")

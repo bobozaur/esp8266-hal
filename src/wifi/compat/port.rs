@@ -518,14 +518,12 @@ pub fn set_wdev_tick_poll_enabled(enabled: bool) {
     POLL_WDEV_ON_TICK.store(enabled, Ordering::Release);
 }
 
-/// Apply a pending task switch using the live xtensa-lx-rt interrupt frame.
+/// Select the saved frame to restore after a pending task switch.
 ///
-/// xtensa-lx-rt restores CPU state from the current live level-1 interrupt
-/// frame on return, so a compat task switch must overwrite that live frame
-/// with the selected task's saved frame before control returns to the outer
-/// xtensa-lx-rt restore sequence.
+/// The level-one entry records the interrupted task's frame before dispatch.
+/// Its exit restores the selected frame directly from that task's own stack.
 #[ram]
-pub unsafe fn apply_pending_context_switch(frame: *mut u8) {
+pub unsafe fn apply_pending_context_switch() {
     unsafe {
         if S_SWITCH_CTX_FLAG == 0 {
             return;
@@ -537,7 +535,6 @@ pub unsafe fn apply_pending_context_switch(frame: *mut u8) {
             return;
         }
 
-        task::save_current_frame(frame);
         task::vTaskSwitchContext();
         g_level1_restore_sp = task::prepare_current_frame_for_restore() as u32;
         S_SWITCH_CTX_FLAG = 0;
@@ -677,13 +674,19 @@ pub(crate) unsafe fn start_compat_scheduler() -> Result<(), ()> {
 }
 
 // ---------------------------------------------------------------------------
-// Hooks (weak-like defaults — C code may override via linker)
+// Native task failure and idle hooks
 // ---------------------------------------------------------------------------
 
 /// `vApplicationStackOverflowHook` — called on stack overflow detection.
 #[no_mangle]
-pub unsafe extern "C" fn vApplicationStackOverflowHook(_task: *mut c_void, _task_name: *const u8) {
-    loop {}
+#[ram]
+pub unsafe extern "C" fn vApplicationStackOverflowHook(
+    _task: *mut c_void,
+    _task_name: *const u8,
+) -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 /// `vApplicationIdleHook` — called from the idle task (placeholder).

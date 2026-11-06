@@ -1,312 +1,126 @@
-//! ESP8266 static IPv4 station validation using the Wi-Fi controller.
+//! Bring up a station with an application-selected static IPv4 configuration.
+//! Set ESP8266_HAL_WIFI_SSID and ESP8266_HAL_WIFI_PASS when building, and replace
+//! the documentation addresses below with unused addresses on your network.
+//! The TCP examples show how to use the resulting Embassy stack for sockets.
 
 #![no_std]
 #![no_main]
 
-use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
-use embassy_net::tcp::TcpSocket;
-use embassy_time::Duration;
-use embedded_io_async::Write as IoWrite;
-
-use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverStateWithMtu};
 mod support;
+
+use core::fmt::Write;
+use embassy_net::{Ipv4Address, Ipv4Cidr, StaticConfigV4};
+use embassy_time::Timer;
+use esp8266_hal::ehal::blocking::rng::Read as _;
+use esp8266_hal::rng::RngExt;
 use esp8266_hal::timer::TimerExt;
-use support::ip::StaticIpv4Config;
-use support::log_line;
-
+use esp8266_hal::uart::UART0Serial;
+use esp8266_hal::wifi::embassy_net::{self as wifi_net, NetDriverStateWithMtu};
 use esp8266_hal::wifi::{
-    Channel, ClientConfig, Configuration, Controller, InitConfig, Interface as WifiInterface,
-    Ipv4Addr as CoreIpv4Addr, Passphrase, Ssid, StationCredential, Wifi,
+    ClientConfig, Configuration, InitConfig, Passphrase, Ssid, StationCredential, Wifi,
 };
+use panic_halt as _;
 use static_cell::StaticCell;
-use xtensa_lx_rt::exception::{Context, ExceptionCause};
 
-const WIFI_SSID: &str = match option_env!("ESP8266_HAL_WIFI_SSID") {
-    Some(ssid) => ssid,
-    None => "esp8266-hal",
+const SSID: &str = match option_env!("ESP8266_HAL_WIFI_SSID") {
+    Some(value) => value,
+    None => "your-ssid",
 };
-const WIFI_PASS: &str = match option_env!("ESP8266_HAL_WIFI_PASS") {
-    Some(pass) => pass,
-    None => "esp8266-pass",
+const PASSWORD: &str = match option_env!("ESP8266_HAL_WIFI_PASS") {
+    Some(value) => value,
+    None => "your-password",
 };
-const DEFAULT_STATIC_IPV4: &str = "192.168.0.116";
-const DEFAULT_STATIC_PREFIX: &str = "24";
-const DEFAULT_STATIC_GATEWAY: &str = "192.168.0.1";
-const DEFAULT_SERVER_HOST: &str = "93.184.216.34";
-const DEFAULT_SERVER_PORT: &str = "80";
-const STATIC_IPV4: &str = match option_env!("ESP8266_HAL_STATIC_IPV4") {
-    Some(address) => address,
-    None => DEFAULT_STATIC_IPV4,
-};
-const STATIC_PREFIX: &str = match option_env!("ESP8266_HAL_STATIC_PREFIX") {
-    Some(prefix) => prefix,
-    None => DEFAULT_STATIC_PREFIX,
-};
-const STATIC_GATEWAY: &str = match option_env!("ESP8266_HAL_STATIC_GATEWAY") {
-    Some(gateway) => gateway,
-    None => DEFAULT_STATIC_GATEWAY,
-};
-const SERVER_HOST: &str = match option_env!("ESP8266_HAL_TCP_CLIENT_HOST") {
-    Some(host) => host,
-    None => DEFAULT_SERVER_HOST,
-};
-const SERVER_PORT: &str = match option_env!("ESP8266_HAL_TCP_CLIENT_PORT") {
-    Some(port) => port,
-    None => DEFAULT_SERVER_PORT,
-};
-const WIFI_CHANNEL: Option<&str> = option_env!("ESP8266_HAL_WIFI_CHANNEL");
-const NET_RX_PACKETS: usize = 1;
-const NET_TX_PACKETS: usize = 1;
-// Keep the bridge MTU modest for ESP8266 DRAM. This example only validates
-// static IPv4 plus a tiny TCP smoke, so a full Ethernet MTU is unnecessary.
+// A 672-byte frame capacity bounds DRAM use while supporting IPv4 DHCP.
 const NET_MTU: usize = 672;
-const TCP_BUF_BYTES: usize = 64;
+type NetState = NetDriverStateWithMtu<NET_MTU, 1, 1>;
+type WifiRunner = wifi_net::RunnerWithMtu<'static, 'static, NET_MTU>;
+type NetRunner = embassy_net::Runner<'static, wifi_net::NetDeviceWithMtu<'static, NET_MTU>>;
 
-type StaticNetState = NetDriverStateWithMtu<NET_MTU, NET_RX_PACKETS, NET_TX_PACKETS>;
-
-static NET_STATE: StaticCell<StaticNetState> = StaticCell::new();
 static WIFI: StaticCell<Wifi> = StaticCell::new();
+static NET_STATE: StaticCell<NetState> = StaticCell::new();
 static STACK_RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
-static WIFI_RUNNER: StaticCell<WifiNetRunner> = StaticCell::new();
-static NET_RUNNER: StaticCell<EmbassyNetRunner> = StaticCell::new();
-static TCP_RX_BUF: StaticCell<[u8; TCP_BUF_BYTES]> = StaticCell::new();
-static TCP_TX_BUF: StaticCell<[u8; TCP_BUF_BYTES]> = StaticCell::new();
+static WIFI_RUNNER: StaticCell<WifiRunner> = StaticCell::new();
+static NET_RUNNER: StaticCell<NetRunner> = StaticCell::new();
+static EXECUTOR: StaticCell<esp8266_hal::wifi::executor::Executor> = StaticCell::new();
 
-type WifiNetRunner = wifi_net::RunnerWithMtu<'static, 'static, NET_MTU>;
-type EmbassyNetRunner = embassy_net::Runner<'static, wifi_net::NetDeviceWithMtu<'static, NET_MTU>>;
+const ADDRESS: Ipv4Address = Ipv4Address::new(192, 0, 2, 2);
+const PREFIX_LEN: u8 = 24;
+const GATEWAY: Ipv4Address = Ipv4Address::new(192, 0, 2, 1);
 
-#[inline(never)]
-fn log_static_up(config: StaticIpv4Config) {
-    esp8266_hal::logger::write_bytes(b"static ip up Cidr { address: ");
-    esp8266_hal::logger::write_ipv4_octets(config.address().octets());
-    esp8266_hal::logger::write_bytes(b", prefix_len: ");
-    esp8266_hal::logger::write_dec_u32(config.prefix_len() as u32);
-    esp8266_hal::logger::write_bytes(b" }");
-    esp8266_hal::logger::write_newline();
-}
-
-#[inline(never)]
-fn log_target(host: [u8; 4], port: u16) {
-    esp8266_hal::logger::write_bytes(b"tcp client target ");
-    esp8266_hal::logger::write_ipv4_octets(host);
-    esp8266_hal::logger::write_byte(b':');
-    esp8266_hal::logger::write_dec_u32(port as u32);
-    esp8266_hal::logger::write_newline();
-}
-
-#[inline(never)]
-fn log_recv_count(count: usize) {
-    esp8266_hal::logger::write_bytes(b"recv:");
-    esp8266_hal::logger::write_dec_u32(count as u32);
-    esp8266_hal::logger::write_newline();
-}
-
-fn init_wifi(
-    runtime: &'static esp8266_hal::wifi::Runtime,
-) -> (Controller<'static>, esp8266_hal::wifi::Interfaces<'static>) {
-    let mut init = InitConfig::new(14, 4, 4).expect("init config");
-    init.queues.station_rx = 4;
-    let wifi = WIFI.init(Wifi::new(runtime, init).expect("wifi init"));
-    let (mut driver, interfaces) = wifi.split();
-    log_line(b"wifi init ok");
-
-    let credential = if WIFI_PASS.trim().is_empty() {
-        StationCredential::open()
-    } else {
-        StationCredential::wpa2(Passphrase::wpa2(WIFI_PASS.trim()).expect("pass"))
-    };
-
-    let mut config = ClientConfig::new(Ssid::try_from(WIFI_SSID.trim()).expect("ssid"), credential);
-    if let Some(channel) = WIFI_CHANNEL
-        .and_then(|value| value.parse::<u8>().ok())
-        .and_then(|channel| Channel::try_from(channel).ok())
-    {
-        config = config.with_channel(channel);
-    }
-
-    driver
-        .set_configuration(&Configuration::Station(config))
-        .expect("configure sta");
-    driver.start_blocking(1_000).expect("wifi start");
-    (driver, interfaces)
-}
-
-#[embassy_executor::task]
-async fn wifi_driver_task(runner: &'static mut WifiNetRunner) -> ! {
-    runner.run().await
-}
-
-#[embassy_executor::task]
-async fn net_runner_task(runner: &'static mut EmbassyNetRunner) -> ! {
-    runner.run().await
-}
-
-fn start_network(
-    spawner: Spawner,
-    interface: WifiInterface<'static>,
-    static_config: StaticIpv4Config,
-) -> embassy_net::Stack<'static> {
-    let link = interface;
-    let net_state = NET_STATE.init(StaticNetState::new());
-    let (driver_runner, net_device) = wifi_net::new_with_mtu(net_state, link).expect("net driver");
-
-    let config = embassy_net::Config::ipv4_static(to_embassy_static_config(static_config));
-    let resources = STACK_RESOURCES.init(embassy_net::StackResources::<2>::new());
-    let seed = 0x1234_5678_9abc_def0u64;
-
-    let (stack, net_runner) = embassy_net::new(net_device, config, resources, seed);
-    let driver_runner = WIFI_RUNNER.init(driver_runner);
-    let net_runner = NET_RUNNER.init(net_runner);
-    spawner.must_spawn(wifi_driver_task(driver_runner));
-    spawner.must_spawn(net_runner_task(net_runner));
-    stack
-}
-
-#[esp8266_hal::main]
+#[esp8266_hal::entry]
 fn main() -> ! {
-    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let peripherals = esp8266_hal::target::Peripherals::take().unwrap();
+    let mut serial = support::serial(peripherals.UART0, peripherals.GPIO);
     let (_, timer2) = peripherals.TIMER.timers();
     let runtime = support::init(timer2);
-    static EXECUTOR: StaticCell<esp8266_hal::wifi::executor::Executor> = StaticCell::new();
+    let mut init = InitConfig::new(14, 4, 4).unwrap();
+    init.queues.frame_bytes = NET_MTU;
+    let wifi = WIFI.init(Wifi::new(runtime, init).expect("Wi-Fi initialization"));
+    let (mut controller, interfaces) = wifi.split();
+
+    let credential = if PASSWORD.is_empty() {
+        StationCredential::open()
+    } else {
+        StationCredential::wpa2(Passphrase::wpa2(PASSWORD).expect("password"))
+    };
+    let station = ClientConfig::new(Ssid::try_from(SSID).expect("SSID"), credential);
+    controller
+        .set_configuration(&Configuration::Station(station))
+        .expect("station configuration");
+    controller.start_blocking(1_000).expect("start Wi-Fi");
+    if let Err(error) = controller.connect_blocking(30_000) {
+        writeln!(serial, "Connection failed: {error:?}\r").unwrap();
+        loop {
+            esp8266_hal::wifi::delay_ticks(100);
+        }
+    }
+
+    let (wifi_runner, device) =
+        wifi_net::new_with_mtu(NET_STATE.init(NetState::new()), interfaces.station)
+            .expect("network adapter");
+    let mut seed = [0; 8];
+    peripherals.RNG.rng().read(&mut seed).unwrap();
+    let config = embassy_net::Config::ipv4_static(StaticConfigV4 {
+        address: Ipv4Cidr::new(ADDRESS, PREFIX_LEN),
+        gateway: Some(GATEWAY),
+        dns_servers: heapless::Vec::new(),
+    });
+    let (stack, net_runner) = embassy_net::new(
+        device,
+        config,
+        STACK_RESOURCES.init(embassy_net::StackResources::new()),
+        u64::from_le_bytes(seed),
+    );
     EXECUTOR
         .init(esp8266_hal::wifi::executor::Executor::new())
         .run(runtime, |spawner| {
-            spawner.must_spawn(app_main(spawner, runtime));
+            spawner.must_spawn(wifi_task(WIFI_RUNNER.init(wifi_runner)));
+            spawner.must_spawn(network_task(NET_RUNNER.init(net_runner)));
+            spawner.must_spawn(application(serial, stack));
         })
 }
 
 #[embassy_executor::task]
-async fn app_main(spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtime) {
-    log_line(b"sta_static_ip start");
+async fn wifi_task(runner: &'static mut WifiRunner) -> ! {
+    runner.run().await
+}
 
-    let static_config = match parse_static_config() {
-        Some(config) => config,
-        None => {
-            log_line(b"static ip config err");
-            loop {
-                embassy_time::Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-    };
+#[embassy_executor::task]
+async fn network_task(runner: &'static mut NetRunner) -> ! {
+    runner.run().await
+}
 
-    let (mut driver, interfaces) = init_wifi(runtime);
-    log_line(b"wifi started");
-    if let Err(error) = support::connect(&mut driver) {
-        esp8266_hal::logger::write_bytes(b"static ip wifi detail ");
-        support::log_debug(&error);
-        esp8266_hal::logger::write_bytes(b" reason=");
-        esp8266_hal::logger::write_dec_u32(driver.last_disconnect_reason().unwrap_or(0) as u32);
-        esp8266_hal::logger::write_newline();
-        log_line(b"static ip wifi err");
-        loop {
-            embassy_time::Timer::after(Duration::from_secs(60)).await;
-        }
-    }
-
-    let stack = start_network(spawner, interfaces.station, static_config);
-    match select(
-        stack.wait_config_up(),
-        embassy_time::Timer::after(Duration::from_secs(5)),
+#[embassy_executor::task]
+async fn application(mut serial: UART0Serial, stack: embassy_net::Stack<'static>) -> ! {
+    stack.wait_config_up().await;
+    writeln!(
+        serial,
+        "Static IPv4 address: {}\r",
+        stack.config_v4().unwrap().address
     )
-    .await
-    {
-        Either::First(()) => {}
-        Either::Second(()) => {
-            log_line(b"static ip config-up timeout");
-            loop {
-                embassy_time::Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-    }
-    log_static_up(static_config);
-
-    embassy_time::Timer::after(Duration::from_millis(1_000)).await;
-    run_tcp_client(stack).await;
+    .unwrap();
     loop {
-        embassy_time::Timer::after(Duration::from_secs(60)).await;
+        writeln!(serial, "Station link up: {}\r", stack.is_link_up()).unwrap();
+        Timer::after_secs(5).await;
     }
-}
-
-async fn run_tcp_client(stack: embassy_net::Stack<'static>) {
-    let host = SERVER_HOST
-        .parse::<CoreIpv4Addr>()
-        .expect("server host")
-        .octets();
-    let port = SERVER_PORT.parse::<u16>().expect("server port");
-    log_target(host, port);
-
-    let rx_buf = TCP_RX_BUF.init([0; TCP_BUF_BYTES]);
-    let tx_buf = TCP_TX_BUF.init([0; TCP_BUF_BYTES]);
-    let mut socket = TcpSocket::new(stack, rx_buf, tx_buf);
-    socket.set_timeout(Some(Duration::from_secs(10)));
-
-    let remote = (
-        embassy_net::Ipv4Address::new(host[0], host[1], host[2], host[3]),
-        port,
-    );
-    if socket.connect(remote).await.is_err() {
-        log_line(b"tcp client connect err");
-        return;
-    }
-    log_line(b"tcp client connected");
-
-    let request = b"GET / HTTP/1.0\r\nHost: esp8266-hal-host\r\n\r\n";
-    if socket.write_all(request).await.is_err() {
-        log_line(b"tcp client write err");
-        return;
-    }
-    if socket.flush().await.is_err() {
-        log_line(b"tcp client flush err");
-        return;
-    }
-
-    let mut buf = [0u8; TCP_BUF_BYTES];
-    match socket.read(&mut buf).await {
-        Ok(0) => log_line(b"tcp client closed"),
-        Ok(count) => {
-            log_recv_count(count);
-            log_line(b"done");
-        }
-        Err(_e) => log_line(b"tcp client read err"),
-    }
-}
-
-fn parse_static_config() -> Option<StaticIpv4Config> {
-    let address = STATIC_IPV4.parse::<CoreIpv4Addr>().ok()?;
-    let gateway = STATIC_GATEWAY.parse::<CoreIpv4Addr>().ok()?;
-    let prefix = STATIC_PREFIX.parse::<u8>().ok()?;
-    StaticIpv4Config::new(address, prefix, Some(gateway)).ok()
-}
-
-fn to_embassy_static_config(config: StaticIpv4Config) -> embassy_net::StaticConfigV4 {
-    let address = config.address().octets();
-    let gateway = config.gateway().map(|gateway| {
-        let octets = gateway.octets();
-        embassy_net::Ipv4Address::new(octets[0], octets[1], octets[2], octets[3])
-    });
-
-    embassy_net::StaticConfigV4 {
-        address: embassy_net::Ipv4Cidr::new(
-            embassy_net::Ipv4Address::new(address[0], address[1], address[2], address[3]),
-            config.prefix_len(),
-        ),
-        gateway,
-        dns_servers: heapless::Vec::new(),
-    }
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    esp8266_hal::logger::write_byte(b'?');
-    loop {}
-}
-
-#[link_section = ".rwtext"]
-#[xtensa_lx_rt::exception]
-fn exception(cause: ExceptionCause, frame: Context) -> ! {
-    let _ = cause;
-    let _ = frame;
-    esp8266_hal::logger::write_byte(b'E');
-    loop {}
 }

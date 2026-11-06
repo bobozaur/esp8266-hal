@@ -14,6 +14,11 @@ use smoltcp::{
 };
 
 /// A concrete station or access-point smoltcp device.
+///
+/// Receive tokens retain native buffers; release them promptly so the controller
+/// can stop the radio. Pending TX frames are discarded when the interface's
+/// lifecycle changes. Reconfigure the upper stack when changing networks if
+/// its existing packets or sockets must also be discarded.
 pub struct WifiDevice<'d, 'tx> {
     interface: Interface<'d>,
     pending_tx: PendingTx<'tx>,
@@ -42,7 +47,7 @@ impl<'d, 'tx> WifiDevice<'d, 'tx> {
             interface,
             generation,
             pending_tx: PendingTx { bytes, len: 0 },
-            neighbor_hints: EthernetNeighborHints::new(Some(mac)),
+            neighbor_hints: EthernetNeighborHints::new(mac),
         })
     }
 
@@ -93,6 +98,8 @@ impl<'d, 'tx> WifiDevice<'d, 'tx> {
         }
     }
 
+    /// Returns the packet interface and releases the caller's TX storage borrow.
+    /// Any pending transmit frame is discarded.
     pub fn into_interface(self) -> Interface<'d> {
         self.interface
     }
@@ -208,5 +215,109 @@ impl phy::TxToken for WifiTxToken<'_, '_, '_> {
             Ok(()) | Err(_) => self.pending.len = 0,
         }
         result
+    }
+}
+
+#[cfg(all(test, not(target_arch = "xtensa")))]
+mod tests {
+    use super::*;
+    use crate::wifi_core::{
+        allocator::test_allocator,
+        target::{InterfaceId, Resources, Sdk, TxScript},
+        Controller, QueueConfig, WifiEvent,
+    };
+    use smoltcp::phy::{Device as _, TxToken as _};
+
+    #[test]
+    fn native_backpressure_preserves_bytes_and_order_on_both_interfaces() {
+        for id in [InterfaceId::Station, InterfaceId::AccessPoint] {
+            let resources = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+            resources
+                .publish_event(match id {
+                    InterfaceId::Station => WifiEvent::StaConnected,
+                    InterfaceId::AccessPoint => WifiEvent::ApStarted,
+                })
+                .unwrap();
+            let interface = Interface {
+                resources: &resources,
+                id,
+                mac: [2, 0, 0, 0, 0, 1],
+            };
+            let mut storage = [0; crate::wifi_core::MAX_ETHERNET_FRAME_SIZE];
+            let mut device = WifiDevice::new(interface, &mut storage).unwrap();
+            let tx = TxScript::new([
+                Err(DriverError::WouldBlock),
+                Err(DriverError::WouldBlock),
+                Err(DriverError::WouldBlock),
+                Ok(()),
+                Ok(()),
+            ]);
+            let first = [0x11; 42];
+            let second = [0x22; 18];
+            let now = Instant::from_millis(0);
+            device
+                .transmit(now)
+                .unwrap()
+                .consume(first.len(), |frame| frame.copy_from_slice(&first));
+            assert!(device.poll_transmit().unwrap());
+            assert!(device.transmit(now).is_none());
+            device.transmit_frame(&second).unwrap();
+            assert!(!device.poll_transmit().unwrap());
+
+            let frames = tx.frames();
+            assert_eq!(frames.len(), 5);
+            for (interface, frame) in &frames[..4] {
+                assert_eq!(*interface, id);
+                assert_eq!(frame.as_slice(), first);
+            }
+            assert_eq!(frames[4].0, id);
+            assert_eq!(frames[4].1.as_slice(), second);
+        }
+    }
+
+    #[test]
+    fn restart_rejects_issued_tokens_and_discards_buffered_frames() {
+        let resources = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&resources);
+        let mut controller = Controller {
+            sdk: &mut sdk,
+            resources: &resources,
+        };
+        controller.enable_station().unwrap();
+        controller.start_blocking(0).unwrap();
+        resources.publish_event(WifiEvent::StaConnected).unwrap();
+        let interface = Interface {
+            resources: &resources,
+            id: InterfaceId::Station,
+            mac: [2, 0, 0, 0, 0, 1],
+        };
+        let mut storage = [0; crate::wifi_core::MAX_ETHERNET_FRAME_SIZE];
+        let mut device = WifiDevice::new(interface, &mut storage).unwrap();
+        let tx = TxScript::new([Err(DriverError::WouldBlock), Ok(())]);
+        let now = Instant::from_millis(0);
+        device.transmit(now).unwrap().consume(14, |frame| {
+            frame.fill(0x11);
+            controller.stop().unwrap();
+            controller.start_blocking(0).unwrap();
+            resources.publish_event(WifiEvent::StaConnected).unwrap();
+        });
+        assert!(tx.frames().is_empty());
+
+        device
+            .transmit(now)
+            .unwrap()
+            .consume(14, |frame| frame.fill(0x22));
+        controller.stop().unwrap();
+        controller.start_blocking(0).unwrap();
+        resources.publish_event(WifiEvent::StaConnected).unwrap();
+        assert!(!device.poll_transmit().unwrap());
+        device
+            .transmit(now)
+            .unwrap()
+            .consume(14, |frame| frame.fill(0x33));
+        let frames = tx.frames();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].1.as_slice(), [0x22; 14]);
+        assert_eq!(frames[1].1.as_slice(), [0x33; 14]);
     }
 }

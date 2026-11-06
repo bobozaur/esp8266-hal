@@ -1,19 +1,19 @@
+name: CI
+
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
   push:
   workflow_dispatch:
-
-name: CI
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  WIFI_FEATURES: wifi-embassy-net,wifi-smoltcp,wifi-esp-now,wifi-smartconfig,wifi-enterprise,wifi-wps,wifi-promiscuous
 
 jobs:
-  test-host:
-    name: Host tests
+  host:
+    name: Library contracts and packages
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: stable
@@ -23,112 +23,36 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Verify vendored WiFi inputs
-        working-directory: esp8266-wifi-sys/vendor
-        run: sha256sum --check --strict SHA256SUMS
-      - name: Test the Wi-Fi state and resource contracts
-        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi --lib --tests
-      - name: Test ESP-NOW in isolation
-        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-esp-now --lib --tests
-      - name: Test SmartConfig in isolation
-        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-smartconfig --lib --tests
-      - name: Test enterprise configuration in isolation
-        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-enterprise --lib --tests
-      - name: Test WPS in isolation
-        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-wps --lib --tests
-      - name: Test promiscuous capture in isolation
-        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-promiscuous --lib --tests
-      - name: Test network adapters and optional components together
-        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi-embassy-net,wifi-smoltcp,wifi-esp-now,wifi-smartconfig,wifi-enterprise,wifi-wps,wifi-promiscuous --lib --tests
-      - name: Test the vendored ABI crate
-        run: cargo test -p esp8266-wifi-sys --target x86_64-unknown-linux-gnu
-      - name: Verify the vendored ABI package
-        run: cargo package -p esp8266-wifi-sys --target x86_64-unknown-linux-gnu
-      - name: Verify supporting packages
+      - name: Check formatting and native inputs
         run: |
-          cargo package -p esp8266 --target x86_64-unknown-linux-gnu
-          cargo package -p esp8266-hal-proc-macros --target x86_64-unknown-linux-gnu
-          cargo package -p esp8266-hal --list
-      - name: Test the hardware harness
-        run: cargo test -p xtask --target x86_64-unknown-linux-gnu
-      - name: Test proc macros without WiFi
-        run: cargo test -p esp8266-hal-proc-macros --target x86_64-unknown-linux-gnu --no-default-features
-      - name: Check async proc-macro diagnostic without WiFi
+          cargo fmt --all -- --check
+          (cd esp8266-wifi-sys/vendor && sha256sum --check --strict SHA256SUMS)
+      - name: Test library contracts
         run: |
-          if cargo check --target x86_64-unknown-linux-gnu --manifest-path tests/fixtures/async-main-no-wifi/Cargo.toml >macro-check.log 2>&1; then
-            cat macro-check.log
-            exit 1
-          fi
-          grep --fixed-strings 'async `#[main]` is not supported' macro-check.log
-      - name: Lint host-testable WiFi code
-        run: cargo clippy --no-deps --target x86_64-unknown-linux-gnu --no-default-features --features wifi --lib --tests -- -D warnings -A clippy::missing-safety-doc -A clippy::type-complexity -A clippy::legacy-numeric-constants
-      - name: Lint all optional WiFi components together
-        run: cargo clippy --no-deps --target x86_64-unknown-linux-gnu --no-default-features --features wifi-embassy-net,wifi-smoltcp,wifi-esp-now,wifi-smartconfig,wifi-enterprise,wifi-wps,wifi-promiscuous --lib --tests -- -D warnings -A clippy::missing-safety-doc -A clippy::type-complexity -A clippy::legacy-numeric-constants
-      - name: Lint the hardware harness
-        run: cargo clippy --no-deps -p xtask --target x86_64-unknown-linux-gnu -- -D warnings -A clippy::too-many-arguments
-      - name: Lint the vendored ABI crate
-        run: cargo clippy --no-deps -p esp8266-wifi-sys --target x86_64-unknown-linux-gnu -- -D warnings
-      - name: Lint proc macros
-        run: cargo clippy --no-deps -p esp8266-hal-proc-macros --target x86_64-unknown-linux-gnu --lib --tests -- -D warnings
+          cargo test --target x86_64-unknown-linux-gnu --no-default-features --lib
+          cargo test --target x86_64-unknown-linux-gnu --no-default-features --features wifi --lib --tests
+          cargo test --target x86_64-unknown-linux-gnu --no-default-features --features "$WIFI_FEATURES" --lib --tests
+          cargo test --target x86_64-unknown-linux-gnu -p esp8266-wifi-sys -p esp8266-hal-proc-macros
+      - name: Check independent feature declarations
+        run: |
+          for feature in wifi-smoltcp wifi-embassy-net wifi-esp-now wifi-smartconfig wifi-enterprise wifi-wps wifi-promiscuous; do
+            cargo check --target x86_64-unknown-linux-gnu --no-default-features --features "$feature" --lib --tests
+          done
+      - name: Lint maintained Rust code
+        run: |
+          for features in wifi "$WIFI_FEATURES"; do
+            cargo clippy --no-deps --target x86_64-unknown-linux-gnu --no-default-features --features "$features" --lib --tests -- -D warnings -A clippy::missing-safety-doc -A clippy::type-complexity -A clippy::legacy-numeric-constants
+          done
+          cargo clippy --no-deps --target x86_64-unknown-linux-gnu -p esp8266-wifi-sys -p esp8266-hal-proc-macros --lib --tests -- -D warnings
+      - name: Verify all four published packages together
+        run: cargo package -p esp8266 -p esp8266-hal-proc-macros -p esp8266-wifi-sys -p esp8266-hal --features esp8266-hal/wifi,esp8266-hal/wifi-smartconfig --target x86_64-unknown-linux-gnu
 
-  build-wifi-examples:
-    name: Link WiFi example (${{ matrix.name }})
+  target:
+    name: ESP8266 firmware and downstream linking
     runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: core-connect
-            example: wifi_core_connect
-            features: wifi
-          - name: scan
-            example: raw_scan
-            features: wifi
-          - name: dhcp
-            example: wifi_core_dhcp_probe
-            features: wifi-embassy-net
-          - name: tcp-server
-            example: tcp_server
-            features: wifi-embassy-net
-          - name: tcp-client
-            example: tcp_client
-            features: wifi-embassy-net
-          - name: static-ip
-            example: sta_static_ip
-            features: wifi-embassy-net
-          - name: access-point
-            example: wifi_ap
-            features: embassy
-          - name: mixed-mode
-            example: wifi_ap_sta
-            features: wifi-embassy-net
-          - name: wps
-            example: wifi_wps
-            features: wifi-wps,embassy
-          - name: smartconfig
-            example: wifi_smartconfig
-            features: wifi-smartconfig,wifi-smoltcp
-          - name: esp-now-tx
-            example: wifi_esp_now_tx
-            features: wifi-esp-now,embassy
-          - name: esp-now-rx
-            example: wifi_esp_now_rx
-            features: wifi-esp-now,embassy
-          - name: promiscuous
-            example: wifi_promisc
-            features: wifi-promiscuous,embassy
-          - name: enterprise
-            example: wifi_eap
-            features: wifi-enterprise
-          - name: all-optional-components
-            example: tcp_server
-            features: wifi-embassy-net,wifi-smoltcp,wifi-smartconfig,wifi-esp-now,wifi-enterprise,wifi-wps,wifi-promiscuous
-          - name: downstream-consumer
-            kind: downstream
+      RUSTUP_TOOLCHAIN: esp-1.80.0
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Xtensa Rust toolchain
@@ -151,34 +75,25 @@ jobs:
           tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/xtensa-lx106-elf/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
-      - name: Link release firmware
-        if: ${{ matrix.name != 'downstream-consumer' }}
+      - name: Link HAL examples without Wi-Fi
         run: |
-          if [[ "${{ matrix.example }}" == wifi_smartconfig ]]; then
-            export ESP8266_HAL_SMARTCONFIG_STATIC_ACK=1
-          fi
-          cargo build --release --example ${{ matrix.example }} --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --no-default-features --features ${{ matrix.features }}
-      - name: Document the target API
-        if: ${{ matrix.name == 'all-optional-components' }}
-        run: cargo doc --no-deps --lib --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --no-default-features --features ${{ matrix.features }}
-      - name: Report linked image size
-        if: ${{ matrix.name != 'downstream-consumer' }}
-        run: xtensa-lx106-elf-size target/xtensa-esp8266-none-elf/release/examples/${{ matrix.example }}
-      - name: Link non-WiFi firmware
-        if: ${{ matrix.name == 'downstream-consumer' }}
+          cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --no-default-features
+          cargo build --release --examples --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc
+          cargo build --release --example blinky --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --features all_in_ram
+      - name: Link supported Wi-Fi feature combinations
         run: |
-          rustup run esp-1.80.0 cargo check --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --no-default-features
-          rustup run esp-1.80.0 cargo build --release --example blinky --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc
-          xtensa-lx106-elf-size target/xtensa-esp8266-none-elf/release/examples/blinky
-      - name: Link an external consumer with its own Cargo configuration
-        if: ${{ matrix.name == 'downstream-consumer' }}
+          for features in wifi wifi-embassy-net wifi-wps wifi-smartconfig,wifi-smoltcp wifi-esp-now wifi-promiscuous wifi-enterprise "$WIFI_FEATURES"; do
+            cargo build --release --examples --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --no-default-features --features "$features"
+          done
+          cargo doc --no-deps --lib --target xtensa-esp8266-none-elf -Zbuild-std=core,alloc --no-default-features --features "$WIFI_FEATURES"
+      - name: Link an external consumer with its own configuration
         run: |
           consumer="$RUNNER_TEMP/esp8266-hal-consumer"
           cp -r tests/fixtures/downstream-wifi-link "$consumer"
           sed -i "s|path = \"../../..\"|path = \"$GITHUB_WORKSPACE\"|" "$consumer/Cargo.toml"
           cd "$consumer"
-          rustup run esp-1.80.0 cargo generate-lockfile
+          cargo generate-lockfile
           for features in "" wifi-smoltcp wifi-embassy-net wifi-smoltcp,wifi-embassy-net; do
-            rustup run esp-1.80.0 cargo build --locked --release -Zbuild-std=core,alloc --features "$features"
-            xtensa-lx106-elf-size target/xtensa-esp8266-none-elf/release/downstream-wifi-link
+            cargo build --locked --release -Zbuild-std=core,alloc --features "$features"
+            xtensa-lx106-elf-size -A target/xtensa-esp8266-none-elf/release/downstream-wifi-link
           done

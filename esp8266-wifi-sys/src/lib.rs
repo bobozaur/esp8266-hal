@@ -3,7 +3,7 @@
 //! The generated bindings and native libraries are checked in so normal builds
 //! are deterministic and offline. See `vendor/README.md` for their exact SDK
 //! revision, provenance, licenses, and checksums. A small number of types and
-//! constants that bindgen cannot handle cleanly (packed bitfield structs and
+//! constants that bindgen cannot handle cleanly (bitfield structs and
 //! `#define` constants) are defined manually below the generated module.
 //!
 //! # Safety
@@ -82,11 +82,11 @@ pub const ESP_EVENT_ANY_ID: i32 = -1;
 pub const PORT_MAX_DELAY: u32 = 0xFFFF_FFFF;
 
 // ---------------------------------------------------------------------------
-// Manual type definitions — packed bitfield structs that bindgen cannot
+// Manual type definitions — bitfield structs that bindgen cannot
 // reliably lay out. These match the C definitions in esp_wifi_types.h.
 // ---------------------------------------------------------------------------
 
-/// Promiscuous mode RX control metadata (12 bytes, packed bitfields).
+/// Promiscuous mode RX control metadata (12 bytes, four-byte C alignment).
 ///
 /// Access individual fields through the provided accessor methods rather than
 /// direct bit manipulation.
@@ -105,7 +105,8 @@ pub const PORT_MAX_DELAY: u32 = 0xFFFF_FFFF;
 ///  [10]     channel         (4), reserved (4)
 ///  [11]     noise_floor     (8) — signed
 /// ```
-#[repr(C, packed)]
+// The SDK uses unsigned/signed int bitfields, whose target alignment is four.
+#[repr(C, align(4))]
 #[derive(Debug, Copy, Clone)]
 pub struct wifi_pkt_rx_ctrl_t {
     pub _data: [u8; 12],
@@ -209,8 +210,8 @@ impl wifi_pkt_rx_ctrl_t {
 ///
 /// The `payload` field is a zero-length array — the actual frame data follows
 /// immediately after `rx_ctrl` in memory. Use the length from `rx_ctrl`
-/// (either `legacy_length()` or `ht_length()` depending on `sig_mode()`) to
-/// determine how many bytes are available.
+/// (either `legacy_length()` or `ht_length()` depending on `sig_mode()`), capped
+/// at the SDK's 112-byte capture limit, to determine how many bytes are available.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct wifi_promiscuous_pkt_t {
@@ -228,8 +229,9 @@ mod tests {
     #[test]
     fn promiscuous_rx_control_layout_matches_sdk() {
         assert_eq!(core::mem::size_of::<wifi_pkt_rx_ctrl_t>(), 12);
-        assert_eq!(core::mem::align_of::<wifi_pkt_rx_ctrl_t>(), 1);
+        assert_eq!(core::mem::align_of::<wifi_pkt_rx_ctrl_t>(), 4);
         assert_eq!(core::mem::size_of::<wifi_promiscuous_pkt_t>(), 12);
+        assert_eq!(core::mem::align_of::<wifi_promiscuous_pkt_t>(), 4);
     }
 
     #[test]

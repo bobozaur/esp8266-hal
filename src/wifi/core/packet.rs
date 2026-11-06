@@ -8,11 +8,11 @@ pub(crate) struct RawRxRecord {
     buffer: *mut c_void,
     len: u16,
     eb: *mut c_void,
-    release_fn: Option<ReleaseFn>,
+    release_fn: ReleaseFn,
 }
 
 impl RawRxRecord {
-    /// Takes ownership of a receive buffer and its optional release hook.
+    /// Takes ownership of a receive buffer and its release hook.
     ///
     /// # Safety
     /// For nonzero `len`, `buffer` must point to `len` initialized bytes that
@@ -23,7 +23,7 @@ impl RawRxRecord {
         buffer: *mut c_void,
         len: u16,
         eb: *mut c_void,
-        release_fn: Option<ReleaseFn>,
+        release_fn: ReleaseFn,
     ) -> Self {
         Self {
             buffer,
@@ -49,10 +49,8 @@ impl RawRxRecord {
 
 impl Drop for RawRxRecord {
     fn drop(&mut self) {
-        if let Some(release) = self.release_fn.take() {
-            // SAFETY: construction transfers the sole live release right.
-            unsafe { release(self.buffer, self.eb) };
-        }
+        // SAFETY: construction transfers the sole live release right.
+        unsafe { (self.release_fn)(self.buffer, self.eb) };
     }
 }
 
@@ -99,7 +97,7 @@ mod tests {
                     bytes.as_ptr().cast_mut().cast(),
                     8,
                     core::ptr::null_mut(),
-                    Some(count_release),
+                    count_release,
                 )
             };
             resources.enqueue_rx(InterfaceId::Station, record).unwrap();
@@ -133,7 +131,7 @@ mod tests {
                     bytes.as_ptr().cast_mut().cast(),
                     8,
                     core::ptr::null_mut(),
-                    Some(count_release),
+                    count_release,
                 )
             };
         }
@@ -159,7 +157,7 @@ mod tests {
                         bytes.as_ptr().cast_mut().cast(),
                         8,
                         core::ptr::null_mut(),
-                        Some(count_release),
+                        count_release,
                     )
                 })
                 .is_ok());

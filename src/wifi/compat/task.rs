@@ -42,7 +42,6 @@ const ERR_NO_MEM: i32 = -1;
 
 /// Thread-local storage slot count (matches `configNUM_THREAD_LOCAL_STORAGE_POINTERS`).
 const TLS_SLOTS: usize = 3;
-const TSK_STACK_FILL_BYTE: u8 = 0xA5;
 const STACK_CANARY_WORD: u32 = 0xA5A5_A5A5;
 const STACK_CANARY_WORDS: usize = 4;
 
@@ -74,41 +73,36 @@ enum WaitObjectKind {
     None = 0,
     QueueRx = 1,
     QueueTx = 2,
-    EventGroup = 3,
 }
 
 /// Task Control Block.
 ///
 /// **Critical:** `stack_top` MUST be the first field. The interrupt/context
 /// entry code dereferences `pxCurrentTCB` to load/store the saved stack pointer
-/// from offset 0 of the TCB.
+/// from offset 0 of the TCB. Native callers otherwise treat task handles as
+/// opaque. Saved frames stay on each task's own stack.
 #[repr(C)]
 struct TaskControlBlock {
     /// Saved stack pointer (top of interrupt frame). **Must be offset 0.**
     stack_top: *mut u8,
     /// Bottom of the heap-allocated stack buffer.
     stack_base: *mut u8,
-    /// Stack size in bytes.
-    stack_size: usize,
     /// Task priority (0 = lowest, MAX_PRIORITIES-1 = highest).
     priority: u32,
     /// Base (original) priority — for priority inheritance.
     base_priority: u32,
-    /// Current state.
-    state: TaskState,
     /// Tick count at which a timeout-based block expires (0 = no timeout).
     delay_until: u64,
-    /// Task name (null-terminated).
-    name: [u8; 16],
     /// Thread-local storage pointers.
     tls: [*mut c_void; TLS_SLOTS],
-    /// Mutex nesting count — for recursive mutex support.
-    pub(crate) mutex_held_count: u32,
-    /// Task entry point used by the task trampoline.
-    entry: Option<unsafe extern "C" fn(*mut c_void)>,
-    /// Original task parameter used by the task trampoline.
-    param: *mut c_void,
+    /// Current state. Kept last to avoid padding before the deadline and TLS.
+    state: TaskState,
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(TaskControlBlock, stack_top) == 0);
+    assert!(core::mem::size_of::<TaskControlBlock>() == 40);
+};
 
 // ---------------------------------------------------------------------------
 // Global scheduler state
@@ -117,37 +111,24 @@ struct TaskControlBlock {
 const EMPTY: TaskControlBlock = TaskControlBlock {
     stack_top: core::ptr::null_mut(),
     stack_base: core::ptr::null_mut(),
-    stack_size: 0,
     priority: 0,
     base_priority: 0,
-    state: TaskState::Free,
     delay_until: 0,
-    name: [0; 16],
     tls: [core::ptr::null_mut(); TLS_SLOTS],
-    mutex_held_count: 0,
-    entry: None,
-    param: core::ptr::null_mut(),
+    state: TaskState::Free,
 };
 
 /// The task table.
 static mut TASKS: [TaskControlBlock; MAX_TASKS] = [EMPTY; MAX_TASKS];
 
-/// SDK-style task frames live on each task's own stack.
-///
-/// `_xt_int_enter` / `_xt_int_exit` save and restore directly from
-/// `pxCurrentTCB->stack_top`, so keep that same contract in Rust rather than
-/// copying frames through a side buffer.
+/// Wakeups deferred while scheduling is suspended. Resume drains the complete
+/// set before task selection, which uses priority and cyclic task-table order.
 static mut PENDING_READY: [bool; MAX_TASKS] = [false; MAX_TASKS];
-static mut PENDING_READY_ORDER: [usize; MAX_TASKS] = [usize::MAX; MAX_TASKS];
-static mut PENDING_READY_LEN: usize = 0;
 static mut DELETED_TASK_QUEUE: [usize; MAX_TASKS] = [usize::MAX; MAX_TASKS];
 static mut DELETED_TASK_QUEUE_LEN: usize = 0;
-static mut DELETED_TASKS_WAITING_CLEANUP: usize = 0;
-static mut TASK_EVENT_WAIT_BITS: [u32; MAX_TASKS] = [0; MAX_TASKS];
-static mut TASK_EVENT_WAIT_MATCHED: [bool; MAX_TASKS] = [false; MAX_TASKS];
 static mut TASK_WAIT_KIND: [WaitObjectKind; MAX_TASKS] = [WaitObjectKind::None; MAX_TASKS];
 static mut TASK_WAIT_OBJECT: [*mut c_void; MAX_TASKS] = [core::ptr::null_mut(); MAX_TASKS];
-static mut TASK_IS_IDLE: [bool; MAX_TASKS] = [false; MAX_TASKS];
+static mut IDLE_TASK: usize = MAX_TASKS;
 
 /// Pointer to the current task's TCB (as `*mut c_void`).
 ///
@@ -177,7 +158,6 @@ static mut YIELD_PENDING: bool = false;
 
 /// Whether the scheduler has been started.
 static mut SCHEDULER_STARTED: bool = false;
-static mut STACK_CANARY_REPORTED: [bool; MAX_TASKS] = [false; MAX_TASKS];
 // ---------------------------------------------------------------------------
 // Stack initialisation
 // ---------------------------------------------------------------------------
@@ -210,16 +190,6 @@ unsafe fn init_stack_canary(stack_base: *mut u8, stack_size: usize) {
     }
 }
 
-unsafe fn init_stack_fill(stack_base: *mut u8, stack_size: usize) {
-    unsafe {
-        if stack_base.is_null() || stack_size == 0 {
-            return;
-        }
-
-        core::ptr::write_bytes(stack_base, TSK_STACK_FILL_BYTE, stack_size);
-    }
-}
-
 #[ram]
 unsafe fn stack_canary_corrupted(idx: usize) -> bool {
     unsafe {
@@ -236,38 +206,15 @@ unsafe fn stack_canary_corrupted(idx: usize) -> bool {
     }
 }
 
-unsafe fn stack_high_water_bytes(idx: usize) -> u32 {
-    unsafe {
-        if idx >= MAX_TASKS || TASKS[idx].stack_base.is_null() || TASKS[idx].stack_size == 0 {
-            return 0;
-        }
-
-        let mut used_fill = 0usize;
-        while used_fill < TASKS[idx].stack_size
-            && TASKS[idx].stack_base.add(used_fill).read_volatile() == TSK_STACK_FILL_BYTE
-        {
-            used_fill += 1;
-        }
-
-        used_fill as u32
-    }
-}
-
 #[ram]
-unsafe fn report_stack_canary_once(idx: usize) {
+unsafe fn check_stack_canary(idx: usize) {
     unsafe {
-        if idx >= MAX_TASKS || STACK_CANARY_REPORTED[idx] || !stack_canary_corrupted(idx) {
+        if !stack_canary_corrupted(idx) {
             return;
         }
-        STACK_CANARY_REPORTED[idx] = true;
-
         let task = TASKS.as_mut_ptr().add(idx);
-        super::port::vApplicationStackOverflowHook(task.cast::<c_void>(), (*task).name.as_ptr());
+        super::port::vApplicationStackOverflowHook(task.cast::<c_void>(), core::ptr::null());
     }
-}
-
-fn is_idle_task_name(name: &[u8; 16]) -> bool {
-    matches!(&name[..], [b'I', b'D', b'L', b'E', ..])
 }
 
 #[inline(never)]
@@ -335,19 +282,15 @@ fn another_idle_priority_task_ready() -> bool {
 #[inline(never)]
 fn find_idle_task_index() -> Option<usize> {
     unsafe {
-        let mut idx = 0usize;
-        while idx < MAX_TASKS {
-            if TASK_IS_IDLE[idx]
-                && TASKS[idx].state != TaskState::Free
-                && TASKS[idx].state != TaskState::Deleted
-            {
-                return Some(idx);
-            }
-
-            idx += 1;
+        let idx = IDLE_TASK;
+        if idx < MAX_TASKS
+            && TASKS[idx].state != TaskState::Free
+            && TASKS[idx].state != TaskState::Deleted
+        {
+            Some(idx)
+        } else {
+            None
         }
-
-        None
     }
 }
 
@@ -380,19 +323,6 @@ pub(crate) unsafe fn init_task_stack(
         set(XT_STK_A2, param as u32);
         set(XT_STK_PS, PS_UM | PS_EXCM);
         sp.cast()
-    }
-}
-
-/// Copy the ISR frame into the current task's per-task save buffer.
-#[ram]
-pub(crate) unsafe fn save_current_frame(frame: *mut u8) {
-    unsafe {
-        let idx = CURRENT_TASK;
-        if idx >= MAX_TASKS {
-            return;
-        }
-        let tcb = TASKS.as_mut_ptr().add(idx);
-        (*tcb).stack_top = frame;
     }
 }
 
@@ -475,7 +405,7 @@ unsafe extern "C" fn idle_task(_param: *mut c_void) {
 /// Free stacks of tasks in the `Deleted` state.
 unsafe fn cleanup_deleted_tasks() {
     unsafe {
-        while DELETED_TASKS_WAITING_CLEANUP > 0 {
+        while DELETED_TASK_QUEUE_LEN > 0 {
             critical::vPortEnterCritical();
             let idx = pop_deleted_task_locked();
             critical::vPortExitCritical();
@@ -508,18 +438,11 @@ pub(crate) unsafe fn allocate_main_task() {
         let tcb = &mut TASKS[0];
         tcb.stack_top = core::ptr::null_mut(); // filled by first context switch
         tcb.stack_base = core::ptr::null_mut(); // not heap-allocated
-        tcb.stack_size = 0; // unknown (it's the real CPU stack)
         tcb.priority = 1; // just above idle (0), below WiFi tasks (8-12)
         tcb.base_priority = 1;
         tcb.state = TaskState::Running; // we ARE running right now
         tcb.delay_until = 0;
-        tcb.name = [0; 16];
-        tcb.name[..4].copy_from_slice(b"main");
         tcb.tls = [core::ptr::null_mut(); TLS_SLOTS];
-        tcb.mutex_held_count = 0;
-        tcb.entry = None;
-        tcb.param = core::ptr::null_mut();
-        TASK_IS_IDLE[0] = false;
         TASK_WAIT_KIND[0] = WaitObjectKind::None;
         TASK_WAIT_OBJECT[0] = core::ptr::null_mut();
 
@@ -532,17 +455,22 @@ pub(crate) unsafe fn allocate_main_task() {
 /// Create the idle task during explicit runtime preparation.
 pub(crate) unsafe fn create_idle_task() -> i32 {
     unsafe {
-        xTaskCreate(
+        let mut handle = core::ptr::null_mut();
+        let result = create_task(
             idle_task,
-            b"IDLE\0".as_ptr() as *const _,
             // Match CONFIG_FREERTOS_IDLE_TASK_STACKSIZE in the pinned SDK.
             // Native idle sleep/time calls need this budget in addition to
             // the HAL interrupt-frame delta added by create_task.
             1024,
             core::ptr::null_mut(),
             0, // lowest priority
-            core::ptr::null_mut(),
-        )
+            &mut handle,
+            false,
+        );
+        if result == PD_PASS {
+            IDLE_TASK = handle_to_index(handle);
+        }
+        result
     }
 }
 
@@ -565,7 +493,7 @@ pub(crate) unsafe fn rollback_startup() {
 #[no_mangle]
 pub unsafe extern "C" fn xTaskCreate(
     task_code: unsafe extern "C" fn(*mut c_void),
-    name: *const c_char,
+    _name: *const c_char,
     stack_depth: u16,
     parameters: *mut c_void,
     priority: u32,
@@ -574,7 +502,6 @@ pub unsafe extern "C" fn xTaskCreate(
     unsafe {
         create_task(
             task_code,
-            name,
             stack_depth,
             parameters,
             priority,
@@ -591,7 +518,6 @@ pub(crate) const fn stack_allocation_bytes(requested: u16) -> usize {
 // Only the audited native PP task consumes its pre-reserved stack.
 pub(crate) unsafe fn create_task(
     task_code: unsafe extern "C" fn(*mut c_void),
-    name: *const c_char,
     stack_depth: u16,
     parameters: *mut c_void,
     priority: u32,
@@ -627,20 +553,16 @@ pub(crate) unsafe fn create_task(
             critical::vPortExitCritical();
             return ERR_NO_MEM;
         }
-        init_stack_fill(stack_base, stack_bytes);
         init_stack_canary(stack_base, stack_bytes);
 
         let prio = priority.min(MAX_PRIORITIES - 1);
         let tcb = &mut TASKS[slot];
         let stack_top = stack_base.add(stack_bytes - 4);
-        tcb.entry = Some(task_code);
-        tcb.param = parameters;
         let sp = init_task_stack(stack_top, task_code, parameters);
 
         tcb.stack_top = sp;
 
         tcb.stack_base = stack_base;
-        tcb.stack_size = stack_bytes;
         tcb.priority = prio;
         tcb.base_priority = prio;
         tcb.state = TaskState::Ready;
@@ -649,22 +571,6 @@ pub(crate) unsafe fn create_task(
         TASK_WAIT_KIND[slot] = WaitObjectKind::None;
         TASK_WAIT_OBJECT[slot] = core::ptr::null_mut();
         tcb.tls = [core::ptr::null_mut(); TLS_SLOTS];
-        tcb.mutex_held_count = 0;
-
-        // Copy name
-        tcb.name = [0; 16];
-        if !name.is_null() {
-            let mut i = 0;
-            while i < 15 {
-                let c = *name.add(i);
-                if c == 0 {
-                    break;
-                }
-                tcb.name[i] = c as u8;
-                i += 1;
-            }
-        }
-        TASK_IS_IDLE[slot] = is_idle_task_name(&tcb.name);
 
         if !created_task.is_null() {
             *created_task = tcb as *mut TaskControlBlock as *mut c_void;
@@ -948,22 +854,6 @@ pub unsafe extern "C" fn xTaskGetCurrentTaskHandle() -> *mut c_void {
     }
 }
 
-/// `uxTaskGetStackHighWaterMark` — return the minimum ever free stack.
-///
-/// FreeRTOS reports this in `StackType_t` items; on ESP8266 that means bytes.
-#[no_mangle]
-pub unsafe extern "C" fn uxTaskGetStackHighWaterMark(handle: *mut c_void) -> u32 {
-    unsafe {
-        let idx = if handle.is_null() {
-            CURRENT_TASK
-        } else {
-            handle_to_index(handle)
-        };
-
-        stack_high_water_bytes(idx)
-    }
-}
-
 /// `xTaskGetSchedulerState` — return scheduler state.
 #[no_mangle]
 pub unsafe extern "C" fn xTaskGetSchedulerState() -> i32 {
@@ -974,23 +864,6 @@ pub unsafe extern "C" fn xTaskGetSchedulerState() -> i32 {
             TASK_SUSPENDED
         } else {
             TASK_RUNNING
-        }
-    }
-}
-
-/// `pcTaskGetName` — return a task's name.
-#[no_mangle]
-pub unsafe extern "C" fn pcTaskGetName(handle: *mut c_void) -> *const c_char {
-    unsafe {
-        let idx = if handle.is_null() {
-            CURRENT_TASK
-        } else {
-            handle_to_index(handle)
-        };
-        if idx < MAX_TASKS {
-            TASKS[idx].name.as_ptr() as *const c_char
-        } else {
-            b"\0".as_ptr() as *const c_char
         }
     }
 }
@@ -1204,7 +1077,7 @@ pub unsafe extern "C" fn vTaskSwitchContext() {
         // `vTaskSwitchContext()`: check the currently running task before
         // selecting the next task.
         if CURRENT_TASK < MAX_TASKS {
-            report_stack_canary_once(CURRENT_TASK);
+            check_stack_canary(CURRENT_TASK);
         }
 
         // Match the SDK invariant: only the current task may be considered
@@ -1309,12 +1182,6 @@ pub(crate) unsafe fn block_current_task_on_queue_tx(queue: *mut c_void, deadline
     }
 }
 
-pub(crate) unsafe fn block_current_task_on_event_group(event_group: *mut c_void, deadline: u64) {
-    unsafe {
-        block_current_task_on_wait_object(WaitObjectKind::EventGroup, event_group, deadline);
-    }
-}
-
 /// Wake a blocked task by index, making it Ready. Returns true if the
 /// woken task has higher priority than the currently running task.
 pub(crate) unsafe fn wake_task(idx: usize) -> bool {
@@ -1328,7 +1195,7 @@ pub(crate) unsafe fn wake_task(idx: usize) -> bool {
             clear_task_wait_locked(idx);
             let higher_priority = TASKS[idx].priority > TASKS[CURRENT_TASK].priority;
             if SCHEDULER_SUSPENDED > 0 {
-                enqueue_pending_ready_locked(idx);
+                PENDING_READY[idx] = true;
                 if higher_priority {
                     YIELD_PENDING = true;
                 }
@@ -1360,31 +1227,6 @@ pub(crate) unsafe fn current_task_index() -> usize {
     unsafe { CURRENT_TASK }
 }
 
-/// Store the event-group wake result for a blocked task.
-pub(crate) unsafe fn set_event_wait_result(idx: usize, bits: u32, matched: bool) {
-    unsafe {
-        if idx < MAX_TASKS {
-            TASK_EVENT_WAIT_BITS[idx] = bits;
-            TASK_EVENT_WAIT_MATCHED[idx] = matched;
-        }
-    }
-}
-
-/// Take and clear the latched event-group wake result for a task.
-pub(crate) unsafe fn take_event_wait_result(idx: usize) -> (u32, bool) {
-    unsafe {
-        if idx < MAX_TASKS {
-            let bits = TASK_EVENT_WAIT_BITS[idx];
-            let matched = TASK_EVENT_WAIT_MATCHED[idx];
-            TASK_EVENT_WAIT_BITS[idx] = 0;
-            TASK_EVENT_WAIT_MATCHED[idx] = false;
-            (bits, matched)
-        } else {
-            (0, false)
-        }
-    }
-}
-
 /// Get a task's priority by index.
 pub(crate) unsafe fn task_priority(idx: usize) -> u32 {
     unsafe {
@@ -1393,16 +1235,6 @@ pub(crate) unsafe fn task_priority(idx: usize) -> u32 {
         } else {
             0
         }
-    }
-}
-
-/// Whether the task is still in the compat Blocked state.
-pub(crate) unsafe fn task_is_blocked(idx: usize) -> bool {
-    unsafe {
-        idx < MAX_TASKS
-            && (TASKS[idx].state == TaskState::Blocked
-                || (TASKS[idx].state == TaskState::Suspended
-                    && TASK_WAIT_KIND[idx] != WaitObjectKind::None))
     }
 }
 
@@ -1427,20 +1259,14 @@ pub(crate) unsafe fn restore_priority(idx: usize) {
 #[inline(never)]
 unsafe fn drain_pending_ready_locked() {
     unsafe {
-        let len = PENDING_READY_LEN.min(MAX_TASKS);
         let current_prio = if CURRENT_TASK < MAX_TASKS {
             TASKS[CURRENT_TASK].priority
         } else {
             0
         };
 
-        let mut slot = 0usize;
-        while slot < len {
-            let idx = PENDING_READY_ORDER[slot];
-            PENDING_READY_ORDER[slot] = usize::MAX;
-            slot += 1;
-
-            if idx >= MAX_TASKS || !PENDING_READY[idx] {
+        for idx in 0..MAX_TASKS {
+            if !PENDING_READY[idx] {
                 continue;
             }
 
@@ -1455,31 +1281,6 @@ unsafe fn drain_pending_ready_locked() {
                 YIELD_PENDING = true;
             }
         }
-
-        while slot < MAX_TASKS {
-            PENDING_READY_ORDER[slot] = usize::MAX;
-            slot += 1;
-        }
-        PENDING_READY_LEN = 0;
-    }
-}
-
-unsafe fn enqueue_pending_ready_locked(idx: usize) {
-    unsafe {
-        if idx >= MAX_TASKS || PENDING_READY[idx] {
-            return;
-        }
-
-        if PENDING_READY_LEN >= MAX_TASKS {
-            compact_pending_ready_locked();
-            if PENDING_READY_LEN >= MAX_TASKS {
-                return;
-            }
-        }
-
-        PENDING_READY[idx] = true;
-        PENDING_READY_ORDER[PENDING_READY_LEN] = idx;
-        PENDING_READY_LEN += 1;
     }
 }
 
@@ -1488,28 +1289,6 @@ unsafe fn clear_pending_ready_locked(idx: usize) {
         if idx < MAX_TASKS {
             PENDING_READY[idx] = false;
         }
-    }
-}
-
-unsafe fn compact_pending_ready_locked() {
-    unsafe {
-        let len = PENDING_READY_LEN.min(MAX_TASKS);
-        let mut seen = [false; MAX_TASKS];
-        let mut write = 0usize;
-
-        for read in 0..len {
-            let idx = PENDING_READY_ORDER[read];
-            if idx < MAX_TASKS && PENDING_READY[idx] && !seen[idx] {
-                PENDING_READY_ORDER[write] = idx;
-                seen[idx] = true;
-                write += 1;
-            }
-        }
-
-        for slot in write..MAX_TASKS {
-            PENDING_READY_ORDER[slot] = usize::MAX;
-        }
-        PENDING_READY_LEN = write;
     }
 }
 
@@ -1533,7 +1312,6 @@ unsafe fn enqueue_deleted_task_locked(idx: usize) {
 
         DELETED_TASK_QUEUE[len] = idx;
         DELETED_TASK_QUEUE_LEN = len + 1;
-        DELETED_TASKS_WAITING_CLEANUP += 1;
     }
 }
 
@@ -1541,7 +1319,7 @@ unsafe fn pop_deleted_task_locked() -> Option<usize> {
     unsafe {
         let len = DELETED_TASK_QUEUE_LEN.min(MAX_TASKS);
 
-        if DELETED_TASKS_WAITING_CLEANUP == 0 || len == 0 {
+        if len == 0 {
             return None;
         }
 
@@ -1551,7 +1329,6 @@ unsafe fn pop_deleted_task_locked() -> Option<usize> {
         }
         DELETED_TASK_QUEUE_LEN = len - 1;
         DELETED_TASK_QUEUE[DELETED_TASK_QUEUE_LEN] = usize::MAX;
-        DELETED_TASKS_WAITING_CLEANUP -= 1;
 
         if idx < MAX_TASKS {
             Some(idx)
@@ -1572,13 +1349,12 @@ unsafe fn destroy_task_slot(idx: usize) {
         critical::vPortEnterCritical();
         let stack_base = TASKS[idx].stack_base;
         TASKS[idx] = EMPTY;
-        TASK_EVENT_WAIT_BITS[idx] = 0;
-        TASK_EVENT_WAIT_MATCHED[idx] = false;
         TASK_WAIT_KIND[idx] = WaitObjectKind::None;
         TASK_WAIT_OBJECT[idx] = core::ptr::null_mut();
         PENDING_READY[idx] = false;
-        TASK_IS_IDLE[idx] = false;
-        STACK_CANARY_REPORTED[idx] = false;
+        if IDLE_TASK == idx {
+            IDLE_TASK = MAX_TASKS;
+        }
         critical::vPortExitCritical();
 
         // The slot may already belong to a new task here. Touch only the
@@ -1752,7 +1528,6 @@ unsafe fn cancel_task_wait_locked(idx: usize) {
             WaitObjectKind::None => {}
             WaitObjectKind::QueueRx => super::queue::remove_rx_waiter_for_task(object, idx),
             WaitObjectKind::QueueTx => super::queue::remove_tx_waiter_for_task(object, idx),
-            WaitObjectKind::EventGroup => super::event_group::remove_waiter_for_task(object, idx),
         }
     }
 }

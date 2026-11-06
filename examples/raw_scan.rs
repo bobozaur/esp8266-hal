@@ -1,77 +1,47 @@
+//! Scan for access points without connecting or starting an IP stack.
+
 #![no_std]
 #![no_main]
 
+mod support;
+
+use core::fmt::Write;
+use esp8266_hal::timer::TimerExt;
+use esp8266_hal::wifi::{AccessPointRecord, InitConfig, ScanOptions, Wifi};
 use panic_halt as _;
 
-mod support;
-use esp8266_hal::timer::TimerExt;
-use support::log_line;
-
-use esp8266_hal::wifi::{AccessPointRecord, InitConfig, ScanOptions, ScanTimings, Wifi};
-use static_cell::StaticCell;
-
-static WIFI: StaticCell<Wifi> = StaticCell::new();
-
-#[esp8266_hal::main]
+#[esp8266_hal::entry]
 fn main() -> ! {
-    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let peripherals = esp8266_hal::target::Peripherals::take().unwrap();
+    let mut serial = support::serial(peripherals.UART0, peripherals.GPIO);
     let (_, timer2) = peripherals.TIMER.timers();
     let runtime = support::init(timer2);
-    log_line(b"wifi_core_scan start");
+    let mut wifi = Wifi::new(runtime, InitConfig::default()).expect("Wi-Fi initialization");
+    let (mut controller, _) = wifi.split();
 
-    let wifi = WIFI.init(Wifi::new(runtime, InitConfig::default()).expect("wifi init"));
-    let (mut driver, _) = wifi.split();
-    log_line(b"wifi core scan initialized");
+    controller.enable_station().expect("station mode");
+    controller.start_blocking(1_000).expect("start Wi-Fi");
+    let mut records: [AccessPointRecord; 16] = core::array::from_fn(|_| Default::default());
+    let options = ScanOptions::all().show_hidden(true);
 
-    driver.enable_station().expect("configure");
-    driver.start_blocking(1_000).expect("start");
-    log_line(b"wifi core scan started");
-
-    let options = ScanOptions::all()
-        .show_hidden(true)
-        .timings(ScanTimings::active(200, 500));
-
-    let mut records: [AccessPointRecord; 16] =
-        core::array::from_fn(|_| AccessPointRecord::default());
-    match driver.scan_blocking(&options, &mut records, 15_000) {
+    match controller.scan_blocking(&options, &mut records, 15_000) {
         Ok(count) => {
-            esp8266_hal::logger::write_bytes(b"wifi core scan done count=");
-            esp8266_hal::logger::write_dec_u32(count as u32);
-            esp8266_hal::logger::write_newline();
-            for record in records[..count].iter() {
-                esp8266_hal::logger::write_bytes(b"ap ssid=");
-                esp8266_hal::logger::write_bytes(record.ssid());
-                esp8266_hal::logger::write_bytes(b" bssid=");
-                for (index, byte) in record.bssid().iter().enumerate() {
-                    if index != 0 {
-                        esp8266_hal::logger::write_byte(b':');
-                    }
-                    esp8266_hal::logger::write_hex_u8(*byte);
-                }
-                esp8266_hal::logger::write_bytes(b" ch=");
-                esp8266_hal::logger::write_dec_u32(record.channel().get() as u32);
-                esp8266_hal::logger::write_bytes(b" rssi=");
-                if record.rssi() < 0 {
-                    esp8266_hal::logger::write_byte(b'-');
-                    esp8266_hal::logger::write_dec_u32(record.rssi().unsigned_abs() as u32);
-                } else {
-                    esp8266_hal::logger::write_dec_u32(record.rssi() as u32);
-                }
-                esp8266_hal::logger::write_bytes(b" auth=");
-                esp8266_hal::logger::write_dec_u32(record.authentication().as_raw() as u32);
-                esp8266_hal::logger::write_bytes(b" wps=");
-                esp8266_hal::logger::write_dec_u32(record.wps() as u32);
-                esp8266_hal::logger::write_newline();
+            writeln!(serial, "Found {count} access points:\r").unwrap();
+            for record in &records[..count] {
+                writeln!(
+                    serial,
+                    "{} {:02x?} channel={} RSSI={} authentication={:?}\r",
+                    core::str::from_utf8(record.ssid()).unwrap_or("<non-UTF-8 SSID>"),
+                    record.bssid(),
+                    record.channel().get(),
+                    record.rssi(),
+                    record.authentication(),
+                )
+                .unwrap();
             }
-            log_line(b"scan-ok");
         }
-        Err(error) => {
-            esp8266_hal::logger::write_bytes(b"wifi core scan error ");
-            support::log_debug(&error);
-            esp8266_hal::logger::write_newline();
-        }
+        Err(error) => writeln!(serial, "Scan failed: {error:?}\r").unwrap(),
     }
-
     loop {
         esp8266_hal::wifi::delay_ticks(100);
     }

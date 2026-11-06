@@ -237,10 +237,8 @@ pub extern "C" fn _esp_error_check_failed(
 
 #[no_mangle]
 pub extern "C" fn panicHandler(_frame: *mut c_void, _watchdog: i32) -> ! {
-    const UART_FIFO: *mut u32 = 0x6000_0000 as *mut u32;
     loop {
-        unsafe { UART_FIFO.write_volatile(b'!' as u32) };
-        busy_wait(800_000);
+        core::hint::spin_loop();
     }
 }
 

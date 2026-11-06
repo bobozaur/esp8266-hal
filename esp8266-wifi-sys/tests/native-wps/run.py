@@ -4,38 +4,16 @@
 import argparse
 import os
 import platform
+import runpy
 import subprocess
 import tempfile
 from pathlib import Path
 
-SDK_COMMIT = "da7ce37be424d71874241ca9f17cf8da0e3cdb70"
-
-# Same header order and feature definitions as the pinned native generator.
-SDK_INCLUDES = (
-    "esp8266/include", "esp8266/include/driver", "esp8266/source",
-    "esp_common/include", "esp_event/include", "esp_event/private_include",
-    "tcpip_adapter/include", "lwip/include/apps", "lwip/include/apps/sntp",
-    "lwip/lwip/src/include", "lwip/port/esp8266/include",
-    "lwip/port/esp8266/include/arch", "freertos/include",
-    "freertos/include/freertos", "freertos/include/freertos/private",
-    "freertos/port/esp8266/include", "freertos/port/esp8266/include/freertos",
-    "heap/include", "heap/port/esp8266/include", "newlib/platform_include",
-    "vfs/include", "wpa_supplicant/include",
-    "wpa_supplicant/include/esp_supplicant", "wpa_supplicant/port/include",
-    "wpa_supplicant/src", "wpa_supplicant/src/esp_supplicant", "log/include",
-    "spi_flash/include", "bootloader_support/include",
-    "bootloader_support/include_priv", "app_update/include", "nvs_flash/include",
-    "esp_ringbuf/include", "esp_ringbuf/include/freertos", "mbedtls/port/include",
-    "mbedtls/port/include/esp8266", "mbedtls/mbedtls/include",
-)
-DEFINES = (
-    "ESP_PLATFORM", "__XTENSA__", "__xtensa__", "__ets__", "ESP_SUPPLICANT",
-    "IEEE8021X_EAPOL", "EAP_PEER_METHOD", "EAP_MSCHAPv2", "EAP_TTLS", "EAP_TLS",
-    "EAP_PEAP", "USE_WPA2_TASK", "CONFIG_WPS2", "CONFIG_WPS_PIN", "USE_WPS_TASK",
-    "ESPRESSIF_USE", "ESP8266_WORKAROUND", "CONFIG_ECC", "CONFIG_IEEE80211W",
-    "CONFIG_WPA3_SAE", "CONFIG_DPP", "CONFIG_WNM", "CONFIG_SSL_USING_MBEDTLS",
-    "__ESP_FILE__=__FILE__", 'MBEDTLS_CONFIG_FILE="mbedtls/esp_config.h"',
-)
+# Reproduction and host regression compilation use the same pinned headers/features.
+_manifest = runpy.run_path(str(Path(__file__).resolve().parents[2] / "vendor/rebuild.py"))
+SDK_COMMIT = _manifest["SDK_COMMIT"]
+SDK_INCLUDES = _manifest["SDK_INCLUDES"]
+DEFINES = _manifest["WPA_DEFINES"]
 SDK_SOURCES = (
     "wps/wps.c", "wps/wps_dev_attr.c", "eap_peer/eap_common.c",
     "wps/wps_attr_parse.c", "utils/wpabuf.c",

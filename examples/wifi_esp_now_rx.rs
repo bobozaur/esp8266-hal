@@ -1,188 +1,69 @@
-//! ESP-NOW RX validation example using the Wi-Fi controller.
+//! Receive ESP-NOW payloads on a selected channel.
+//! To receive encrypted unicast, set PEER to Some(EspNowPeerConfig::encrypted(
+//! sender_mac, lmk)) and use the same PMK and LMK on the sender.
+//! The example keys are public placeholders; replace them for your application.
 
 #![no_std]
 #![no_main]
 
-use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
-
 mod support;
+
+use core::fmt::Write;
 use esp8266_hal::timer::TimerExt;
-use support::log_line;
-
 use esp8266_hal::wifi::{Channel, EspNowPeerConfig, InitConfig, Wifi};
-use static_cell::StaticCell;
-use xtensa_lx_rt::exception::{Context, ExceptionCause};
+use panic_halt as _;
 
-const ESP_NOW_PEER_CAPACITY: usize = if option_env!("ESP8266_HAL_ESPNOW_PEER").is_some() {
-    1
-} else {
-    0
-};
+const CHANNEL: u8 = 6;
+const PMK: [u8; 16] = *b"example-pmk-1234";
+const PEER: Option<EspNowPeerConfig> = None;
+// Example encrypted configuration, using the sender's actual MAC:
+// const PEER: Option<EspNowPeerConfig> = Some(
+//     EspNowPeerConfig::encrypted([0x02, 0, 0, 0, 0, 2], *b"example-lmk-1234"),
+// );
 
-static WIFI: StaticCell<Wifi> = StaticCell::new();
-const ESP_NOW_PMK: [u8; 16] = [0x24; 16];
-
-fn log_peer(peer_addr: &[u8; 6]) {
-    esp8266_hal::logger::write_bytes(b"esp-now rx peer=");
-    for (index, byte) in peer_addr.iter().copied().enumerate() {
-        if index != 0 {
-            esp8266_hal::logger::write_byte(b':');
-        }
-        esp8266_hal::logger::write_hex_u8(byte);
-    }
-    esp8266_hal::logger::write_newline();
-}
-
-fn parse_peer_addr(value: &str) -> Option<[u8; 6]> {
-    let mut parts = value.split(':');
-    let mut address = [0; 6];
-    for byte in &mut address {
-        let part = parts.next()?;
-        if part.len() != 2 || !part.bytes().all(|digit| digit.is_ascii_hexdigit()) {
-            return None;
-        }
-        *byte = u8::from_str_radix(part, 16).ok()?;
-    }
-    parts.next().is_none().then_some(address)
-}
-
-fn encrypted_peer_enabled() -> bool {
-    matches!(option_env!("ESP8266_HAL_ESPNOW_ENCRYPTED"), Some("1"))
-}
-
-#[esp8266_hal::main]
+#[esp8266_hal::entry]
 fn main() -> ! {
-    let peripherals = esp8266_hal::target::Peripherals::take().expect("peripherals");
+    let peripherals = esp8266_hal::target::Peripherals::take().unwrap();
+    let mut serial = support::serial(peripherals.UART0, peripherals.GPIO);
     let (_, timer2) = peripherals.TIMER.timers();
     let runtime = support::init(timer2);
-    static EXECUTOR: StaticCell<esp8266_hal::wifi::executor::Executor> = StaticCell::new();
-    EXECUTOR
-        .init(esp8266_hal::wifi::executor::Executor::new())
-        .run(runtime, |spawner| {
-            spawner.must_spawn(app_main(spawner, runtime));
-        })
-}
-
-#[embassy_executor::task]
-async fn app_main(_spawner: Spawner, runtime: &'static esp8266_hal::wifi::Runtime) {
-    log_line(b"wifi_esp_now_rx start");
-
-    let mut init = InitConfig::new(14, 4, 4).expect("init config");
-    init.queues.esp_now_peers = ESP_NOW_PEER_CAPACITY;
+    let mut init = InitConfig::new(14, 4, 4).unwrap();
+    init.queues.station_rx = 0;
+    init.queues.esp_now_peers = usize::from(PEER.is_some());
     init.queues.esp_now_rx = 2;
-    let wifi = WIFI.init(Wifi::new(runtime, init).expect("wifi init"));
-    let (mut driver, _) = wifi.split();
-    log_line(b"wifi init ok");
+    let mut wifi = Wifi::new(runtime, init).expect("Wi-Fi initialization");
+    let (mut controller, interfaces) = wifi.split();
+    writeln!(
+        serial,
+        "Station MAC {:02x?}\r",
+        interfaces.station.mac_address()
+    )
+    .unwrap();
+    controller.enable_station().expect("station mode");
+    controller.start_blocking(1_000).expect("start Wi-Fi");
 
-    match driver
-        .enable_station()
-        .and_then(|()| driver.start_blocking(1_000))
-    {
-        Ok(()) => {}
-        Err(_error) => {
-            log_line(b"esp-now start err");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-    };
-    log_line(b"esp-now sta started");
-
-    let mut session = match driver.esp_now() {
-        Ok(session) => session,
-        Err(_error) => {
-            log_line(b"esp-now session err");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-    };
-
-    if session
-        .set_channel(Channel::try_from(6).expect("esp-now channel"))
-        .is_err()
-    {
-        log_line(b"esp-now channel err");
-        loop {
-            Timer::after(Duration::from_secs(60)).await;
-        }
+    let channel = Channel::try_from(CHANNEL).expect("channel");
+    let mut session = controller.esp_now().expect("ESP-NOW session");
+    session.set_channel(channel).expect("set channel");
+    session.start().expect("start ESP-NOW");
+    session.set_pmk(&PMK).expect("set PMK");
+    if let Some(peer) = PEER {
+        session
+            .add_peer(peer.channel(channel).for_station())
+            .expect("add peer");
     }
-    log_line(b"esp-now channel ok");
-
-    if session.start().is_err() {
-        log_line(b"esp-now start err");
-        loop {
-            Timer::after(Duration::from_secs(60)).await;
-        }
-    }
-    if encrypted_peer_enabled() && session.set_pmk(&ESP_NOW_PMK).is_err() {
-        log_line(b"esp-now pmk err");
-        loop {
-            Timer::after(Duration::from_secs(60)).await;
-        }
-    }
-
-    let expected_peer = option_env!("ESP8266_HAL_ESPNOW_PEER")
-        .map(|value| parse_peer_addr(value).expect("esp-now peer address"));
-    if let Some(peer) = expected_peer {
-        let peer_config = if encrypted_peer_enabled() {
-            log_line(b"esp-now rx peer encrypted");
-            EspNowPeerConfig::encrypted(peer, [0x42; 16])
-                .channel(Channel::try_from(6).expect("esp-now channel"))
-        } else {
-            log_line(b"esp-now rx peer unicast");
-            EspNowPeerConfig::unencrypted(peer)
-                .channel(Channel::try_from(6).expect("esp-now channel"))
-        };
-        if session.add_peer(peer_config.for_station()).is_err() {
-            log_line(b"esp-now peer err");
-            loop {
-                Timer::after(Duration::from_secs(60)).await;
-            }
-        }
-    }
-    log_line(b"esp-now rx ready");
+    writeln!(serial, "Receiving ESP-NOW on channel {CHANNEL}\r").unwrap();
 
     loop {
         if let Some(frame) = session.receive() {
-            log_peer(frame.peer_addr());
-            esp8266_hal::logger::write_bytes(b"esp-now rx len=");
-            esp8266_hal::logger::write_dec_u32(frame.payload().len() as u32);
-            esp8266_hal::logger::write_newline();
-            if frame.payload() == b"esp8266-hal-esp-now"
-                && expected_peer.map_or(true, |peer| frame.peer_addr() == &peer)
-            {
-                log_line(b"esp-now-rx-ok");
-            }
+            writeln!(
+                serial,
+                "From {:02x?}: {:02x?}\r",
+                frame.peer_addr(),
+                frame.payload()
+            )
+            .unwrap();
         }
-        Timer::after(Duration::from_millis(20)).await;
+        esp8266_hal::wifi::delay_ticks(1);
     }
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    esp8266_hal::logger::write_byte(b'?');
-    loop {}
-}
-
-#[link_section = ".rwtext"]
-#[xtensa_lx_rt::exception]
-fn exception(cause: ExceptionCause, frame: Context) -> ! {
-    esp8266_hal::logger::write_bytes(b"exception cause=");
-    esp8266_hal::logger::write_dec_u32(cause as u32);
-    let registers =
-        unsafe { core::slice::from_raw_parts((&frame as *const Context).cast::<u32>(), 21) };
-    esp8266_hal::logger::write_bytes(b" pc=0x");
-    esp8266_hal::logger::write_hex_u32(registers[0]);
-    esp8266_hal::logger::write_bytes(b" a0=0x");
-    esp8266_hal::logger::write_hex_u32(registers[2]);
-    esp8266_hal::logger::write_bytes(b" a1=0x");
-    esp8266_hal::logger::write_hex_u32(registers[3]);
-    esp8266_hal::logger::write_bytes(b" vaddr=0x");
-    esp8266_hal::logger::write_hex_u32(registers[20]);
-    esp8266_hal::logger::write_newline();
-    esp8266_hal::logger::write_bytes(b"panic");
-    esp8266_hal::logger::write_newline();
-    loop {}
 }

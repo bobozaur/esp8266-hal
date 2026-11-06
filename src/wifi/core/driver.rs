@@ -10,7 +10,11 @@ use allocator_api2::boxed::Box;
 use core::task::Poll;
 
 /// Owns the stable callback storage and the ESP8266 radio instance.
-/// Runtime infrastructure remains initialized after this object is dropped.
+///
+/// Keep this owner alive while its controller or packet interfaces are borrowed.
+/// Drop attempts native teardown; failed teardown or a forgotten receive token
+/// retains the allocation and radio instance so callbacks cannot access freed
+/// memory. Runtime infrastructure remains initialized after this object is dropped.
 pub struct Wifi {
     resources: Option<Box<Resources, RuntimeAllocator>>,
     sdk: Sdk,
@@ -27,6 +31,13 @@ impl Wifi {
             .map_err(|_| InitError::OutOfMemory)
     }
     #[cfg(target_arch = "xtensa")]
+    /// Initializes the radio using an explicitly initialized application runtime.
+    ///
+    /// Rust queues allocate once according to [`InitConfig::queues`]. The SDK
+    /// continues using the runtime's allocator during operation. Construction
+    /// does not configure, start, or connect the radio; use [`Self::split`] to
+    /// obtain the controller. Native buffer counts remain fixed for the boot as
+    /// described by [`InitConfig`].
     pub fn new(
         runtime: &'static crate::wifi::Runtime,
         config: InitConfig,
@@ -49,6 +60,8 @@ impl Wifi {
         })?;
         Ok(wifi)
     }
+    /// Borrows independent control, station-frame, and access-point-frame handles.
+    /// The configured radio mode determines which packet interfaces can operate.
     pub fn split(&mut self) -> (Controller<'_>, Interfaces<'_>) {
         let resources = self.resources.as_deref().expect("live Wifi owns resources");
         (
@@ -88,6 +101,12 @@ impl Drop for Wifi {
 }
 
 /// Radio configuration and operation control, independent of packet interfaces.
+///
+/// Blocking timeouts are milliseconds; async waits have no internal deadline and
+/// work with the application's executor. A timeout or dropped future stops
+/// waiting and may leave SDK work active. Request disconnection, cancel a scan,
+/// or stop the radio explicitly before starting conflicting work. Reconnection
+/// policy belongs to the application.
 pub struct Controller<'a> {
     pub(crate) sdk: &'a mut Sdk,
     pub(crate) resources: &'a Resources,
@@ -100,6 +119,7 @@ impl Controller<'_> {
             Ok(())
         }
     }
+    /// Replaces the station/AP configuration while the radio is stopped and no session is held.
     pub fn set_configuration(&mut self, config: &Configuration<'_>) -> Result<(), DriverError> {
         self.require_stopped()?;
         self.resources.state.with(|s| s.station_configured = false);
@@ -183,6 +203,12 @@ impl Controller<'_> {
         })
         .await
     }
+    /// Stops the radio and protocol sessions, discarding queued native RX frames.
+    ///
+    /// A checked-out native receive token on either interface, or an active TX
+    /// submission, returns [`DriverError::Busy`]. Release those before retrying.
+    /// Configuration remains available for a later start. Frames already copied
+    /// into a network stack and existing sockets belong to the application's lifecycle.
     pub fn stop(&mut self) -> Result<(), DriverError> {
         self.resources.close_admission()?;
         self.resources.drain_sta_rx();
@@ -266,6 +292,8 @@ impl Controller<'_> {
         .await
     }
     /// Requests disconnection; completion is reported by the actual SDK event.
+    /// Queued station frames are discarded. A held station receive token returns
+    /// [`DriverError::Busy`]; access-point receive tokens remain independent.
     pub fn disconnect(&mut self) -> Result<(), DriverError> {
         let needed = self
             .resources
@@ -384,7 +412,9 @@ impl Controller<'_> {
         });
         result
     }
-    /// Scans while disconnected. The SDK owns results until this call collects them.
+    /// Scans in started station mode while disconnected and not connecting.
+    /// The SDK owns results until this call collects them into `records[..count]`.
+    /// Timeout leaves the scan tracked; use [`Self::cancel_scan`] to request cancellation.
     pub fn scan_blocking(
         &mut self,
         options: &ScanOptions,
@@ -533,13 +563,14 @@ mod tests {
         c.set_configuration(&station()).unwrap();
         c.start_blocking(1000).unwrap();
         r.publish_event(WifiEvent::StaConnected).unwrap();
-        // SAFETY: immutable static backing needs no release hook in this test.
+        unsafe fn release_static(_: *mut core::ffi::c_void, _: *mut core::ffi::c_void) {}
+        // SAFETY: immutable static backing remains live; release has no work.
         let record = |bytes: &'static [u8; 64]| unsafe {
             RawRxRecord::from_raw(
                 bytes.as_ptr().cast_mut().cast(),
                 64,
                 core::ptr::null_mut(),
-                None,
+                release_static,
             )
         };
         r.enqueue_rx(InterfaceId::Station, record(&OLD)).unwrap();
@@ -740,14 +771,15 @@ mod ownership_tests {
         resources
             .publish_event(super::super::WifiEvent::ApStarted)
             .unwrap();
+        unsafe fn release_static(_: *mut core::ffi::c_void, _: *mut core::ffi::c_void) {}
         // SAFETY: immutable static bytes remain valid even when the lease is
-        // deliberately forgotten. This test record has no native release hook.
+        // deliberately forgotten. The release hook has no work for static data.
         let record = unsafe {
             RawRxRecord::from_raw(
                 BYTES.as_ptr().cast_mut().cast(),
                 64,
                 core::ptr::null_mut(),
-                None,
+                release_static,
             )
         };
         resources

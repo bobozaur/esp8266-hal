@@ -2,7 +2,7 @@
  * Bindgen wrapper header for esp8266-wifi-sys.
  *
  * Includes the ESP8266 RTOS SDK headers needed for WiFi, events, networking,
- * SmartConfig, WPS, and ESP-NOW bindings. The shims/sdkconfig.h must be on
+ * SmartConfig, WPS, and ESP-NOW bindings. The canonical sdkconfig.h must be on
  * the include path before SDK headers so that CONFIG_* defines are satisfied.
  */
 

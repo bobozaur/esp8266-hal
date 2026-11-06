@@ -549,6 +549,27 @@ void fixture_tests(void)
     fail_all = 0;
     clean();
     CHECK(live_count == 1);
+    /* Each queued packet owns one allocation; a failed post is drained by the
+     * next RX event or normal teardown, without a second payload owner. */
+    CHECK(esp_wifi_wps_enable(&cfg) == 0);
+    total = live_count;
+    before = calls;
+    fail_at = calls + 1;
+    CHECK(callbacks->wps_sm_rx_eapol(mac, packet, sizeof(packet)) == ESP_ERR_NO_MEM);
+    fail_at = 0;
+    CHECK(calls == before + 1 && live_count == total);
+    before = calls;
+    send_fail = 1;
+    CHECK(callbacks->wps_sm_rx_eapol(mac, packet, sizeof(packet)) != ESP_OK);
+    CHECK(calls == before + 1 && live_count == total + 1);
+    before = calls;
+    CHECK(callbacks->wps_sm_rx_eapol(mac, packet, sizeof(packet)) == ESP_OK);
+    CHECK(calls == before + 1 && live_count == total + 2);
+    fixture_worker_pump();
+    CHECK(live_count == total);
+    CHECK(esp_wifi_wps_disable() == 0);
+    clean();
+    CHECK(live_count == 1);
     test_receive_and_scan();
 }
 

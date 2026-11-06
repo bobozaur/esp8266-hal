@@ -33,12 +33,12 @@ pub(crate) struct EthernetNeighborHint {
 }
 
 pub(crate) struct EthernetNeighborHints {
-    local_mac: Option<[u8; 6]>,
+    local_mac: [u8; 6],
     pending: Option<EthernetNeighborHint>,
 }
 
 impl EthernetNeighborHints {
-    pub(crate) fn new(local_mac: Option<[u8; 6]>) -> Self {
+    pub(crate) fn new(local_mac: [u8; 6]) -> Self {
         Self {
             local_mac,
             pending: None,
@@ -59,12 +59,8 @@ impl EthernetNeighborHints {
     }
 
     pub(crate) fn observe(&mut self, frame: &[u8]) {
-        let Some(local_mac) = self.local_mac else {
-            return;
-        };
-
         if self.pending.is_none() {
-            self.pending = EthernetNeighborHint::from_ipv4_frame(frame, local_mac);
+            self.pending = EthernetNeighborHint::from_ipv4_frame(frame, self.local_mac);
         }
     }
 
@@ -315,7 +311,7 @@ mod tests {
 
     #[test]
     fn queue_emits_pending_before_observing_next_frame() {
-        let mut hints = EthernetNeighborHints::new(Some(LOCAL_MAC));
+        let mut hints = EthernetNeighborHints::new(LOCAL_MAC);
         hints.observe(&ipv4_frame(REMOTE_MAC, LOCAL_MAC, REMOTE_IP, LOCAL_IP));
         assert!(hints.has_pending());
 

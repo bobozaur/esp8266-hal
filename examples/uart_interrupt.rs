@@ -14,7 +14,7 @@ use panic_halt as _;
 
 static SERIAL: Mutex<RefCell<Option<UART0Serial>>> = Mutex::new(RefCell::new(None));
 
-#[esp8266_hal::main]
+#[esp8266_hal::entry]
 fn main() -> ! {
     let dp = Peripherals::take().unwrap();
     // Select the application's baud independently of the ROM boot output.

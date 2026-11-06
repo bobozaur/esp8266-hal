@@ -144,6 +144,8 @@ impl<const MTU: usize> ch::driver::TxToken for TxToken<'_, MTU> {
 
 pub type Runner<'s, 'd> = RunnerWithMtu<'s, 'd, DEFAULT_MTU>;
 
+/// Creates a channel for either station or access-point frames.
+/// Poll the returned runner alongside the application's network stack.
 pub fn new<'s, 'd, const N_RX: usize, const N_TX: usize>(
     state: &'s mut NetDriverState<N_RX, N_TX>,
     interface: Interface<'d>,
@@ -151,6 +153,10 @@ pub fn new<'s, 'd, const N_RX: usize, const N_TX: usize>(
     new_with_mtu(state, interface)
 }
 
+/// Creates a channel with application-selected frame capacity.
+///
+/// Both queue counts must be nonzero, and `MTU` must fit the interface and be at
+/// least [`MIN_IPV4_ETHERNET_FRAME_SIZE`]. Storage is borrowed without allocation.
 pub fn new_with_mtu<'s, 'd, const MTU: usize, const N_RX: usize, const N_TX: usize>(
     state: &'s mut NetDriverStateWithMtu<MTU, N_RX, N_TX>,
     interface: Interface<'d>,
@@ -183,7 +189,7 @@ pub fn new_with_mtu<'s, 'd, const MTU: usize, const N_RX: usize, const N_TX: usi
             tx_generations: &state.tx_generations,
             shared_generation: &state.generation,
             next_tx: 0,
-            neighbor_hints: EthernetNeighborHints::new(Some(mac)),
+            neighbor_hints: EthernetNeighborHints::new(mac),
         },
         NetDeviceWithMtu {
             inner: device,
@@ -221,6 +227,9 @@ impl<const MTU: usize> RunnerWithMtu<'_, '_, MTU> {
             let rx_progress = self.poll_rx();
             let (tx_progress, tx_blocked) = self.poll_tx();
             if tx_blocked {
+                // Native completion precedes descriptor recycling, and other
+                // radio traffic can consume capacity without notifying us.
+                // Timed retry guarantees progress without a completion wakeup.
                 Timer::after(Duration::from_millis(1)).await;
             } else if rx_progress || tx_progress {
                 budget -= 1;
@@ -328,13 +337,18 @@ fn map_link_state(state: LinkState) -> ch::driver::LinkState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "xtensa")))]
 mod tests {
     extern crate std;
-    use self::std::{sync::Arc, task::Wake};
+    use self::std::{boxed::Box, sync::Arc, task::Wake};
     use super::*;
-    use ch::driver::{Driver as _, TxToken as _};
-    use core::task::Waker;
+    use crate::wifi_core::{
+        allocator::test_allocator,
+        target::{InterfaceId, RawRxRecord, Resources, Sdk, TxScript},
+        Controller, QueueConfig, WifiEvent,
+    };
+    use ch::driver::{Driver as _, RxToken as _, TxToken as _};
+    use core::{future::Future, task::Waker};
 
     struct Noop;
     impl Wake for Noop {
@@ -342,43 +356,154 @@ mod tests {
     }
 
     #[test]
-    fn channel_tokens_keep_issuing_generation_through_restart_and_wraparound() {
-        let mut state = NetDriverStateWithMtu::<64, 1, 2>::new();
-        state.generation.set(4);
-        let (mut runner, inner) = ch::new(
-            &mut state.channel,
-            ch::driver::HardwareAddress::Ethernet([2, 0, 0, 0, 0, 1]),
-        );
-        let mut device = NetDeviceWithMtu {
-            inner,
-            tx_generations: &state.tx_generations,
-            generation: &state.generation,
-            next_tx: 0,
+    fn restart_discards_issued_and_buffered_frames_before_reusing_channel_slots() {
+        let resources = Resources::try_new(&QueueConfig::default(), test_allocator()).unwrap();
+        let mut sdk = Sdk::new(&resources);
+        let mut controller = Controller {
+            sdk: &mut sdk,
+            resources: &resources,
         };
+        controller.enable_station().unwrap();
+        controller.start_blocking(0).unwrap();
+        resources.publish_event(WifiEvent::StaConnected).unwrap();
+        let interface = Interface {
+            resources: &resources,
+            id: InterfaceId::Station,
+            mac: [2, 0, 0, 0, 0, 1],
+        };
+        let mut state = NetDriverStateWithMtu::<82, 1, 2>::new();
+        let (mut runner, mut device) = new_with_mtu(&mut state, interface).unwrap();
+        let tx = TxScript::new([Err(DriverError::WouldBlock), Ok(()), Ok(())]);
         let waker = Waker::from(Arc::new(Noop));
         let mut cx = Context::from_waker(&waker);
 
-        let old = device.transmit(&mut cx).unwrap();
-        state.generation.set(5);
-        old.consume(3, |buffer| buffer.copy_from_slice(b"old"));
-        assert_eq!(runner.try_tx_buf().unwrap(), b"old");
-        assert_eq!(state.tx_generations[0].get(), 4);
-        runner.tx_done();
+        let issued = device.transmit(&mut cx).unwrap();
+        controller.stop().unwrap();
+        controller.start_blocking(0).unwrap();
+        resources.publish_event(WifiEvent::StaConnected).unwrap();
+        runner.synchronize_generation();
+        issued.consume(14, |buffer| buffer.fill(0x11));
+        assert_eq!(runner.poll_tx(), (true, false));
+        assert!(tx.frames().is_empty());
 
-        device.transmit(&mut cx).unwrap().consume(3, |buffer| {
-            // A controller stop/start can happen inside this user closure.
-            state.generation.set(6);
-            buffer.copy_from_slice(b"mid");
+        device.transmit(&mut cx).unwrap().consume(14, |buffer| {
+            buffer.fill(0x22);
+            controller.stop().unwrap();
+            controller.start_blocking(0).unwrap();
+            resources.publish_event(WifiEvent::StaConnected).unwrap();
+            runner.synchronize_generation();
         });
-        assert_eq!(runner.try_tx_buf().unwrap(), b"mid");
-        assert_eq!(state.tx_generations[1].get(), 5);
-        runner.tx_done();
+        assert_eq!(runner.poll_tx(), (true, false));
+        assert!(tx.frames().is_empty());
 
         device
             .transmit(&mut cx)
             .unwrap()
-            .consume(3, |buffer| buffer.copy_from_slice(b"new"));
-        assert_eq!(runner.try_tx_buf().unwrap(), b"new");
-        assert_eq!(state.tx_generations[0].get(), 6);
+            .consume(14, |buffer| buffer.fill(0x33));
+        assert_eq!(runner.poll_tx(), (false, true));
+        device
+            .transmit(&mut cx)
+            .unwrap()
+            .consume(14, |buffer| buffer.fill(0x44));
+        controller.stop().unwrap();
+        controller.start_blocking(0).unwrap();
+        resources.publish_event(WifiEvent::StaConnected).unwrap();
+        runner.synchronize_generation();
+        assert_eq!(runner.poll_tx(), (true, false));
+
+        for byte in [0x55, 0x66] {
+            device
+                .transmit(&mut cx)
+                .unwrap()
+                .consume(14, |buffer| buffer.fill(byte));
+        }
+        assert_eq!(runner.poll_tx(), (true, false));
+        let frames = tx.frames();
+        assert_eq!(frames.len(), 3);
+        for ((id, frame), byte) in frames.iter().zip([0x33, 0x55, 0x66]) {
+            assert_eq!(*id, InterfaceId::Station);
+            assert_eq!(frame.as_slice(), [byte; 14]);
+        }
+    }
+
+    #[test]
+    fn full_rx_channel_waits_for_tx_and_preserves_retries_on_both_interfaces() {
+        static RECEIVED: [u8; 14] = [0x77; 14];
+        unsafe fn release_static(_: *mut core::ffi::c_void, _: *mut core::ffi::c_void) {}
+        for id in [InterfaceId::Station, InterfaceId::AccessPoint] {
+            let resources = Resources::try_new(
+                &QueueConfig {
+                    station_rx: 2,
+                    access_point_rx: 2,
+                    ..QueueConfig::default()
+                },
+                test_allocator(),
+            )
+            .unwrap();
+            resources
+                .publish_event(match id {
+                    InterfaceId::Station => WifiEvent::StaConnected,
+                    InterfaceId::AccessPoint => WifiEvent::ApStarted,
+                })
+                .unwrap();
+            let interface = Interface {
+                resources: &resources,
+                id,
+                mac: [2, 0, 0, 0, 0, 1],
+            };
+            let mut state = NetDriverStateWithMtu::<82, 1, 2>::new();
+            let (mut runner, mut device) = new_with_mtu(&mut state, interface).unwrap();
+            // Arrange an observed link so the wait below depends only on packet work.
+            runner.last_link = LinkState::Up;
+            for _ in 0..2 {
+                // SAFETY: the immutable static frame remains live after release.
+                let record = unsafe {
+                    RawRxRecord::from_raw(
+                        RECEIVED.as_ptr().cast_mut().cast(),
+                        RECEIVED.len() as u16,
+                        core::ptr::null_mut(),
+                        release_static,
+                    )
+                };
+                resources.enqueue_rx(id, record).unwrap();
+            }
+            assert!(runner.poll_rx());
+            assert!(runner.interface.has_rx_data());
+            assert!(!runner.poll_rx());
+
+            let tx = TxScript::new([Err(DriverError::WouldBlock), Ok(()), Ok(())]);
+            let waker = Waker::from(Arc::new(Noop));
+            let mut cx = Context::from_waker(&waker);
+            {
+                let mut wait = Box::pin(runner.wait_for_work());
+                assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending);
+                device
+                    .transmit(&mut cx)
+                    .unwrap()
+                    .consume(14, |buffer| buffer.fill(0x11));
+                assert_eq!(wait.as_mut().poll(&mut cx), Poll::Ready(()));
+            }
+            device
+                .transmit(&mut cx)
+                .unwrap()
+                .consume(14, |buffer| buffer.fill(0x22));
+            assert_eq!(runner.poll_tx(), (false, true));
+            assert!(device.transmit(&mut cx).is_none());
+            assert_eq!(runner.poll_tx(), (true, false));
+            assert!(!runner.poll_rx());
+
+            let frames = tx.frames();
+            assert_eq!(frames.len(), 3);
+            for ((interface, frame), byte) in frames.iter().zip([0x11, 0x11, 0x22]) {
+                assert_eq!(*interface, id);
+                assert_eq!(frame.as_slice(), [byte; 14]);
+            }
+            {
+                let (rx, _tx) = device.receive(&mut cx).unwrap();
+                rx.consume(|frame| assert_eq!(frame, RECEIVED));
+            }
+            assert!(runner.poll_rx());
+            assert!(!runner.interface.has_rx_data());
+        }
     }
 }

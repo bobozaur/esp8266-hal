@@ -1248,7 +1248,6 @@ extern "C" {
     pub fn esp_read_mac(mac: *mut u8, type_: esp_mac_type_t) -> esp_err_t;
     pub fn esp_restart() -> !;
     pub fn esp_get_free_heap_size() -> u32;
-    pub fn esp_get_minimum_free_heap_size() -> u32;
     pub fn esp_random() -> u32;
     pub fn esp_fill_random(buf: *mut core::ffi::c_void, len: usize);
     pub fn esp_event_loop_create_default() -> esp_err_t;

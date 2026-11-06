@@ -35,7 +35,7 @@ mod state;
 mod target;
 #[cfg(all(test, not(target_arch = "xtensa")))]
 #[path = "test_sdk.rs"]
-mod target;
+pub(crate) mod target;
 #[cfg(any(target_arch = "xtensa", test))]
 mod target_callback;
 #[cfg(any(target_arch = "xtensa", test))]

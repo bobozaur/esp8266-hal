@@ -1,9 +1,9 @@
 /*
- * Auto-generated sdkconfig.h for esp8266-wifi-sys.
+ * Canonical SDK configuration for esp8266-wifi-sys.
  *
  * Provides the CONFIG_* defines that FreeRTOS, lwIP, and WiFi headers need
  * so that both bindgen and cc can parse/compile them without a full SDK build.
- * Values match the SDK Kconfig defaults.
+ * Explicit runtime limits below override SDK defaults where documented.
  */
 
 #ifndef SDKCONFIG_H
@@ -157,6 +157,8 @@
 #define MBEDTLS_ECP_FIXED_POINT_OPTIM 0
 #define CONFIG_MBEDTLS_TLS_ENABLED 1
 #define CONFIG_MBEDTLS_TLS_CLIENT 1
+/* Retain the SDK server configuration: disabling it measurably slows EAP
+ * client handshakes in the supported target build. */
 #define CONFIG_MBEDTLS_TLS_SERVER 1
 #define CONFIG_MBEDTLS_SSL_PROTO_TLS1 1
 #define CONFIG_MBEDTLS_SSL_PROTO_TLS1_1 1

@@ -57,11 +57,10 @@
 uint32_t tls_instance_count;
 struct tls_data {
 	/* Data for mbedlts */
-	struct wpabuf *in_data;
-	const u8 *in_ext_data;
-	size_t in_ext_len;
-	size_t in_ext_pos;
-	struct wpabuf *in_ext_owner;
+	const u8 *input;
+	size_t input_len;
+	size_t input_pos;
+	struct wpabuf *input_owner;
 	int in_buf_restore_pending;
 	/* Data from mbedtls */
 	struct wpabuf *out_data;
@@ -97,8 +96,16 @@ void esp8266_hal_tls_set_input_owner(struct tls_connection *conn,
 {
 	if (conn == NULL)
 		return;
-	wpabuf_free(conn->tls_io_data.in_ext_owner);
-	conn->tls_io_data.in_ext_owner = owner;
+	wpabuf_free(conn->tls_io_data.input_owner);
+	conn->tls_io_data.input_owner = owner;
+}
+
+static void tls_clear_input(struct tls_data *data)
+{
+	data->input = NULL;
+	data->input_len = data->input_pos = 0;
+	wpabuf_free(data->input_owner);
+	data->input_owner = NULL;
 }
 
 static void tls_mbedtls_cleanup(tls_context_t *tls)
@@ -148,87 +155,35 @@ static int tls_mbedtls_read(void *ctx, unsigned char *buf, size_t len)
 {
 	struct tls_connection *conn = (struct tls_connection *)ctx;
 	struct tls_data *data = &conn->tls_io_data;
-	struct wpabuf *local_buf;
-	size_t copied = 0;
+	size_t available;
 
-	while (copied < len) {
-		size_t available;
-		size_t chunk;
-
-		if (data->in_ext_data) {
-			available = data->in_ext_len - data->in_ext_pos;
-			chunk = len - copied;
-			if (chunk > available)
-				chunk = available;
-			os_memcpy(buf + copied, data->in_ext_data + data->in_ext_pos,
-				  chunk);
-			copied += chunk;
-			data->in_ext_pos += chunk;
-			if (data->in_ext_pos >= data->in_ext_len) {
-				data->in_ext_data = NULL;
-				data->in_ext_len = 0;
-				data->in_ext_pos = 0;
-				wpabuf_free(data->in_ext_owner);
-				data->in_ext_owner = NULL;
-			} else if (data->in_ext_owner &&
-				   data->in_ext_pos > data->in_ext_len - data->in_ext_pos) {
-				/* Release consumed flight bytes before certificate parsing.
-				 * Keeping the smaller tail avoids retaining two full copies. */
-				size_t remaining = data->in_ext_len - data->in_ext_pos;
-				struct wpabuf *tail = wpabuf_alloc_copy(
-					data->in_ext_data + data->in_ext_pos, remaining);
-				if (tail) {
-					wpabuf_free(data->in_ext_owner);
-					data->in_ext_owner = tail;
-					data->in_ext_data = wpabuf_head_u8(tail);
-					data->in_ext_len = remaining;
-					data->in_ext_pos = 0;
-				}
-			}
-			continue;
-		}
-
-		break;
-	}
-
-	if (copied == len)
-		return copied;
-
-	if (!data->in_data) {
-		if (copied > 0) {
-			wpa_printf(MSG_ERROR, "don't have suffient data\n");
-			return copied;
-		}
+	if (len == 0)
+		return 0;
+	if (data->input == NULL)
 		return MBEDTLS_ERR_SSL_WANT_READ;
-	}
-
-	if (len - copied > wpabuf_len(data->in_data)) {
-		wpa_printf(MSG_ERROR, "don't have suffient data\n");
-		len = copied + wpabuf_len(data->in_data);
-	}
-
-	if (len > copied) {
-		size_t data_len = len - copied;
-		const u8 *head = wpabuf_head_u8(data->in_data);
-
-		if (data_len < wpabuf_len(data->in_data)) {
-			local_buf = wpabuf_alloc_copy(head + data_len,
-						      wpabuf_len(data->in_data) -
-						      data_len);
-			if (local_buf == NULL)
-				return copied > 0 ? copied : MBEDTLS_ERR_SSL_ALLOC_FAILED;
-			os_memcpy(buf + copied, head, data_len);
-			wpabuf_free(data->in_data);
-			data->in_data = local_buf;
-		} else {
-			os_memcpy(buf + copied, head, data_len);
-			wpabuf_free(data->in_data);
-			data->in_data = NULL;
+	available = data->input_len - data->input_pos;
+	if (len > available)
+		len = available;
+	os_memcpy(buf, data->input + data->input_pos, len);
+	data->input_pos += len;
+	if (data->input_pos == data->input_len) {
+		tls_clear_input(data);
+	} else if (data->input_owner &&
+		   data->input_pos > data->input_len - data->input_pos) {
+		/* Release consumed flight bytes before certificate parsing.
+		 * Keeping the smaller tail avoids retaining two full copies. */
+		size_t remaining = data->input_len - data->input_pos;
+		struct wpabuf *tail = wpabuf_alloc_copy(
+			data->input + data->input_pos, remaining);
+		if (tail) {
+			wpabuf_free(data->input_owner);
+			data->input_owner = tail;
+			data->input = wpabuf_head_u8(tail);
+			data->input_len = remaining;
+			data->input_pos = 0;
 		}
-		copied += data_len;
 	}
-
-	return copied;
+	return len;
 }
 
 static int esp8266_hal_x509_blob_is_pem(const unsigned char *blob, size_t len)
@@ -501,9 +456,8 @@ void tls_connection_deinit(void *tls_ctx, struct tls_connection *conn)
 	if (conn == NULL)
 		return;
 
-	/* A failed read may leave an owned input tail. Output belongs to EAP. */
-	wpabuf_free(conn->tls_io_data.in_data);
-	wpabuf_free(conn->tls_io_data.in_ext_owner);
+	/* An interrupted handshake may own an input flight. Output belongs to EAP. */
+	tls_clear_input(&conn->tls_io_data);
 	tls_mbedtls_cleanup(conn->tls);
 	os_free(conn->tls);
 	os_free(conn);
@@ -600,15 +554,13 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 
 	/* data freed by sender */
 	conn->tls_io_data.out_data = NULL;
-	wpabuf_free(conn->tls_io_data.in_data);
-	conn->tls_io_data.in_data = NULL;
-	conn->tls_io_data.in_ext_data = NULL;
-	conn->tls_io_data.in_ext_len = 0;
-	conn->tls_io_data.in_ext_pos = 0;
+	conn->tls_io_data.input = NULL;
+	conn->tls_io_data.input_len = 0;
+	conn->tls_io_data.input_pos = 0;
 	if (wpabuf_len(in_data)) {
-		conn->tls_io_data.in_ext_data = wpabuf_head_u8(in_data);
-		conn->tls_io_data.in_ext_len = wpabuf_len(in_data);
-		conn->tls_io_data.in_ext_pos = 0;
+		conn->tls_io_data.input = wpabuf_head_u8(in_data);
+		conn->tls_io_data.input_len = wpabuf_len(in_data);
+		conn->tls_io_data.input_pos = 0;
 	}
 	ret = tls_handshake_step(conn);
 	if (ret < 0) {
@@ -617,7 +569,7 @@ struct wpabuf * tls_connection_handshake(void *tls_ctx,
 	}
 
 	/* Multiple reads */
-	while (conn->tls_io_data.in_data || conn->tls_io_data.in_ext_data) {
+	while (conn->tls_io_data.input) {
 		ret = tls_handshake_step(conn);
 		if (ret < 0)
 			break;
@@ -667,11 +619,7 @@ end:
 	    ret != MBEDTLS_ERR_SSL_WANT_WRITE &&
 	    ret != MBEDTLS_ERR_SSL_CRYPTO_IN_PROGRESS)
 		conn->failed = 1;
-	conn->tls_io_data.in_ext_data = NULL;
-	conn->tls_io_data.in_ext_len = 0;
-	conn->tls_io_data.in_ext_pos = 0;
-	wpabuf_free(conn->tls_io_data.in_ext_owner);
-	conn->tls_io_data.in_ext_owner = NULL;
+	tls_clear_input(&conn->tls_io_data);
 	return conn->tls_io_data.out_data;
 }
 
@@ -711,15 +659,15 @@ struct wpabuf * tls_connection_decrypt(void *tls_ctx,
 	unsigned char buf[1200];
 	struct wpabuf *out;
 	int ret;
-	wpabuf_free(conn->tls_io_data.in_data);
-	conn->tls_io_data.in_data = wpabuf_dup(in_data);
-	conn->tls_io_data.in_ext_data = NULL;
-	conn->tls_io_data.in_ext_len = 0;
-	conn->tls_io_data.in_ext_pos = 0;
-	if (!conn->tls_io_data.in_data) {
-		return NULL;
-	}
+
+	/* EAP retains the request or reassembly buffer until this call returns.
+	 * Renegotiation is disabled; phase-two reads cannot escape this borrow. */
+	tls_clear_input(&conn->tls_io_data);
+	conn->tls_io_data.input = wpabuf_head_u8(in_data);
+	conn->tls_io_data.input_len = wpabuf_len(in_data);
+	conn->tls_io_data.input_pos = 0;
 	ret = mbedtls_ssl_read(&conn->tls->ssl, buf, 1200);
+	tls_clear_input(&conn->tls_io_data);
 	if (ret < 0) {
 		wpa_printf(MSG_ERROR, "%s:%d, not able to write whole data",
 				__func__, __LINE__);
@@ -911,10 +859,7 @@ int tls_connection_export_key(void *tls_ctx, struct tls_connection *conn,
 
 int tls_connection_shutdown(void *tls_ctx, struct tls_connection *conn)
 {
-	if (conn->tls_io_data.in_data) {
-		wpabuf_free(conn->tls_io_data.in_data);
-	}
-	conn->tls_io_data.in_data = NULL;
+	tls_clear_input(&conn->tls_io_data);
 
 	/* outdata may have dangling pointer */
 	conn->tls_io_data.out_data = NULL;

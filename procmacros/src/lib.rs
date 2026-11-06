@@ -372,100 +372,8 @@ fn eq(attr: &Attribute, name: &str) -> bool {
     attr.style == AttrStyle::Outer && attr.path().is_ident(name)
 }
 
-/// Unified entry point attribute for ESP8266 applications.
-///
-/// # Sync (bare-metal) usage
-///
-/// Replaces `#[entry]` from `xtensa-lx-rt`. The function must return `-> !`:
-///
-/// ```rust,ignore
-/// #[esp8266_hal::main]
-/// fn main() -> ! {
-///     loop { /* ... */ }
-/// }
-/// ```
-///
-/// Initialize an application allocator/runtime explicitly in this synchronous
-/// entry before starting an optional async executor.
-#[proc_macro_attribute]
-pub fn main(args: TokenStream, input: TokenStream) -> TokenStream {
-    if !args.is_empty() {
-        return parse::Error::new(
-            proc_macro2::Span::call_site(),
-            "`#[main]` attribute takes no arguments",
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    let f: ItemFn = match syn::parse(input) {
-        Ok(f) => f,
-        Err(e) => return e.to_compile_error().into(),
-    };
-
-    match expand_main(f) {
-        Ok(output) => output.into(),
-        Err(error) => error.to_compile_error().into(),
-    }
-}
-
-fn expand_main(f: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
-    if f.sig.ident != "main" {
-        return Err(parse::Error::new(
-            f.sig.ident.span(),
-            "`#[main]` must be applied to a function named `main`",
-        ));
-    }
-    if let Some(asyncness) = f.sig.asyncness {
-        return Err(parse::Error::new(
-            asyncness.span(),
-            "async `#[main]` is not supported; use synchronous `#[main]`, initialize Runtime explicitly, then run the optional executor",
-        ));
-    }
-    let valid_signature = f.sig.constness.is_none()
-        && f.sig.abi.is_none()
-        && f.sig.inputs.is_empty()
-        && f.sig.generics.params.is_empty()
-        && f.sig.generics.where_clause.is_none()
-        && f.sig.variadic.is_none()
-        && match f.sig.output {
-            ReturnType::Type(_, ref ty) => matches!(**ty, Type::Never(_)),
-            _ => false,
-        };
-    if !valid_signature {
-        return Err(parse::Error::new(
-            f.span(),
-            "`#[main]` function must have signature `[unsafe] fn() -> !`",
-        ));
-    }
-
-    let attrs = &f.attrs;
-    let body = &f.block;
-    let unsafety = &f.sig.unsafety;
-    let user_main_call = if f.sig.unsafety.is_some() {
-        quote! { unsafe { __esp8266_hal_user_main() } }
-    } else {
-        quote! { __esp8266_hal_user_main() }
-    };
-
-    let output = quote! {
-        #(#attrs)*
-        #unsafety fn __esp8266_hal_user_main() -> ! {
-            #body
-        }
-
-        #[export_name = "main"]
-        pub extern "C" fn __esp8266_hal_main() -> ! {
-            #user_main_call
-        }
-    };
-
-    Ok(output)
-}
-
 #[cfg(test)]
-mod main_tests {
-    use super::expand_main;
+mod tests {
 
     #[test]
     fn interrupt_export_matches_dispatcher_for_all_accepted_case_spellings() {
@@ -489,35 +397,5 @@ mod main_tests {
         }
         let ordinary = syn::parse_quote! { unsafe fn uart() -> ! { loop {} } };
         assert!(super::validate_interrupt_signature(&ordinary).is_ok());
-    }
-
-    #[test]
-    fn entry_contains_only_the_application_call() {
-        let expanded = expand_main(syn::parse_quote! {
-            fn main() -> ! { loop {} }
-        })
-        .unwrap();
-        let file: syn::File = syn::parse2(expanded).unwrap();
-        assert_eq!(file.items.len(), 2);
-        let syn::Item::Fn(entry) = &file.items[1] else {
-            panic!("entry function")
-        };
-        assert_eq!(entry.block.stmts.len(), 1);
-        let syn::Stmt::Expr(syn::Expr::Call(call), None) = &entry.block.stmts[0] else {
-            panic!("entry must call the user function directly")
-        };
-        let syn::Expr::Path(path) = &*call.func else {
-            panic!("direct call")
-        };
-        assert!(path.path.is_ident("__esp8266_hal_user_main"));
-    }
-
-    #[test]
-    fn async_entry_requires_explicit_executor_setup() {
-        let error = expand_main(syn::parse_quote! {
-            async fn main() {}
-        })
-        .unwrap_err();
-        assert!(error.to_string().contains("initialize Runtime explicitly"));
     }
 }

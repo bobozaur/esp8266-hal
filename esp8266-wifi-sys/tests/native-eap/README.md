@@ -19,9 +19,8 @@ device access is involved. Normal Cargo builds do not run this fixture.
 
 The runner compiles current canonical `esp_wpa2_patched.c` and
 `eap_tls_common_patched.c`, plus the pinned SDK's real `eap.c`, EAP message builder and `wpabuf.c`.
-It imports
-the existing native-WPS runner's header/feature manifest; those tests are not
-modified. Host `-fcommon` matches GCC 8's default for the tentative globals in
+The EAP and WPS runners reuse the direct native reproduction manifest's
+header and feature lists. Host `-fcommon` matches GCC 8's default for the tentative globals in
 the pinned SDK's `eap.h`. Other SDK/newlib host warnings remain visible.
 
 Each case runs in a separate process:
@@ -49,6 +48,13 @@ Each case runs in a separate process:
   a later successful request must copy the returned station MAC into the peer.
 - `lifecycle-queue`: commands are copied by value without per-command allocation;
   a failed queue send must roll back admission so later commands run normally.
+- `lifecycle-rx`: each request uses one header/payload allocation. Allocation
+  or queue-post failure releases ownership, and a later request completes cleanly.
+- `tls-backend`: compile the real TLS backend and `wpabuf.c` separately with the
+  same host harness. Controlled mbedTLS BIO reads cover complete, chunked and
+  partial input, fatal and WANT_READ results, output-allocation failure, clearing
+  borrowed pointers before return, and owned-flight compaction failure and teardown.
+  The fixture enters through public connection APIs; no private layout is copied.
 - `lifecycle-suspended`: scheduler-suspended teardown must request worker exit
   without blocking or freeing live state. Initialization cannot overwrite that
   state; ordinary disable later completes cleanup and permits a fresh enable.
@@ -62,7 +68,8 @@ Each case runs in a separate process:
 
 The tracked allocator checks duplicate frees and writes beyond requested sizes.
 Protocol methods, the public MAC getter, BSSID lookup, native transmission,
-TLS handshake and TLS decryption are controlled dependencies. No production function is copied or
+TLS handshake and TLS decryption are controlled dependencies in the request/
+reassembly cases. The backend case controls mbedTLS itself and does not test cryptography. No production function is copied or
 included into the fixture, and no static visibility is changed. A pass does not qualify TLS
 cryptography, native-TX error propagation, real scheduler timing, target ABI,
 stack depth, IRQ/NMI or radio behavior. Lifecycle schedules use host `ucontext`
@@ -72,6 +79,6 @@ allocation checks compare against that persistent ownership baseline. Reassembly
 tests initialize the public internal input counters; they do not test EAP TLS-flag
 decoding.
 
-Use repeated `--case NAME` options to select cases. `--request-source PATH`
-and `--tls-source PATH` select old request or TLS-common implementations for
-explicit negative controls. Canonical headers remain unchanged.
+Use repeated `--case NAME` options to select cases. `--request-source PATH`,
+`--tls-source PATH` and `--backend-source PATH` select old request, TLS-common or
+backend implementations for explicit negative controls. Canonical headers remain unchanged.

@@ -19,8 +19,6 @@
 pub mod critical;
 #[cfg(target_arch = "xtensa")]
 pub mod entry;
-#[cfg(target_arch = "xtensa")]
-pub mod event_group;
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code, unused_imports))]
 pub mod memory;
 #[cfg(target_arch = "xtensa")]

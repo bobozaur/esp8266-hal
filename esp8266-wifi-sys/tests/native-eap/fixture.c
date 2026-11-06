@@ -546,13 +546,14 @@ static void disable_cleanly(void)
     CHECK(tls_contexts == 0 && !method_active && !method_sm);
     CHECK(live_count == credential_baseline);
 }
-static void receive_method(void)
+static int receive_method_result(void)
 {
     u8 address[6] = { 2, 0, 0, 0, 0, 1 };
     u8 frame[] = { 1, IEEE802_1X_TYPE_EAP_PACKET, 0, 5,
                    EAP_CODE_REQUEST, 7, 0, 5, EAP_TYPE_TLS };
-    CHECK(callbacks->wpa2_sm_rx_eapol(address, frame, sizeof(frame), address) == ESP_OK);
+    return callbacks->wpa2_sm_rx_eapol(address, frame, sizeof(frame), address);
 }
+static void receive_method(void) { CHECK(receive_method_result() == ESP_OK); }
 
 static void lifecycle_init(void)
 {
@@ -611,6 +612,27 @@ static void lifecycle_suspended(void)
     enable_initialized();
     disable_cleanly();
 }
+static void lifecycle_rx(void)
+{
+    unsigned before, retained;
+    prepare_lifecycle();
+    enable_initialized();
+    retained = live_count;
+    before = calls;
+    fail_at = calls + 1;
+    CHECK(receive_method_result() == ESP_ERR_NO_MEM);
+    fail_at = 0;
+    CHECK(calls == before + 1 && live_count == retained && method_calls == 0);
+    before = calls;
+    send_fail = 1;
+    CHECK(receive_method_result() != ESP_OK);
+    CHECK(calls == before + 1 && live_count == retained && method_calls == 0);
+    CHECK(event_queue->count == 0);
+    before = calls;
+    receive_method();
+    CHECK(calls == before + 1 && live_count == retained && method_calls == 1);
+    disable_cleanly();
+}
 static void lifecycle_active(void)
 {
     prepare_lifecycle();
@@ -649,6 +671,7 @@ void fixture_tests(const char *name)
     else if (strcmp(name, "empty-output") == 0) empty_output();
     else if (strcmp(name, "lifecycle-init") == 0) lifecycle_init();
     else if (strcmp(name, "lifecycle-queue") == 0) lifecycle_queue();
+    else if (strcmp(name, "lifecycle-rx") == 0) lifecycle_rx();
     else if (strcmp(name, "lifecycle-suspended") == 0) lifecycle_suspended();
     else if (strcmp(name, "lifecycle-active") == 0) lifecycle_active();
     else if (strcmp(name, "lifecycle-credentials") == 0) lifecycle_credentials();

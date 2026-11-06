@@ -461,7 +461,7 @@ impl Sdk {
             return !self.owns_instance;
         }
 
-        // Make every const-generic callback a no-op before teardown begins.
+        // Close callback resource admission before teardown begins.
         // If any SDK callback cannot be unregistered, the singleton remains
         // quarantined so a later resource layout can never be observed by a
         // stale trampoline.
@@ -771,24 +771,16 @@ impl Sdk {
         }
     }
 
-    pub(crate) fn transmit(frame: &[u8]) -> Result<(), DriverError> {
-        super::validate_frame_len(frame.len())?;
-        let ret = unsafe {
-            esp8266_wifi_sys::esp_wifi_internal_tx(
-                esp8266_wifi_sys::WIFI_IF_STA,
-                frame.as_ptr() as *mut core::ffi::c_void,
-                frame.len() as u16,
-            )
+    pub(crate) fn transmit(interface: InterfaceId, frame: &[u8]) -> Result<(), DriverError> {
+        // Interface validates the frame and holds a submission lease through
+        // this call, preventing native teardown while it copies the payload.
+        let interface = match interface {
+            InterfaceId::Station => esp8266_wifi_sys::WIFI_IF_STA,
+            InterfaceId::AccessPoint => esp8266_wifi_sys::WIFI_IF_AP,
         };
-
-        map_internal_tx_result(ret)
-    }
-
-    pub(crate) fn transmit_ap(frame: &[u8]) -> Result<(), DriverError> {
-        super::validate_frame_len(frame.len())?;
         let ret = unsafe {
             esp8266_wifi_sys::esp_wifi_internal_tx(
-                esp8266_wifi_sys::WIFI_IF_AP,
+                interface,
                 frame.as_ptr() as *mut core::ffi::c_void,
                 frame.len() as u16,
             )
@@ -1500,7 +1492,7 @@ unsafe fn rx_callback(
     };
     // The pinned SDK uses the same deferred-release buffer contract for AP
     // and station callbacks. The record releases it after consumption or drop.
-    let record = unsafe { RawRxRecord::from_raw(buffer, len, eb, Some(release_rx_ownership)) };
+    let record = unsafe { RawRxRecord::from_raw(buffer, len, eb, release_rx_ownership) };
     let _ = resources.enqueue_rx(interface, record);
     esp8266_wifi_sys::ESP_OK
 }

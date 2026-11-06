@@ -83,6 +83,9 @@ impl Controller<'_> {
 }
 
 #[cfg(feature = "wifi-esp-now")]
+/// Exclusive ESP-NOW session. Call [`Self::start`] to activate it.
+/// Drop attempts to stop the session; failed cleanup keeps control claimed
+/// until the controller successfully stops the radio.
 pub struct EspNowSession<'a> {
     sdk: &'a mut Sdk,
     resources: &'a Resources,
@@ -158,6 +161,8 @@ impl EspNowSession<'_> {
         self.sdk.remove_esp_now_peer(addr)?;
         Ok(true)
     }
+    /// Submits one packet to a configured peer. Consume [`Self::send_status`]
+    /// before submitting another; successful submission does not establish delivery.
     pub fn send(&mut self, addr: &[u8; 6], payload: &[u8]) -> Result<(), DriverError> {
         self.ensure_active()?;
         if payload.len() > super::ESP_NOW_MAX_PAYLOAD {
@@ -195,6 +200,8 @@ impl Drop for EspNowSession<'_> {
 }
 
 #[cfg(feature = "wifi-promiscuous")]
+/// Exclusive capture session, activated explicitly with [`Self::start`].
+/// Drop attempts to stop capture; failed cleanup requires a successful radio stop.
 pub struct PromiscuousSession<'a> {
     sdk: &'a mut Sdk,
     resources: &'a Resources,
@@ -264,6 +271,9 @@ impl Drop for PromiscuousSession<'_> {
 }
 
 #[cfg(feature = "wifi-wps")]
+/// Exclusive WPS session, activated explicitly with [`Self::start`].
+/// After failure or timeout, call [`Self::stop`] before retrying. Dropping the
+/// session attempts cleanup; failed cleanup requires a successful radio stop.
 pub struct WpsSession<'a> {
     sdk: &'a mut Sdk,
     resources: &'a Resources,
@@ -322,6 +332,10 @@ impl Drop for WpsSession<'_> {
 }
 
 #[cfg(feature = "wifi-smartconfig")]
+/// Exclusive SmartConfig session, activated explicitly with [`Self::start`].
+/// Keep the session alive through station connection, IP setup, and provisioning
+/// acknowledgement. DHCP and acknowledgement policy belong to the application.
+/// Drop attempts cleanup; failed cleanup requires a successful radio stop.
 pub struct SmartConfigSession<'a> {
     sdk: &'a mut Sdk,
     resources: &'a Resources,

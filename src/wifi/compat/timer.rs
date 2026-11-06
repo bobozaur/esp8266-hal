@@ -1,7 +1,13 @@
 //! FreeRTOS-compatible software timer implementation.
 //!
 //! Timers are stored in a bounded array. A command queue wakes the timer
-//! daemon, which dispatches expired callbacks in task context.
+//! daemon, which dispatches expired callbacks in task context. Runtime startup
+//! creates the daemon and queue before any native timer API can run; both remain
+//! alive across Wi-Fi stop and recreation.
+//!
+//! The SDK's separate ETS timer list is driven by FRC2 interrupt 10, which posts
+//! event 16 to the Wi-Fi task. That task runs `ets_timer_proc`; this daemon does
+//! not poll or dispatch the ETS list.
 
 use core::ffi::c_void;
 
@@ -121,32 +127,15 @@ unsafe extern "C" fn timer_daemon_task(_param: *mut c_void) {
 }
 
 /// Create the timer daemon and its command queue before scheduler activation.
+/// Called once by runtime preparation; a failure is followed by rollback.
 pub(crate) unsafe fn create_timer_daemon() -> i32 {
-    unsafe { xTimerCreateTimerTask() }
-}
-
-/// Release the command queue after failed preparation, before tasks can run.
-pub(crate) unsafe fn rollback_startup() {
     unsafe {
-        if !TIMER_QUEUE_HANDLE.is_null() {
-            queue::vQueueDelete(TIMER_QUEUE_HANDLE);
-            TIMER_QUEUE_HANDLE = core::ptr::null_mut();
-        }
-        TIMER_DAEMON_HANDLE = core::ptr::null_mut();
-    }
-}
-
-/// `xTimerCreateTimerTask` — ensure the timer command queue exists, then
-/// create the `Tmr Svc` daemon task.
-#[no_mangle]
-pub unsafe extern "C" fn xTimerCreateTimerTask() -> i32 {
-    unsafe {
-        ensure_timer_queue();
+        TIMER_QUEUE_HANDLE = queue::xQueueCreate(
+            TIMER_QUEUE_LENGTH,
+            core::mem::size_of::<DaemonTaskMessage>() as u32,
+        );
         if TIMER_QUEUE_HANDLE.is_null() {
             return PD_FALSE;
-        }
-        if !TIMER_DAEMON_HANDLE.is_null() {
-            return PD_PASS;
         }
 
         task::xTaskCreate(
@@ -157,6 +146,17 @@ pub unsafe extern "C" fn xTimerCreateTimerTask() -> i32 {
             TIMER_DAEMON_PRIORITY,
             &raw mut TIMER_DAEMON_HANDLE,
         )
+    }
+}
+
+/// Release the command queue after failed preparation, before tasks can run.
+pub(crate) unsafe fn rollback_startup() {
+    unsafe {
+        if !TIMER_QUEUE_HANDLE.is_null() {
+            queue::vQueueDelete(TIMER_QUEUE_HANDLE);
+            TIMER_QUEUE_HANDLE = core::ptr::null_mut();
+        }
+        TIMER_DAEMON_HANDLE = core::ptr::null_mut();
     }
 }
 
@@ -174,8 +174,6 @@ pub unsafe extern "C" fn xTimerCreate(
     callback: TimerCallback,
 ) -> *mut c_void {
     unsafe {
-        ensure_timer_queue();
-
         critical::vPortEnterCritical();
 
         let Some(idx) = find_free_slot() else {
@@ -214,7 +212,6 @@ pub unsafe extern "C" fn xTimerGenericCommand(
         if timer.is_null() {
             return PD_FALSE;
         }
-        ensure_timer_queue();
         if TIMER_QUEUE_HANDLE.is_null() {
             return PD_FALSE;
         }
@@ -334,17 +331,6 @@ unsafe fn find_free_slot() -> Option<usize> {
             }
         }
         None
-    }
-}
-
-unsafe fn ensure_timer_queue() {
-    unsafe {
-        if TIMER_QUEUE_HANDLE.is_null() {
-            TIMER_QUEUE_HANDLE = queue::xQueueCreate(
-                TIMER_QUEUE_LENGTH,
-                core::mem::size_of::<DaemonTaskMessage>() as u32,
-            );
-        }
     }
 }
 
